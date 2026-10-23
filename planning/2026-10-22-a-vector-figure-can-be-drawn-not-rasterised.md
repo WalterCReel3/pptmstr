@@ -2,7 +2,8 @@
 
 **Dated:** 2026-10-22 ·
 **Status:** a record of what was decided and built (§1, §2), and a recommendation
-that is **not** built and not declared as tasks (§3 to §6). Native Mermaid and the
+that is **not** built and not declared as tasks (§3 to §6), and the scope the
+operator set aside for the next phase (§7), also not declared. Native Mermaid and the
 raster removal are committed (`da1e0d8`, `a48ddb1`, `d206ca8`, `3480b34`), and
 `make check` was green on `3480b34` (board task `native-gate-2`). No C++ has been
 written for any of this. Nothing here has run on macOS, on a real GPU or at density
@@ -401,3 +402,96 @@ These are relayed from the board.
 - **Stale resvg comments.** `pptmstr/figures/sanitise.py` still cites resvg_py
   0.5.0 as the measurement source for rules now inert for the display list
   (`native-gate-2`, `raster-removal`).
+
+## 7. Next phase
+
+**The operator's call (2026-10-22), paraphrased** [relayed: board task
+`next-phase-note`]: the items below are set aside for the next phase of figure
+work and are not to be done now. This section records their scope, their
+evidence and the question each leaves open. It decides none of them, and none is
+declared as a task.
+
+1. **C++ performance work.** Everything §2 to §6 recommends, held together:
+   - **The six probes** of §6 (A to F). Their rule stands: no C++ until one names
+     it.
+   - **The draw loop and the resize rebuild.** The rebuild is the cost that still
+     breaks a frame: up to 59 ms for merman's largest flowchart (105 nodes), and
+     under 200 ms for the worst list that passes every receive check [relayed:
+     `native-cost`, `text-caps`; §2]. The per-frame draw fits today and grows with
+     the figure count (§2, probe C).
+     *Open:* whether either needs C++, and if so where it lives (§3, inside
+     imtypeset or beside it).
+   - **Collector settling.** `app._settle_gc` took the 29-127 ms pauses down to a
+     worst gen-2 pause of 2.5 ms, after a simulated hour, headless [relayed:
+     `native-cost`]. *Open:* whether it holds in a real session. Moving the rebuild
+     to C++ would also take most `ImVec2` churn out of Python (§3) [inferred].
+   - **Labels through imtypeset** (probe D). *Open:* cost per frame and the look
+     beside prose, and so whether imtypeset is asked for a draw scale (§3,
+     request 3).
+   - **The imgui-bundle 1.93 bump for its strokes** [op-run: `probe-bundle193.md`
+     §3; §3 above]. *Open:* the bump itself, which §3 judges is to be decided on the
+     stroker alone, and Mermaid needs no stroker. Its cost is three pins, two
+     library releases and re-photographing every pane.
+2. **What a click on a Mermaid node does.** The hover and hit-test are built. A
+   click calls `host.node_clicked` with the figure's sha and the node's id, and
+   that only logs (`_log_click`) [read]. *Open:* the action: select a board task,
+   open a file, or something else. This is the operator's decision (§6; open since
+   §11 of the 2026-10-18 record).
+3. **The figure-preview tool.** Its design is settled: auto-approved on every rung
+   (PD1), rendered in a second worker process of its own (PD2), and pipelined
+   through that worker's queue rather than counted per session (PD3)
+   [relayed: `notes/vector-rendering/preview-options.md`, "Decided, 2026-10-21";
+   task `preview-eval`]. PV1 passed: in CLI 2.1.301 an image returned by an
+   in-process `pptmstr` MCP tool reaches the model, which named a red square's
+   colour and digit [relayed: `notes/vector-rendering/probe-pv1.md`, operator-run
+   `cmd-20261021T204907Z-3eddeacc39e3`; task `preview-pv1`]. Per the operator, the
+   tool now returns the native drawing, not a PNG. Nothing of the tool is built
+   [read: no bus tool in `pptmstr/`]. *Open:*
+   - **The CLI's saved copies.** The CLI writes every MCP image to
+     `~/.claude/projects/<cwd>/<session>/tool-results/*.png`, outside pptmstr's
+     cleanup, and tells the model the path. A model with `Read` can then reopen it
+     outside the tool's bound [relayed: `preview-pv1`, finding 2 and builder-41's
+     note]. Whether the CLI ever prunes that directory was not checked.
+   - **A transcript placeholder for image blocks.** `transcript.cap_output` keeps
+     the `repr` of the result, base64 included, up to 1 MiB in
+     `ToolResult.output`. A real preview would put tens of KB into every tool
+     entry unless an image block is replaced by a placeholder [relayed:
+     `preview-pv1`, finding 3].
+   - **How the native drawing reaches the model as an image** [judgement: a gap
+     this record found, not a question the operator posed]. An MCP image block
+     carries encoded bytes, and the raster stack that would have made them is
+     removed with no fallback (§1). The design record's §10.6 in the 2026-10-18
+     record still describes a PNG from the render child, and the
+     fence text still tells sessions not to preview with other tools.
+4. **App-wide paragraph spacing.** Separate paragraphs sit about 5 px apart, so two
+   paragraphs read almost as consecutive lines [relayed: builder-53's note on
+   task `math-spacing`, from `shots/math-size` and `shots/math-spacing`]. That note
+   attributes the gap to imscribe's default theme, PARAGRAPH `space_below` of 0.55
+   × body. The tree does not agree: pptmstr's own theme overrides the paragraph's
+   `space_below` to `round(em * _PARAGRAPH_GAP_EM)`, with `_PARAGRAPH_GAP_EM =
+   0.45`, in `pptmstr/ui/typeset/themes.py` (`_build`) [read]. *Open:* which
+   theme the screenshots were set in, and so whether the knob is pptmstr's
+   constant or imscribe's default. Then the gap wanted. Any change moves every
+   typeset pane, not only figures.
+5. **The "needs you" panel's ImGui errors.** The gate's pytest output carries
+   `[imgui-error]` lines for window 'needs you', "Missing End()" and "Missing
+   PopID()", after the test summary [relayed: `native-gate-2`]. *Open:* the cause.
+   Nobody has traced it.
+6. **Gantt never draws.** Mermaid's own documentation example of a gantt chart is
+   refused in the render child with "mermaid not drawable: a coordinate is out of
+   range", and so was every generated gantt tried, on merman 0.9.1 [relayed:
+   `text-caps`]. *Open:* the cause. It may be merman's layout or pptmstr's
+   coordinate bound, and nobody has investigated.
+7. **The formula-size reading.** A display formula is set at 2x by default and
+   steps down to fit, with 1x as the floor [relayed: `math-size`]. The operator's
+   words, "twice as large as a floor", can also mean 2x as the minimum
+   [relayed: builder-52's note on `math-size`]. *Open:* which the operator meant.
+   A minimum of 2x would make a formula wider than the pane scroll further than
+   it does today, which `math-size`'s must-not-break line forbade. Per that note,
+   the change would be to `FORMULA_SCALE` and the lower clamp in
+   `views.formula_scale`.
+8. **The source/figure toggle.** The original plan's side-by-side source and figure
+   (the 2026-10-18 record, §4, row 2: a two-cell table inside `Hosted.draw` behind a
+   toggle) was never built and is not declared [read: that record, §4 and §8].
+   *Open:* whether it is still wanted now that figures draw natively, and the
+   selection limit §4 names: the source half is one atom to a drag.
