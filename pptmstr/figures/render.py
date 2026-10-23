@@ -215,6 +215,12 @@ class _Child:
     ``proc`` is set by that thread once the process has started. ``abandoned`` is set
     by the frame thread when it gives the child up; whichever of the two sees both
     kills the process, so a child given up while it is starting is killed too.
+
+    ``ending`` is set by the I/O thread before it hands back a result after which it
+    serves nothing more. The reason it stops is queued only later, on its way out,
+    so the frame thread reads ``ending`` with that result to drop the child at once:
+    a request dispatched to it in between would be failed for the previous request's
+    reply.
     """
 
     requests: queue.SimpleQueue[_Request | None] = field(default_factory=queue.SimpleQueue)
@@ -223,6 +229,7 @@ class _Child:
     ready: bool = False
     busy_since: float | None = None
     abandoned: bool = False
+    ending: bool = False
     thread: threading.Thread | None = None
 
     def abandon(self) -> None:
@@ -350,6 +357,8 @@ class Renderer:
                     self._inflight = None
                     out.append(Failed(flying.key, answer, True))
                 continue
+            if child.ending:
+                self._drop_child()
             if flying is None or seq != flying.seq:
                 continue
             self._inflight = None
@@ -452,10 +461,12 @@ def _serve(
             conn.send_bytes(json.dumps([_MERMAID, request.source]).encode("ascii"))
             result, broken = _answer(conn, request)
             child.busy_since = None
-            answers.put((child, request.seq, result))
             if broken is not None:
                 # What follows on the pipe can no longer be told apart: replaced.
+                child.ending = True
                 reason = f"render process replaced: {broken}"
+            answers.put((child, request.seq, result))
+            if broken is not None:
                 return
     except EOFError:
         reason = "render process died"

@@ -15,8 +15,10 @@ import json
 import multiprocessing
 import os
 import pickle
+import queue
 import signal
 import sys
+import threading
 import time
 from collections.abc import Hashable
 from dataclasses import replace
@@ -219,17 +221,53 @@ def test_lay_out_and_poll_return_at_once_while_a_child_starts_and_works() -> Non
         renderer.shutdown()
 
 
-def test_lay_out_and_poll_do_not_raise_on_nonsense() -> None:
-    renderer = Renderer(fonts=lambda: (_ for _ in ()).throw(OSError("no fonts")))
+def _no_fonts(before: threading.Event | None = None) -> Fonts:
+    if before is not None:
+        before.wait()
+    raise OSError("no fonts")
+
+
+def _io_thread(renderer: Renderer) -> threading.Thread:
+    """
+    The I/O thread of ``renderer``'s current child. Joining it is the barrier these
+    tests order on: it puts its last answer on the queue before it exits.
+    """
+    child = renderer._child
+    assert child is not None and child.thread is not None
+    return child.thread
+
+
+@pytest.mark.parametrize("answered_before_first_poll", [True, False])
+def test_lay_out_and_poll_do_not_raise_on_nonsense(answered_before_first_poll: bool) -> None:
+    """
+    A font failure on the I/O thread is the request's one ``Failed``, whichever poll
+    it arrives in. Each of the two orders is forced: the first by joining the I/O
+    thread before polling, the second by holding the font lookup until after.
+    """
+    hold = None if answered_before_first_poll else threading.Event()
+    renderer = Renderer(fonts=lambda: _no_fonts(hold))
     try:
         renderer.lay_out(["unhashable"], "x")  # type: ignore[arg-type]
         renderer.lay_out("nofonts", "x")
-        reasons = [r for r in renderer.poll() if isinstance(r, Failed)]
-        assert any("layout not started" in r.reason for r in reasons)
-        result = wait_for(renderer, "nofonts")
-        assert isinstance(result, Failed)
-        assert "no fonts" in result.reason
+        io = _io_thread(renderer)
+        if hold is None:
+            io.join()
+        first = renderer.poll()
+        assert any(isinstance(r, Failed) and "layout not started" in r.reason for r in first)
+        answers = [r for r in first if r.key == "nofonts"]
+        if hold is not None:
+            assert answers == []
+            hold.set()
+            answers.append(wait_for(renderer, "nofonts"))
+        io.join()
+        answers += [r for r in renderer.poll() if r.key == "nofonts"]
+        assert len(answers) == 1
+        assert isinstance(answers[0], Failed)
+        assert "no fonts" in answers[0].reason
+        assert answers[0].transient
     finally:
+        if hold is not None:
+            hold.set()
         renderer.shutdown()
 
 
@@ -421,6 +459,60 @@ def test_a_reply_that_is_not_well_formed_is_that_figures_failure_and_never_unpic
             assert (renderer.pid != pid) is replaced, source
         assert not marker.exists(), "the GUI process unpickled what the child sent"
     finally:
+        renderer.shutdown()
+
+
+class _HeldAfter:
+    """
+    The renderer's answer queue, holding the I/O thread that hands back the result
+    for ``key`` until ``release``, just after it does: the frame thread then sees
+    that result while the child's process still runs and before the reason it is
+    ending, the order a scheduler gives only now and then.
+    """
+
+    def __init__(self, key: Hashable) -> None:
+        self._key = key
+        self._answers: queue.SimpleQueue[Any] = queue.SimpleQueue()
+        self._release = threading.Event()
+
+    def put(self, answer: Any) -> None:
+        self._answers.put(answer)
+        if answer[1] is not None and answer[2].key == self._key:
+            self._release.wait()
+
+    def get_nowait(self) -> Any:
+        return self._answers.get_nowait()
+
+    def release(self) -> None:
+        self._release.set()
+
+
+def test_a_request_after_a_reply_that_ends_its_child_goes_to_a_new_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A reply the pipe cannot be read past is its figure's failure and ends the child.
+    The next request goes to a new child and is laid out, even when the old child's
+    reason for stopping reaches the frame thread only after that request went out.
+    """
+    monkeypatch.setattr(render, "MAX_REPLY_BYTES", 10_000)
+    renderer = Renderer(fonts=lambda: Fonts((), "", ""), child=_hostile_child)
+    held = _HeldAfter("too long")
+    renderer._answers = held  # type: ignore[assignment]
+    try:
+        renderer.lay_out("good", "good")
+        assert isinstance(wait_for(renderer, "good"), Laid)
+        pid = renderer.pid
+        renderer.lay_out("too long", "too long")
+        assert wait_for(renderer, "too long") == Failed(
+            "too long", "render reply refused: a reply over 10000 bytes"
+        )
+        renderer.lay_out("next", "good")
+        held.release()
+        assert isinstance(wait_for(renderer, "next"), Laid)
+        assert renderer.pid != pid
+    finally:
+        held.release()
         renderer.shutdown()
 
 
