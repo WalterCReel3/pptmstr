@@ -5,8 +5,8 @@ sanitiser (``sanitise``).
 **merman runs only in the render child** (``render.child_main``), never on the GUI
 thread: its cost per diagram was measured only on one flowchart (7.6-10 ms), and a
 hostile source could cost much more. ``layout`` refuses to run anywhere else. The child
-hands back the sanitised SVG and its natural size, and from there the host rasterises
-and draws it (``host.FigureWidget``).
+parses the sanitised SVG into a bounded display list (``displaylist.from_mermaid``) and
+hands back that, which the pane draws natively (``host.FigureWidget``).
 
 **merman is an optional extra** (``pip install 'pptmstr[mermaid]'``). Its Linux wheel is
 ``manylinux_2_35`` and pptmstr's floor is glibc 2.28, so a required dependency would
@@ -27,10 +27,11 @@ overflow visibly. An edge label's background stays merman's narrower width.
 (``without_directives``), every one, wherever it stands: a model-written ``init``
 is configuration of the renderer, and the renderer is pptmstr's to configure. This
 closes renderer configuration, not author styling: a diagram's own ``style``,
-``classDef`` and ``linkStyle`` lines are content and still paint what they name.
+``classDef`` and ``linkStyle`` lines are content and still paint what they name
+(``displaylist.authored_colours``), under the pane's legibility guard.
 Measured on merman 0.9.1, resvg-safe, 2026-10-21, on a three-node flowchart:
 ``theme: dark`` changes every fill and ink of the output (ten times the dark
-pixels), where the host draws every figure on a light card (``host.BACKDROP``); a
+pixels), and pptmstr's theme, not the diagram's, is what colours a figure; a
 ``fontFamily`` naming a face resvg lacks is carried into the SVG and drawn in the
 fallback face, with the same ink; ``htmlLabels: true`` is overridden by the
 pipeline (no ``<foreignObject>``); ``maxTextSize`` and ``maxEdges``, tiny or huge,

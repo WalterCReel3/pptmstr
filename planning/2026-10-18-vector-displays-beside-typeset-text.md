@@ -12,7 +12,10 @@ built except its source/figure toggle, which is not declared; the
 its fixes, the figure card among them (task `fence-fix`, 2026-10-21), are in
 the tree and not committed. Slices 3 and 5 are not started. Probes T1,
 M1, R2 and R1's hostile half ran on 2026-10-20 and their decisions are written in
-below. Nothing has run on macOS or at a density above the operator's own ·
+below. Mermaid is now drawn natively from a bounded display list, with no raster
+and no card, and a diagram's own colours drawn under a legibility guard (§11,
+task `native-mermaid`, 2026-10-22, in the tree and not committed). Nothing has run
+on macOS or at a density above the operator's own ·
 **Origin:** the operator, at launch, 2026-10-18 (§1) ·
 **Evidence:** four research notes in `notes/vector-rendering/`
 (`imscribe-seams.md`, `svg-renderers.md`, `mermaid.md`, `data-graphs.md`), the
@@ -786,6 +789,9 @@ it does not wait for the worker:
   (`shots/fence-backdrop/check.py`, git-ignored): every label, arrow and edge
   of both diagrams and the svg's dark strokes read clearly on the card in both
   themes; the formula reads in the theme's ink in both [ran, fence-fix].
+  **Superseded for Mermaid on 2026-10-22 (§11):** a diagram is drawn natively
+  on the pane, in the theme's colours, with no card and no padding. The card's
+  code stays, unused, in `host.RasterFigure` until a separate task removes it.
 - **Known flaw: an edge label's background keeps merman's narrower width.**
   The post-pass opens the nested label boxes, not the rectangles merman draws
   behind edge labels, which are sized by its own text metrics; a label in a
@@ -1688,3 +1694,152 @@ Mermaid route also drops notes: `render._serve` rebuilds `Laid` as
 | PD2 | operator decision | A second render child for previews (recommended) or routing through the frame thread. | process count, memory budget |
 | PD3 | operator decision | A per-session bound on preview calls, and which roles are offered the tool. | abuse bound |
 | PD4 | lead decision | The fence text's "preview with other tools" line, and the 4-character headroom, if the tool lands. Ties to 10.5's floor/skill split. | `fences._guidance` |
+
+---
+
+## 11. Mermaid drawn natively, in the theme's colours and the author's
+
+**Decided by the operator, 2026-10-22** [relayed from the board's
+`displaylist-proto` and `native-mermaid` specifications]:
+
+- Mermaid is drawn natively in the pane from merman's layout, with no
+  rasterising, so that a diagram is crisp at every width, follows the theme and
+  can be hit-tested. The raster stack (the render child's raster, resvg,
+  Pillow, numpy, the texture cache and the light card) may go once this is
+  proven.
+- **Author colours are honoured.** The colours a diagram's own `style`,
+  `classDef` and `linkStyle` lines set are drawn. Everything else takes the
+  theme's roles, so a diagram that sets no colours follows the theme entirely.
+
+**Why, as the record reads it.** The probe (`notes/vector-rendering/probe-displaylist.md`)
+showed the five families and the 21-node graph drawn natively with the same
+structure as the raster, sharp on every resize frame, free on a theme switch,
+and hit-testable. The light card it replaces was the cost §3.6 named: a bright
+rectangle in the dark theme. Honouring the author's colours keeps what
+`mermaid.py` already held, that those lines are content and not renderer
+configuration (directives and front-matter `config` stay stripped); drawing
+only roles would have dropped them silently. merman's own pastel palette is not
+the author's and is not drawn.
+
+**What was built** [ran: tests and a real window, below]:
+
+- `pptmstr/figures/displaylist.py`: the schema (frozen dataclasses), every
+  bound from the probe note's table, the SVG parser, the author-colour reader,
+  the legibility functions and the pure geometry helpers. No ImGui.
+- `render._laid` runs merman, the post-pass, `sanitise()` and then
+  `displaylist.from_mermaid` in the render child, and answers the display list
+  (its natural size inside it), not SVG or pixels. The I/O thread re-checks
+  every bound and type (`render.received`, `displaylist.validate`) before the
+  frame thread sees it; a list out of bounds is a kept failure, shown as the
+  fence's source under its reason. Mermaid no longer depends on the child
+  having loaded resvg.
+- `host.FigureWidget` draws the list in the existing `Hosted` block: polylines
+  and convex or concave fills on the window's draw list, labels in the pane's
+  prose face (`typeset.imfont`), culled against the clip. Label sizes are set
+  for the face's em: the child reads the prose face's hhea metrics with
+  fontTools (`render.em_ratio`, 0.853 for Roboto, the number imscribe gives).
+- **Height.** The placeholder-then-height rule and the held layouts are kept;
+  the height is the list's natural aspect at the drawn width, with no card
+  padding. A re-hosted figure answers its height at once.
+- **Hover and click.** The node under the pointer (smallest box wins) has its
+  outline and every edge that ends on it drawn in the focus colour. A click
+  calls `host.node_clicked(sha, node_id)`, which only logs. **What a click
+  does is a later operator decision.** Hover is tested without an ImGui item,
+  so the pane's own text selection still gets the drag.
+- **Resize.** Geometry is built once per drawn scale. When the width changes,
+  at most one figure a frame rebuilds, the one that has waited longest; the
+  others draw their last geometry scaled to the new width (a vertex pass,
+  still vectors). A figure drawn for the first time (scrolled into view) is
+  built that frame and takes the frame's turn, because it has nothing to stand
+  in for it.
+- **The raster path stays in the tree, unused for Mermaid** (`host.RasterFigure`,
+  `_Textures`, `render.submit`, `rasterise`): a separate task removes it after
+  review. The fence table's `needs` for mermaid still names the raster
+  distributions; that goes with it.
+
+**How the author's colours are told from merman's.** By the source, not the
+SVG. merman writes its own palette into the same markup, inline as well as in
+its stylesheet, and an author's `style` comes out as an inline declaration,
+sometimes with `!important` and sometimes without (class diagrams). So a
+colour is the author's only where both hold: an inline `style` declaration
+sets it on a node's, cluster's or edge's shape, or on a label's text, and the
+source's `style`/`classDef`/`linkStyle` lines name that colour for that
+property (`fill`, `stroke`, or `color` for text). An arrowhead takes its
+edge's colour. Tested on synthetic SVG and on merman 0.9.1's own output: no
+style lines leaves every item on roles, in all five families; `STYLED` puts
+colours on exactly the two nodes, the edge, its marker and the two labels it
+names (`tests/test_figure_displaylist.py`).
+
+**The legibility guard.** Against the colour actually behind the figure (the
+window's, or a child window's own background):
+
+- An author's text colour, or the theme's text over an author's fill, under
+  **4.5:1** against its ground (the author's fill, else the pane) is moved to
+  the nearest colour that reaches it: mixed toward white or black, whichever
+  needs less, by the least amount. 4.5:1 is WCAG's AA minimum for normal-size
+  text. The 3:1 WCAG allows "large" text was not chosen, because diagram labels
+  are set at 12 to 16 px and are often scaled down to fit, well under WCAG's
+  large size. 4.5:1 is always reachable, since black or white reaches 4.58:1
+  against any colour.
+- An author's stroke (and an arrowhead, which is its line's colour) under
+  **3:1** against the pane is moved the same way. 3:1 is WCAG 2.1's minimum
+  for graphical objects that carry meaning (1.4.11).
+- **A fill is never changed.** Each adjustment is logged once per figure and
+  theme.
+
+**The probe's two defects are fixed:**
+
+- **Badges.** A sequence-number badge rides on a zero-length line whose
+  attribute says stroke width 0 and whose stylesheet (`#merman line`) says 2,
+  and the marker is in stroke-width units. The parser now reads `stroke-width`
+  from the stylesheet's simplest rules (root id plus one class or one element)
+  to scale markers as resvg does, so the badge is 24 units across, not 12.
+- **The cylinder** is one open path with no fill attribute, which merman's
+  stylesheet fills. An open node path is now filled unless it says
+  `fill="none"`. It is filled as two loops (top ellipse, then body), because as
+  one polygon it touches itself.
+
+**Pinned.** `tests/test_figure_displaylist.py` holds per-role primitive counts,
+node ids, edge ends and label texts for the five families and the 21-node
+graph, from merman 0.9.1, and fails under any other version with a message to
+re-baseline after a window check. The numbers came from this parser and only
+detect change. The screenshots below are what said the drawing is right.
+
+**Real-window check, 2026-10-22** [ran]:
+
+- **How it ran:** Xvfb, 1600x1400, llvmpipe, through the production path
+  (`typeset.markdown`, the views' dispatcher, `figures.host`, the real render
+  child). The driver is `shots/native-mermaid/check.py`, git-ignored as
+  `shots/fence-backdrop/check.py` was. 1 922 frames, exit 0, no ImGui
+  assertion in the log.
+- **Shots, all read:** `shots/native-mermaid/{flowchart,sequence,class,state,er,board21}-{dark,light}.png`,
+  `clash-{dark,light}.png`, `hover-board21-{dark,light}.png`,
+  `resize-mid-drag.png` and `resize-300.png`.
+- **Families:** every family and the 21-node graph drew in both themes with no
+  failure. Badges are at the raster's size, the cylinder is filled, and edge
+  labels' knockouts match the pane.
+- **Authored colours:** a diagram whose classDef, style and linkStyle are dark
+  on the dark theme had its two strokes and two labels moved, and the log said
+  so. In the light theme the yellow linkStyle edge and its arrowhead were moved
+  to olive. Authored fills were drawn as written in both themes.
+- **Hover:** the graph's node of highest degree (`flowchart-t3-3`, 9 edges)
+  lit with its edges. A click reported that id.
+- **Resize:** five families dragged 900 to 300 to 900 px over 30 frames each.
+  At most one rebuild a frame. Two frames carried a rebuild plus a first build
+  of a figure entering view. No frame drew a figure without geometry.
+  Figure time per frame had a median of 3.2 to 3.4 ms. The worst frame was one
+  29.6 ms rebuild (not explained; glyph baking for a new size is the likeliest
+  cause, unconfirmed). A theme switch rebuilt nothing.
+
+**Not run, and open:**
+
+- Density 2, a real GPU, and macOS.
+- A fence growing token by token (every fence here was committed whole).
+- Cold start of the child, separated from warm.
+- What a click on a node should do: operator decision.
+- Removing the raster path, and the mermaid row's `needs`: a separate task.
+  `render.em_ratio` reads font metrics with fontTools, which the raster path
+  also loads. Removing fontTools with it would need another way to read the
+  prose face's em.
+- The per-frame draw loop and the rebuild remain Python, as the probe measured
+  them. C++ for them is still the survey's plan.

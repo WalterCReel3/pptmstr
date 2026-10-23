@@ -16,5 +16,5 @@ The session prompt names the fences pptmstr draws in this session. A fence below
 
 - Write the fence; the pane is the display. Unless asked for an export, do not render to a file, look for a converter, or preview with other tools.
 - For nodes and edges (dependencies, flows, sequences, states, entities) use ```mermaid, which lays them out. Never compute a graph layout by hand.
-- A diagram sits on a near-white card, scaled down to fit the pane: a colour it is styled with (classDef, style) is read against white.
+- A diagram is drawn in the pane's own colours, which follow the theme, dark or light, and scaled down to fit the pane. A colour set with style, classDef or linkStyle is drawn as written against the pane, except that text or a line too faint against what is behind it is drawn lighter or darker until it is legible.
 - These rules win over a skill's general advice.

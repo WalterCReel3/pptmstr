@@ -34,10 +34,17 @@ and code in. ``serif_family`` is the one that carries a name that matches nothin
 thread needs RGBA for a texture.
 
 **Mermaid is laid out in the same child** (``lay_out``, ``mermaid.layout``), so merman
-never runs on the frame thread either. The child answers a ``Laid``: the sanitised
-SVG and its natural size, which the host then rasterises through ``submit`` as it
-would an svg fence's. A layout is one more request in the same queue, under the same
-timeout and the same failure kinds.
+never runs on the frame thread either, and so is the SVG parsed into what the pane
+draws (``displaylist.from_mermaid``): the child answers a ``Laid``, a bounded display
+list with the diagram's natural size, and no pixels. The I/O thread checks every
+bound of it again (``displaylist.validate``) before the frame thread sees it. A
+layout is one more request in the same queue, under the same timeout and the same
+failure kinds. It does not need the rasteriser: a child that could not load resvg
+still lays diagrams out.
+
+**The raster path stays, and Mermaid does not use it.** ``submit`` and ``rasterise``
+are what slice 1's svg fence drew through; nothing submits to them now, and a
+separate task removes them once native Mermaid has been reviewed.
 """
 
 from __future__ import annotations
@@ -59,6 +66,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from typing import Any
 
+from .displaylist import DisplayList, validate
 from .sanitise import MAX_NATURAL_PIXELS, Sanitised
 
 RENDER_TIMEOUT_S = 10.0
@@ -192,12 +200,14 @@ class Failed:
 class Laid:
     """
     A ```` ```mermaid ```` source laid out for ``key``: merman's SVG after
-    ``mermaid.visible_labels`` and ``sanitise``, with its natural size. Made in the
-    child; a refusal comes back as a ``Failed`` that is not transient.
+    ``mermaid.visible_labels`` and ``sanitise``, parsed into the display list the
+    pane draws, which carries the natural size. Made in the child and checked
+    against every bound on the I/O thread; a refusal or a list out of bounds comes
+    back as a ``Failed`` that is not transient.
     """
 
     key: Hashable
-    sanitised: Sanitised
+    display: DisplayList
 
 
 Result = Rendered | Laid | Failed
@@ -537,7 +547,7 @@ def _serve(
                     request.key, head[1], head[2], rgba, request.px_width, request.scale
                 )
             elif head[0] == "laid":
-                result = Laid(request.key, Sanitised(str(head[1]), float(head[2]), float(head[3])))
+                result = received(request.key, head[1])
             else:
                 result = Failed(request.key, str(head[1]))
             child.busy_since = None
@@ -560,6 +570,18 @@ def _serve(
                 reason = _death(-(proc.exitcode or 0), memory_limit)
         if not child.abandoned:
             answers.put((child, None, reason))
+
+
+def received(key: Hashable, sent: object) -> Laid | Failed:
+    """
+    What the I/O thread makes of a display list the child sent for ``key``: a
+    ``Laid`` if every bound and type holds (``displaylist.validate``), else a failure
+    that is not transient, since the same diagram would be sent the same again.
+    """
+    problem = validate(sent)
+    if problem is None and isinstance(sent, DisplayList):
+        return Laid(key, sent)
+    return Failed(key, f"display list refused: {problem}")
 
 
 def _death(signum: int, memory_limit: int | None) -> str:
@@ -619,9 +641,10 @@ def child_main(conn: Connection, fonts: Fonts, memory_limit: int | None = None) 
     The render process: load the fonts once, then answer requests until the pipe closes.
 
     It says ``("ready", None)`` or ``("ready", reason)`` once. A child that could not
-    load what it needs answers every request with that reason rather than exiting,
-    so a missing library is one failure per figure and not a restart per frame.
-    Its address space is held to ``memory_limit`` first (``MEMORY_LIMIT_BYTES``).
+    load what rasterising needs answers every raster request with that reason rather
+    than exiting, so a missing library is one failure per figure and not a restart
+    per frame; it still lays Mermaid out, which needs none of it. Its address space
+    is held to ``memory_limit`` first (``MEMORY_LIMIT_BYTES``).
     """
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _limit_memory(memory_limit)
@@ -633,17 +656,18 @@ def child_main(conn: Connection, fonts: Fonts, memory_limit: int | None = None) 
             importlib.import_module(module)
     except Exception as exc:
         failure = f"renderer unavailable: {_one_line(exc)}"
+    ratio = em_ratio(fonts.sans)
     conn.send(("ready", failure))
     while True:
         try:
             kind, width, svg = conn.recv()
         except EOFError:
             return
+        if kind == _MERMAID:
+            conn.send(_laid(svg, ratio))
+            continue
         if failure is not None:
             conn.send(("err", failure))
-            continue
-        if kind == _MERMAID:
-            conn.send(_laid(svg))
             continue
         try:
             w, h, rgba = rasterise(svg, width, options)
@@ -654,20 +678,55 @@ def child_main(conn: Connection, fonts: Fonts, memory_limit: int | None = None) 
         conn.send_bytes(rgba)
 
 
-def _laid(source: str) -> tuple[Any, ...]:
+def _laid(source: str, ratio: float = 1.0) -> tuple[Any, ...]:
     """
-    The child's answer to a mermaid request: ``("laid", svg, width, height)`` or
+    The child's answer to a mermaid request: ``("laid", display_list)`` or
     ``("err", reason)``. merman is imported here, on the first diagram, and only here.
     """
+    from .displaylist import Refusal, from_mermaid
+
     try:
         from . import mermaid
 
         outcome = mermaid.layout(source)
     except Exception as exc:
         return ("err", f"mermaid layout failed: {_one_line(exc)}")
-    if isinstance(outcome, Sanitised):
-        return ("laid", outcome.svg, outcome.width, outcome.height)
-    return ("err", outcome.reason)
+    if not isinstance(outcome, Sanitised):
+        return ("err", outcome.reason)
+    try:
+        return ("laid", from_mermaid(source, outcome.svg, ratio))
+    except Refusal as refusal:
+        return ("err", f"mermaid not drawable: {refusal}")
+    except Exception as exc:
+        return ("err", f"mermaid not drawable: {_one_line(exc)}")
+
+
+DEFAULT_EM_RATIO = 2048 / 2400
+"""
+The em of the prose face pptmstr ships (Roboto: 2048 units to the em, hhea ascent
+1900 and descent -500) per unit of ImGui font size: what ``em_ratio`` answers when
+the face cannot be read.
+"""
+
+
+def em_ratio(path: str) -> float:
+    """
+    The face at ``path``'s em per unit of ImGui font size. ImGui sizes a font by its
+    hhea ascent less descent, and SVG's ``font-size`` is an em, so a label set at
+    merman's number would come out smaller than merman laid it out for. The same
+    number imscribe's ``em_size_for_pixel_height`` gives (0.853 for Roboto, measured
+    2026-10-22). Read in the child, where fontTools is loaded for resvg already.
+    """
+    try:
+        from fontTools.ttLib import TTFont
+
+        with TTFont(path, lazy=True) as font:
+            units = float(font["head"].unitsPerEm)
+            tall = float(font["hhea"].ascent - font["hhea"].descent)
+        ratio = units / tall
+    except Exception:
+        return DEFAULT_EM_RATIO
+    return ratio if math.isfinite(ratio) and 0.25 <= ratio <= 4.0 else DEFAULT_EM_RATIO
 
 
 def family_name(path: str) -> str:

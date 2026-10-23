@@ -232,7 +232,10 @@ def test_the_skill_says_how_to_write_each_fence_and_design_for_the_pane() -> Non
     assert text.startswith("---\nname: pptmstr-figures\ndescription: ")
     assert "the pane is the display" in text
     assert "Unless asked for an export, do not render to a file" in text
-    assert "near-white card" in text and "read against white" in text
+    assert "near-white card" not in text and "read against white" not in text
+    assert "drawn in the pane's own colours, which follow the theme" in text
+    assert "style, classDef or linkStyle is drawn as written against the pane" in text
+    assert "until it is legible" in text
     assert "win over a skill's general advice" in text
     assert MERMAID_FIRST in text and "Never compute a graph layout by hand" in text
 
@@ -253,7 +256,7 @@ def test_without_the_mermaid_row_the_text_says_nothing_of_mermaid() -> None:
     assert "mermaid" not in skill.split("\n---\n", 1)[1].lower(), "the body follows the rows"
     assert "```math" in text and rows[0].says in skill
     assert len(text) <= fences.PROMPT_LIMIT
-    assert "near-white card" not in skill, "card advice is for figures"
+    assert "pane's own colours" not in skill, "colour advice is for figures"
     assert "the pane is the display" in text
 
 

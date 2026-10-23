@@ -1,13 +1,15 @@
 """
 A committed ```mermaid fence drawn as a figure: when it is hosted, by what, at what
-height, where it draws, and when its textures are let go of; and a ```svg fence,
-which is code.
+height, how it draws natively (no card, no texture, the theme's colours and the
+author's, culled, hovered, rebuilt one figure a frame); the raster figure kept
+unused beside it, and when its textures are let go of; and a ```svg fence, which is
+code.
 
 Headless: an ImGui context with no backend, so no texture can be made. The render
 process is ``tests/test_figure_render.py``'s; here a recording stand-in answers for
-it, and textures are objects whose release is observed. Each diagram's layout is
-put in the held layouts before it is drawn, as the render child's answer would put
-it (``tests/test_figure_mermaid.py`` covers asking for it), so a figure here is
+it, and textures are objects whose release is observed. Each diagram's display list
+is put in the held layouts before it is drawn, as the render child's answer would
+put it (``tests/test_figure_mermaid.py`` covers asking for it), so a figure here is
 drawn from its first frame. Nothing here draws in a real window.
 """
 
@@ -21,7 +23,7 @@ from typing import Any
 import pytest
 
 from pptmstr import theme
-from pptmstr.figures import host, mermaid, render
+from pptmstr.figures import displaylist, host, mermaid, render
 from pptmstr.figures.sanitise import Sanitised, sanitise
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import Kind, Part, views
@@ -61,7 +63,11 @@ class Renderer:
 
     def __init__(self) -> None:
         self.asked: list[tuple[Hashable, Sanitised, float, float]] = []
+        self.layouts: list[tuple[Hashable, str]] = []
         self.answers: list[render.Result] = []
+
+    def lay_out(self, key: Hashable, source: str) -> None:
+        self.layouts.append((key, source))
 
     def submit(self, key: Hashable, sanitised: Sanitised, px_width: float, scale: float) -> None:
         self.asked.append((key, sanitised, px_width, scale))
@@ -149,7 +155,7 @@ def test_a_mermaid_fence_is_hosted_on_commit_while_the_stream_is_open(
             assert hosted == [], f"hosted while open, after {fed[-12:]!r}"
     assert not handle.closed
     (widget,) = figures_hosted(handle.view)
-    assert widget.mark.sanitised is not None and widget.mark.sanitised.width == 200.0
+    assert widget.mark.display is not None and widget.mark.display.width == 200.0
     assert widget.text == FENCE
 
 
@@ -244,8 +250,8 @@ def test_a_settled_document_hosts_its_mermaid_fence(figures: Renderer) -> None:
     cache = typeset.ViewCache()
     frame(_IM[0], lambda: typeset.markdown(cache, "doc", OPEN + "```\n\nAfter.\n"))
     (widget,) = figures_hosted(cache.view("doc"))
-    assert widget.height_for(600.0) == 100.0 + 2 * PAD
-    assert widget.height_for(100.0) == (100.0 - 2 * PAD) / 2 + 2 * PAD
+    assert widget.height_for(600.0) == 100.0, "its natural height: no card, no margin"
+    assert widget.height_for(100.0) == 50.0
 
 
 def _no_merman(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -329,7 +335,7 @@ def test_the_dispatcher_hosts_a_diff_only_where_diffs_are_hosted(figures: Render
 # -- height, re-hosting, drawing --------------------------------------------------------
 
 
-def test_a_figure_rehosted_after_forget_answers_its_height_at_once_and_reuses_its_texture(
+def test_a_figure_rehosted_after_forget_answers_its_height_at_once_and_asks_for_nothing(
     figures: Renderer,
 ) -> None:
     cache = typeset.ViewCache()
@@ -337,25 +343,24 @@ def test_a_figure_rehosted_after_forget_answers_its_height_at_once_and_reuses_it
     text = OPEN + "```\n\nAfter.\n"
     handle.append(text)
     frame(_IM[0], lambda: handle.draw())
-    assert len(figures.asked) == 1
-    figures.answer_last()
-    frame(_IM[0], lambda: handle.draw())
     first = handle.view
+    (widget,) = figures_hosted(first)
+    assert widget.drawn[1] > 0, "drawn natively from its first frame"
     # Text that does not extend what is held: the stream lets go of its view.
     handle.set_text("Another start.\n\n" + text)
     frame(_IM[0], lambda: handle.draw())
     assert handle.view is not first
     (widget,) = figures_hosted(handle.view)
-    assert widget.height_for(500.0) == 100.0 + 2 * PAD
+    assert widget.height_for(500.0) == 100.0
     frame(_IM[0], lambda: handle.draw())
-    assert len(figures.asked) == 1, "the raster held for the content is drawn again"
+    assert figures.asked == [] and figures.layouts == [], "no raster, and the layout is held"
 
 
 @pytest.mark.parametrize(
     "density, origin",
     [(1.0, (46.0, 127.0)), (1.5, (70 / 1.5, 191 / 1.5)), (2.0, (46.5, 127.0))],
 )
-def test_the_figure_is_drawn_at_the_nearest_device_pixel_inside_its_blocks_clip(
+def test_a_raster_figure_is_drawn_at_the_nearest_device_pixel_inside_its_blocks_clip(
     figures: Renderer, monkeypatch: pytest.MonkeyPatch, density: float, origin: tuple[float, float]
 ) -> None:
     """
@@ -366,7 +371,7 @@ def test_the_figure_is_drawn_at_the_nearest_device_pixel_inside_its_blocks_clip(
     from imgui_bundle import imgui
 
     monkeypatch.setattr(host, "_density", lambda im: density)
-    widget = host.FigureWidget(_marked(), BODY)
+    widget = _raster_figure()
     seen: list[tuple[float, float, float, float, float, float]] = []
 
     def image(ref: Any, size: Any, *rest: Any) -> None:
@@ -424,7 +429,7 @@ class Recording:
 
 
 @pytest.mark.parametrize("theme_name", ["dark", "light"])
-def test_the_card_is_drawn_first_inside_the_clip_in_every_theme(
+def test_a_raster_figures_card_is_drawn_first_inside_the_clip_in_every_theme(
     figures: Renderer, monkeypatch: pytest.MonkeyPatch, theme_name: str
 ) -> None:
     """
@@ -454,7 +459,7 @@ def test_the_card_is_drawn_first_inside_the_clip_in_every_theme(
 
     monkeypatch.setattr(imgui, "get_window_draw_list", lambda: Recording(real_list(), drawn))
     monkeypatch.setattr(imgui, "image", image)
-    widget = host.FigureWidget(_marked(), BODY)
+    widget = _raster_figure()
 
     def body() -> None:
         imgui.set_cursor_screen_pos(imgui.ImVec2(40.0, 120.0))
@@ -478,16 +483,16 @@ def test_the_card_is_drawn_first_inside_the_clip_in_every_theme(
             assert rect == pytest.approx((40.0 + PAD, 120.0 + PAD, 40.0 + PAD + w, 120.0 + PAD + h))
 
 
-def test_the_card_s_padding_is_in_the_height_and_the_backdrop_is_near_white() -> None:
+def test_a_raster_card_s_padding_is_in_the_height_and_the_backdrop_is_near_white() -> None:
     assert host.FIGURE_PAD > 0
-    widget = host.FigureWidget(_marked(), BODY)
+    widget = _raster_figure()
     assert widget.height_for(600.0) == 100.0 + 2 * host.FIGURE_PAD
     channels = [(host.BACKDROP >> shift) & 0xFF for shift in (16, 8, 0)]
     assert min(channels) >= 0xF0 and max(channels) - min(channels) <= 8
 
 
 def test_a_new_width_is_asked_for_only_once_it_has_held(figures: Renderer) -> None:
-    widget = host.FigureWidget(_marked(), BODY)
+    widget = _raster_figure()
     frame(_IM[0], lambda: widget.draw(width_px=150.0))
     assert [a[2] for a in figures.asked] == [150.0 - 2 * PAD]
     figures.answer_last()
@@ -510,7 +515,7 @@ def test_a_render_that_fails_keeps_the_fence_source_on_screen_under_its_reason(
     """
     from imgui_bundle import imgui
 
-    widget = host.FigureWidget(_marked(body=TALL), TALL)
+    widget = _raster_figure(body=TALL)
     frame(_IM[0], lambda: widget.draw(width_px=300.0))
     figure_height = widget.height_for(300.0)
     key = figures.asked[-1][0]
@@ -546,7 +551,7 @@ def test_the_failed_forms_height_is_measured_once_for_a_width(
 ) -> None:
     from imgui_bundle import imgui
 
-    widget = host.FigureWidget(_marked(), BODY)
+    widget = _raster_figure()
     frame(_IM[0], lambda: widget.draw(width_px=300.0))
     figures.answers.append(render.Failed(figures.asked[-1][0], "refused"))
     measured: list[str] = []
@@ -577,7 +582,7 @@ def test_a_transient_failure_is_asked_again_once_after_the_back_off(
 ) -> None:
     clock = Clock()
     monkeypatch.setattr(host._STATE, "clock", clock)
-    widget = host.FigureWidget(_marked(), BODY)
+    widget = _raster_figure()
 
     def draw() -> None:
         widget.draw(width_px=150.0)
@@ -604,7 +609,7 @@ def test_a_second_transient_failure_is_kept(
 ) -> None:
     clock = Clock()
     monkeypatch.setattr(host._STATE, "clock", clock)
-    widget = host.FigureWidget(_marked(), BODY)
+    widget = _raster_figure()
 
     def draw() -> None:
         widget.draw(width_px=150.0)
@@ -626,7 +631,7 @@ def test_a_second_transient_failure_is_kept(
 
 
 def test_a_failure_that_is_not_transient_is_kept_at_once(figures: Renderer) -> None:
-    widget = host.FigureWidget(_marked(), BODY)
+    widget = _raster_figure()
     frame(_IM[0], lambda: widget.draw(width_px=150.0))
     figures.answers.append(render.Failed(figures.asked[-1][0], "over the cap"))
     for _ in range(3):
@@ -638,7 +643,7 @@ def test_a_failure_that_is_not_transient_is_kept_at_once(figures: Renderer) -> N
 def test_an_upload_that_raises_fails_its_own_figure_and_not_the_others(
     figures: Renderer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    one, two = host.FigureWidget(_marked(), BODY), host.FigureWidget(_marked("#36c"), BODY)
+    one, two = _raster_figure(), _raster_figure("#36c")
 
     def both() -> None:
         one.draw(width_px=150.0)
@@ -727,6 +732,271 @@ def test_only_a_figure_fence_changes_its_answer_at_commit(figures: Renderer) -> 
     assert isinstance(after[-1].language, host.FigureMark)
 
 
+# -- drawn natively ---------------------------------------------------------------------
+
+# Two nodes and an edge between them, in merman's markup: the author's fill on A and
+# a label in A in the theme's own ink, B in roles only.
+NODES = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" viewBox="0 0 200 100">'
+    '<g class="node" id="merman-n-A" transform="translate(10,30)">'
+    '<rect width="60" height="40" style="fill:#ff9966 !important"/>'
+    '<text x="30" y="20" text-anchor="middle" dominant-baseline="central">Alpha</text></g>'
+    '<g class="node" id="merman-n-B" transform="translate(130,30)">'
+    '<rect width="60" height="40"/></g>'
+    '<path class="flowchart-link" data-id="L_A_B" d="M70 50 L130 50"/></svg>'
+)
+
+
+def _nodes() -> displaylist.DisplayList:
+    return displaylist.from_svg(NODES, displaylist.Authored(fill=frozenset({0xFF9966})))
+
+
+class Drawn:
+    """
+    The window's draw list, recording each primitive with its colour and the clip in
+    force; anything else goes to the real list.
+    """
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+        self.calls: list[tuple[str, int, tuple[float, float, float, float]]] = []
+
+    def _note(self, kind: str, colour: int) -> None:
+        low, high = self._real.get_clip_rect_min(), self._real.get_clip_rect_max()
+        self.calls.append((kind, int(colour), (low.x, low.y, high.x, high.y)))
+
+    def add_convex_poly_filled(self, points: Any, colour: int) -> None:
+        self._note("fill", colour)
+        self._real.add_convex_poly_filled(points, colour)
+
+    def add_concave_poly_filled(self, points: Any, colour: int) -> None:
+        self._note("fill", colour)
+        self._real.add_concave_poly_filled(points, colour)
+
+    def add_polyline(self, points: Any, colour: int, *rest: Any) -> None:
+        self._note("line", colour)
+        self._real.add_polyline(points, colour, *rest)
+
+    def add_rect_filled(self, low: Any, high: Any, colour: int, *rest: Any) -> None:
+        self._note("rect", colour)
+        self._real.add_rect_filled(low, high, colour, *rest)
+
+    def add_text(self, font: Any, size: float, at: Any, colour: int, text: str) -> None:
+        self._note(f"text {text}", colour)
+        self._real.add_text(font, size, at, colour, text)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+@pytest.fixture
+def drawn(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Drawn]]:
+    """
+    Every draw list a figure asks for, recorded; and no image may be drawn.
+    """
+    from imgui_bundle import imgui
+    from imgui_bundle.imgui import internal
+
+    lists: list[Drawn] = []
+    real = imgui.get_window_draw_list
+    shade = internal.shade_verts_transform_pos
+
+    def recorded() -> Drawn:
+        lists.append(Drawn(real()))
+        return lists[-1]
+
+    def moved(dl: Any, *rest: Any) -> None:
+        shade(getattr(dl, "_real", dl), *rest)
+
+    def image(*args: Any) -> None:
+        raise AssertionError("a native figure draws no texture")
+
+    monkeypatch.setattr(imgui, "get_window_draw_list", recorded)
+    monkeypatch.setattr(internal, "shade_verts_transform_pos", moved)
+    monkeypatch.setattr(imgui, "image", image)
+    yield lists
+
+
+def _packed(rgb: int) -> int:
+    return int(theme.col(rgb).u32)
+
+
+@pytest.mark.parametrize("theme_name", ["dark", "light"])
+def test_a_figure_is_drawn_on_the_pane_in_the_themes_colours_and_the_authors(
+    figures: Renderer, drawn: list[Drawn], theme_name: str
+) -> None:
+    """
+    No card and no texture: B's fill is the theme's node colour over the pane, A's
+    the author's as written, in either theme; A's label in the theme's ink, which is
+    made legible on the author's orange where it is not; all inside the block.
+    """
+    from imgui_bundle import imgui
+
+    theme.set_theme(theme_name)
+    widget = host.FigureWidget(_marked(display=_nodes()), BODY)
+
+    def body() -> None:
+        imgui.set_cursor_screen_pos(imgui.ImVec2(40.0, 120.0))
+        widget.draw(width_px=300.0)
+        imgui.dummy(imgui.ImVec2(1.0, 1.0))
+
+    frame(_IM[0], body)
+    calls = [c for d in drawn for c in d.calls]
+    assert not any(kind == "rect" for kind, *_ in calls), "no card, no knockout"
+    fills = [colour for kind, colour, _ in calls if kind == "fill"]
+    palette = theme.current()
+    assert _packed(0xFF9966) in fills, "the author's fill, as written"
+    others = [c for c in fills if c != _packed(0xFF9966)]
+    assert len(others) == 1
+    (label,) = [colour for kind, colour, _ in calls if kind == "text Alpha"]
+    assert displaylist.contrast(_rgb_of(label), 0xFF9966) >= displaylist.TEXT_CONTRAST
+    assert {clip for *_, clip in calls} == {(40.0, 120.0, 340.0, 220.0)}
+    assert widget.drawn[0] == widget.drawn[1] > 0
+    assert palette.name == theme_name
+
+
+def _rgb_of(packed: int) -> int:
+    """
+    ``IM_COL32`` (ABGR in a little-endian word) back to ``0xRRGGBB``.
+    """
+    return ((packed & 0xFF) << 16) | (packed & 0xFF00) | ((packed >> 16) & 0xFF)
+
+
+def test_role_colours_change_with_the_theme_and_the_figure_is_not_rebuilt(
+    figures: Renderer, drawn: list[Drawn]
+) -> None:
+    widget = host.FigureWidget(_marked(display=_nodes()), BODY)
+    seen: dict[str, set[int]] = {}
+    for name in ("dark", "light", "dark"):
+        theme.set_theme(name)
+        drawn.clear()
+        frame(_IM[0], lambda: widget.draw(width_px=300.0))
+        seen.setdefault(name, set()).update(
+            colour for d in drawn for kind, colour, _ in d.calls if kind == "line"
+        )
+    assert seen["dark"] and seen["light"] and seen["dark"].isdisjoint(seen["light"])
+    assert widget.rebuilds == 1, "a theme switch looks colours up; geometry stands"
+
+
+def test_an_illegible_author_colour_is_adjusted_and_logged_once_per_theme(
+    figures: Renderer, drawn: list[Drawn]
+) -> None:
+    from pptmstr.log import LOG
+
+    theme.set_theme("dark")
+    widget = host.FigureWidget(_marked(display=_nodes()), BODY)
+    before = LOG.snapshot()[1]
+    for _ in range(3):
+        frame(_IM[0], lambda: widget.draw(width_px=300.0))
+    entries, after = LOG.snapshot()
+    said = [e.text for e in entries[-(after - before) :]] if after > before else []
+    noted = [t for t in said if "made legible on the dark theme" in t]
+    assert len(noted) == 1, said
+    assert "text #" in noted[0] and "contrast" in noted[0]
+
+
+def test_only_what_is_inside_the_clip_is_drawn(figures: Renderer, drawn: list[Drawn]) -> None:
+    from imgui_bundle import imgui
+
+    widget = host.FigureWidget(_marked(display=_nodes()), BODY)
+
+    def body() -> None:
+        imgui.push_clip_rect(imgui.ImVec2(0.0, 0.0), imgui.ImVec2(110.0, 1000.0), True)
+        imgui.set_cursor_screen_pos(imgui.ImVec2(20.0, 20.0))
+        widget.draw(width_px=200.0)
+        imgui.dummy(imgui.ImVec2(1.0, 1.0))
+        imgui.pop_clip_rect()
+
+    frame(_IM[0], body)
+    shown, built = widget.drawn
+    assert 0 < shown < built, "B, at x 150-210, is off the clip's right edge"
+
+
+def test_hover_lights_a_node_and_its_edges_and_a_click_reports_the_node(
+    figures: Renderer, drawn: list[Drawn], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from imgui_bundle import imgui
+
+    clicked: list[tuple[str, str]] = []
+    monkeypatch.setattr(host, "node_clicked", lambda sha, node: clicked.append((sha, node)))
+    mark = _marked(display=_nodes())
+    widget = host.FigureWidget(mark, BODY)
+
+    def body() -> None:
+        imgui.set_cursor_screen_pos(imgui.ImVec2(40.0, 120.0))
+        widget.draw(width_px=200.0)
+        imgui.dummy(imgui.ImVec2(1.0, 1.0))
+
+    io = imgui.get_io()
+    frame(_IM[0], body)
+    assert widget.hovered is None
+    io.add_mouse_pos_event(40.0 + 160.0, 120.0 + 50.0)  # B's middle
+    frame(_IM[0], body)
+    frame(_IM[0], body)
+    assert widget.hovered == "n-B"
+    focus = theme.P.focus.u32
+    lit = [kind for d in drawn[-1:] for kind, colour, _ in d.calls if colour == focus]
+    assert lit.count("line") == 2, "B's outline and the edge into it"
+    io.add_mouse_button_event(0, True)
+    frame(_IM[0], body)
+    io.add_mouse_button_event(0, False)
+    frame(_IM[0], body)
+    assert clicked == [(mark.sha, "n-B")]
+    io.add_mouse_pos_event(-100.0, -100.0)
+    frame(_IM[0], body)
+    assert widget.hovered is None
+
+
+def test_a_width_change_rebuilds_one_figure_a_frame_and_the_others_draw_meanwhile(
+    figures: Renderer, drawn: list[Drawn]
+) -> None:
+    widgets = [
+        host.FigureWidget(_marked(fill, display=_nodes()), BODY) for fill in ("#1", "#2", "#3")
+    ]
+
+    def at(width: float) -> None:
+        for w in widgets:
+            w.draw(width_px=width)
+
+    frame(_IM[0], lambda: at(200.0))
+    assert [w.rebuilds for w in widgets] == [1, 1, 1], "a first build is not held back"
+    counts = []
+    for width in (150.0, 150.0, 150.0, 150.0):
+        frame(_IM[0], lambda width=width: at(width))  # type: ignore[misc]
+        counts.append([w.rebuilds for w in widgets])
+        assert all(w.drawn[0] > 0 for w in widgets), "a figure waiting its turn still draws"
+    assert counts == [[2, 1, 1], [2, 2, 1], [2, 2, 2], [2, 2, 2]]
+
+
+def test_a_drag_does_not_starve_the_figures_further_down(
+    figures: Renderer, drawn: list[Drawn]
+) -> None:
+    """
+    The width changes every frame: the figure that has waited longest goes next, so
+    the first one drawn does not take every turn.
+    """
+    widgets = [
+        host.FigureWidget(_marked(fill, display=_nodes()), BODY) for fill in ("#1", "#2", "#3")
+    ]
+    frame(_IM[0], lambda: [w.draw(width_px=200.0) for w in widgets])
+    for step in range(1, 7):
+        frame(_IM[0], lambda step=step: [w.draw(width_px=200.0 - step) for w in widgets])  # type: ignore[misc]
+    assert [w.rebuilds for w in widgets] == [3, 3, 3]
+
+
+def test_a_figure_not_yet_laid_out_stands_at_the_placeholder_and_asks_once(
+    figures: Renderer, drawn: list[Drawn]
+) -> None:
+    mark = host.mark("mermaid", "flowchart LR\n  x --> y")
+    assert isinstance(mark, host.FigureMark)
+    widget = host.FigureWidget(mark, "flowchart LR\n  x --> y")
+    for _ in range(3):
+        assert widget.height_for(300.0) == host.PLACEHOLDER_HEIGHT
+        frame(_IM[0], lambda: widget.draw(width_px=300.0))
+    assert figures.layouts == [(("layout", mark.sha), mark.source)]
+    assert widget.drawn == (0, 0)
+
+
 # -- textures are let go of between frames ---------------------------------------------
 
 
@@ -752,7 +1022,7 @@ def test_an_upload_that_evicts_inside_a_frame_frees_nothing_until_the_next(
 ) -> None:
     held = host._Textures(budget=150 * 75 * 4)
     monkeypatch.setattr(host._STATE, "textures", held)
-    one, two = host.FigureWidget(_marked(), BODY), host.FigureWidget(_marked("#36c"), BODY)
+    one, two = _raster_figure(), _raster_figure("#36c")
     frame(_IM[0], lambda: one.draw(width_px=150.0))
     figures.answer_last()
     frame(_IM[0], lambda: one.draw(width_px=150.0))
@@ -776,19 +1046,31 @@ def test_an_upload_that_evicts_inside_a_frame_frees_nothing_until_the_next(
 # -- helpers ----------------------------------------------------------------------------
 
 
-def _marked(fill: str = "#c33", body: str = BODY) -> host.FigureMark:
+def _marked(
+    fill: str = "#c33", body: str = BODY, display: displaylist.DisplayList | None = None
+) -> host.FigureMark:
     """
-    The mark of a diagram whose layout is FIG filled with ``fill``, its layout held:
-    each fill is a diagram of its own source, so of its own sha.
+    The mark of a diagram whose display list is FIG's (or ``display``), held: each
+    fill is a diagram of its own source, so of its own sha.
     """
     if fill != "#c33":
         body = f"{body}\n  style a fill:{fill}"
     marked = host.mark("mermaid", body)
     assert isinstance(marked, host.FigureMark)
+    if display is None:
+        display = displaylist.from_svg(FIG.replace("#c33", fill))
+    host._STATE.layouts.put(marked.sha, display)
+    return marked
+
+
+def _raster_figure(fill: str = "#c33", body: str = BODY) -> host.RasterFigure:
+    """
+    The raster figure, kept and unused for Mermaid, of the diagram ``_marked`` holds,
+    drawn from FIG filled with ``fill``.
+    """
     laid = sanitise(FIG.replace("#c33", fill))
     assert isinstance(laid, Sanitised)
-    host._STATE.layouts.put(marked.sha, laid)
-    return marked
+    return host.RasterFigure(_marked(fill, body), body, laid)
 
 
 _IM: list[Any] = []
@@ -802,7 +1084,7 @@ def _im(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """
     monkeypatch.setattr(mermaid, "_VERSION", ["0.9.1"])
     monkeypatch.setattr(host, "_MARKS", type(host._MARKS)())
-    monkeypatch.setattr(host._STATE, "layouts", host._Layouts(host.LAYOUT_BUDGET_CHARS))
+    monkeypatch.setattr(host._STATE, "layouts", host._Layouts(host.LAYOUT_BUDGET_WORDS))
     _IM[:] = [seam]
     yield
     _IM.clear()

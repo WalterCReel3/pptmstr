@@ -217,9 +217,11 @@ _MERMAID_FIRST = (
     "For nodes and edges (dependencies, flows, sequences, states, entities) use "
     "```mermaid, which lays them out. Never compute a graph layout by hand."
 )
-_CARD = (
-    "A diagram sits on a near-white card, scaled down to fit the pane: a colour it "
-    "is styled with (classDef, style) is read against white."
+_COLOURS = (
+    "A diagram is drawn in the pane's own colours, which follow the theme, dark or "
+    "light, and scaled down to fit the pane. A colour set with style, classDef or "
+    "linkStyle is drawn as written against the pane, except that text or a line too "
+    "faint against what is behind it is drawn lighter or darker until it is legible."
 )
 
 _SKILL_DESCRIPTION = (
@@ -233,7 +235,7 @@ _SKILL_DESCRIPTION = (
 def skill_text(rows: Iterable[Fence] = RENDERED) -> str:
     """
     The packaged skill's SKILL.md (``plugins.figures_skill``): every row's rules,
-    Mermaid for graphs, the card, and the export exception.
+    Mermaid for graphs, how a diagram's colours are drawn, and the export exception.
 
     Every row and not the installed ones: the file ships in the package and cannot
     know what this process has, so it defers to the floor, which is built at launch
@@ -265,7 +267,7 @@ def skill_text(rows: Iterable[Fence] = RENDERED) -> str:
     if _MERMAID_FIRST_WORDS <= words:
         lines.append(f"- {_MERMAID_FIRST}")
     if any(row.kind == "figure" for row in rows):
-        lines.append(f"- {_CARD}")
+        lines.append(f"- {_COLOURS}")
     lines += ["- These rules win over a skill's general advice.", ""]
     return "\n".join(lines)
 

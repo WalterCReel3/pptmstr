@@ -1,7 +1,7 @@
 """
 A committed ```mermaid fence drawn as a figure: laid out by merman in the render
-child, opened by the post-pass, passed through the svg sanitiser, rasterised, and
-hosted as a figure.
+child, opened by the post-pass, passed through the svg sanitiser, parsed there into
+a display list, and hosted as a figure the pane draws natively.
 
 Tests marked ``needs_merman`` run real merman in a real render child and skip where
 the optional ``mermaid`` extra is not installed. The rest hold the host and the
@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from pptmstr.figures import host, mermaid, render
+from pptmstr.figures import displaylist, host, mermaid, render
 from pptmstr.figures.render import Failed, Laid, Rendered, Renderer, Result
 from pptmstr.figures.sanitise import Refused, Sanitised, sanitise
 from pptmstr.ui import typeset
@@ -92,6 +92,7 @@ LAID = Sanitised(
     width=300.0,
     height=150.0,
 )
+LAID_LIST = displaylist.from_svg(LAID.svg)
 
 
 # -- the render child: real merman ------------------------------------------------------
@@ -114,26 +115,28 @@ def child() -> Iterator[Renderer]:
     renderer.shutdown()
 
 
-def ink(result: Result) -> int:
-    assert isinstance(result, Rendered), result
-    alpha = result.rgba[3::4]
-    return len(alpha) - alpha.count(0)
-
-
 @needs_merman
 @pytest.mark.parametrize("family", list(DIAGRAMS))
-def test_each_family_is_laid_out_in_the_child_and_renders_ink(child: Renderer, family: str) -> None:
+def test_each_family_is_laid_out_in_the_child_as_a_bounded_display_list(
+    child: Renderer, family: str
+) -> None:
+    """
+    What crosses the pipe is a display list within every bound, with nodes, labels
+    and the label size set for the pane's prose face (Roboto's em is 0.853 of its
+    ImGui size, so merman's 14 px em is about 16.4); never SVG or pixels.
+    """
     child.lay_out(("layout", family), DIAGRAMS[family])
     laid = wait_for(child, ("layout", family))
     assert isinstance(laid, Laid), laid
-    natural = laid.sanitised
-    assert natural.width > 0 and natural.height > 0
-    assert "foreignObject" not in natural.svg
-    assert sanitise(natural.svg) == natural, "what the child hands back is sanitised"
-    child.submit(("raster", family), natural, natural.width, 1.0)
-    pixels = wait_for(child, ("raster", family))
-    assert isinstance(pixels, Rendered)
-    assert ink(pixels) > 0.02 * pixels.width * pixels.height
+    display = laid.display
+    assert isinstance(display, displaylist.DisplayList)
+    assert displaylist.validate(display) is None
+    assert display.width > 0 and display.height > 0
+    assert display.nodes and display.items
+    runs = [i for i in display.items if isinstance(i, displaylist.TextRun)]
+    assert runs and all(isinstance(r.text, str) for r in runs)
+    sizes = {round(r.size, 1) for r in runs if r.role == displaylist.LABEL}
+    assert 16.4 in sizes or 16.0 in sizes or any(14.0 < s < 20.0 for s in sizes), sizes
 
 
 @needs_merman
@@ -216,10 +219,9 @@ def test_the_host_never_calls_merman_on_the_frame_thread(
         frame(seam, lambda: handle.draw())
     fake.answer_layouts()
     frame(seam, lambda: handle.draw())
-    fake.answer_rasters()
     frame(seam, lambda: handle.draw())
     assert reached == []
-    assert [kind for kind, *_ in fake.asked] == ["layout", "raster"]
+    assert [kind for kind, *_ in fake.asked] == ["layout"], "and no raster"
     assert ("merman" in sys.modules) == imported_before
 
 
@@ -340,7 +342,7 @@ class FakeRenderer:
     def layouts(self) -> list[tuple[Hashable, str]]:
         return [(key, source) for kind, key, source in self.asked if kind == "layout"]
 
-    def answer_layouts(self, laid: Sanitised = LAID) -> None:
+    def answer_layouts(self, laid: displaylist.DisplayList = LAID_LIST) -> None:
         for key, _ in self.layouts():
             self.answers.append(Laid(key, laid))
 
@@ -447,17 +449,15 @@ def test_the_placeholder_stands_until_the_layout_and_then_the_real_height(
     cache = typeset.ViewCache()
     frame(seam, lambda: typeset.markdown(cache, "doc", OPEN + "```\n\nAfter.\n"))
     (widget,) = hosted(cache.view("doc"))
-    assert widget.height_for(600.0) == host.PLACEHOLDER_HEIGHT + 2 * host.FIGURE_PAD
+    assert widget.height_for(600.0) == host.PLACEHOLDER_HEIGHT
     frame(seam, lambda: typeset.markdown(cache, "doc", OPEN + "```\n\nAfter.\n"))
     assert len(fake.layouts()) == 1, "asked once, however often its height is"
-    assert not [kind for kind, *_ in fake.asked if kind == "raster"], "no raster before layout"
     fake.answer_layouts()
     frame(seam, lambda: typeset.markdown(cache, "doc", OPEN + "```\n\nAfter.\n"))
-    pad = host.FIGURE_PAD
-    assert widget.height_for(600.0) == 150.0 + 2 * pad
-    assert widget.height_for(150.0) == (150.0 - 2 * pad) / 2 + 2 * pad
-    rasters = [args for kind, _, args in fake.asked if kind == "raster"]
-    assert rasters and rasters[0][0] == LAID, "the laid-out SVG goes the svg path's way"
+    assert widget.height_for(600.0) == 150.0
+    assert widget.height_for(150.0) == 75.0
+    assert widget.drawn[1] > 0, "drawn the frame its list arrived"
+    assert not [kind for kind, *_ in fake.asked if kind == "raster"], "Mermaid is never rasterised"
 
 
 def test_a_laid_out_figure_rehosted_answers_its_height_at_once(
@@ -470,17 +470,15 @@ def test_a_laid_out_figure_rehosted_answers_its_height_at_once(
     frame(seam, lambda: handle.draw())
     fake.answer_layouts()
     frame(seam, lambda: handle.draw())
-    fake.answer_rasters()
-    frame(seam, lambda: handle.draw())
     first = handle.view
     asked = len(fake.asked)
     handle.set_text("Another start.\n\n" + text)
     frame(seam, lambda: handle.draw())
     assert handle.view is not first
     (widget,) = hosted(handle.view)
-    assert widget.height_for(500.0) == 150.0 + 2 * host.FIGURE_PAD, "the layout is held"
+    assert widget.height_for(500.0) == 150.0, "the layout is held"
     frame(seam, lambda: handle.draw())
-    assert len(fake.asked) == asked, "neither laid out nor rasterised again"
+    assert len(fake.asked) == asked == 1, "not laid out again"
 
 
 def test_a_layout_is_keyed_by_the_merman_version(
@@ -554,7 +552,7 @@ def test_a_layout_that_timed_out_is_asked_once_more_after_the_back_off(
     ask()
     ask()
     assert len(fake.layouts()) == 1, "not while the back-off runs"
-    assert widget.height_for(500.0) == host.PLACEHOLDER_HEIGHT + 2 * host.FIGURE_PAD
+    assert widget.height_for(500.0) == host.PLACEHOLDER_HEIGHT
     now[0] += host.RETRY_AFTER_S + 0.1
     ask()
     assert len(fake.layouts()) == 2
@@ -736,7 +734,7 @@ def test_a_dark_init_directive_lays_out_as_the_diagram_without_it(child: Rendere
     child.lay_out(("layout", "init"), INIT + BODY)
     plain, init = wait_for(child, ("layout", "plain")), wait_for(child, ("layout", "init"))
     assert isinstance(plain, Laid) and isinstance(init, Laid)
-    assert init.sanitised == plain.sanitised
+    assert init.display == plain.display
 
 
 DARK_CONFIG = "---\nconfig: {theme: dark}\n---\n"
@@ -824,12 +822,14 @@ def test_a_dark_front_matter_config_lays_out_as_the_diagram_without_it(child: Re
     after_init = wait_for(child, ("layout", "after-init"))
     titled = wait_for(child, ("layout", "titled"))
     assert isinstance(plain, Laid) and isinstance(config, Laid) and isinstance(after_init, Laid)
-    assert config.sanitised == plain.sanitised == after_init.sanitised
+    assert config.display == plain.display == after_init.display
     assert isinstance(titled, Laid)
-    assert (
-        "Pipeline stages" in titled.sanitised.svg and "Pipeline stages" not in plain.sanitised.svg
-    )
-    assert "NoSuchFace" not in titled.sanitised.svg
+
+    def texts(laid: Laid) -> list[str]:
+        return [i.text for i in laid.display.items if isinstance(i, displaylist.TextRun)]
+
+    assert "Pipeline stages" in texts(titled) and "Pipeline stages" not in texts(plain)
+    assert "NoSuchFace" not in repr(titled.display), "a display list names no face"
 
 
 @pytest.mark.parametrize(
@@ -898,7 +898,7 @@ def test_more_diagrams_than_the_held_layouts_keep_their_heights(
     the bound once was, so the test does not need megabytes), none may lose its own
     to the others, or it stands at the placeholder and asks again without end.
     """
-    monkeypatch.setattr(host._STATE, "layouts", host._Layouts(128 * len(LAID.svg)))
+    monkeypatch.setattr(host._STATE, "layouts", host._Layouts(128 * LAID_LIST.weight()))
     count = 300
     widgets = []
     for n in range(count):
@@ -913,11 +913,11 @@ def test_more_diagrams_than_the_held_layouts_keep_their_heights(
     # The child answers one layout at a time, so a pump takes a few, and every
     # figure's height is asked between pumps, as each frame asks it.
     for at in range(0, count, 25):
-        fake.answers += [Laid(key, LAID) for key, _ in asked[at : at + 25]]
+        fake.answers += [Laid(key, LAID_LIST) for key, _ in asked[at : at + 25]]
         host.pump()
         for widget in widgets:
             widget.height_for(600.0)
-    held = 150.0 + 2 * host.FIGURE_PAD
+    held = 150.0
     for _ in range(3):
         assert [w.height_for(600.0) for w in widgets] == [held] * count
         host.pump()
@@ -925,8 +925,8 @@ def test_more_diagrams_than_the_held_layouts_keep_their_heights(
 
 
 def test_the_held_layouts_evict_the_least_recently_read() -> None:
-    one = Sanitised("<svg>" + "a" * 95 + "</svg>", 1.0, 1.0)
-    layouts = host._Layouts(budget=2 * len(one.svg))
+    one = LAID_LIST
+    layouts = host._Layouts(budget=2 * one.weight())
     layouts.put("a", one)
     layouts.put("b", one)
     assert layouts.get("a") is one
@@ -937,7 +937,7 @@ def test_the_held_layouts_evict_the_least_recently_read() -> None:
 # -- one retry for each request ---------------------------------------------------------
 
 
-def test_a_retried_layout_leaves_its_raster_its_own_retry(
+def test_a_retried_layout_is_drawn_when_it_arrives_and_nothing_is_rasterised(
     fake: FakeRenderer, seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     now = [100.0]
@@ -957,14 +957,25 @@ def test_a_retried_layout_leaves_its_raster_its_own_retry(
     assert len(fake.layouts()) == 2, "the layout's one retry"
     fake.answer_layouts()
     ask()
-    rasters = [key for kind, key, _ in fake.asked if kind == "raster"]
-    assert len(rasters) == 1
-    fake.answers.append(Failed(rasters[0], "render process died", True))
-    ask()
-    assert widget._failure() is None, "the raster's first transient failure is not kept"
-    now[0] += host.RETRY_AFTER_S + 0.1
-    ask()
-    assert len([kind for kind, *_ in fake.asked if kind == "raster"]) == 2
+    assert widget._failure() is None and widget.drawn[1] > 0
+    assert [kind for kind, *_ in fake.asked] == ["layout", "layout"]
+
+
+def test_a_display_list_out_of_bounds_from_the_child_is_a_failure_and_not_drawn() -> None:
+    """
+    The I/O thread checks what the child sent before the frame thread sees it: a
+    list past a bound, or not a list at all, is the figure's failure, kept.
+    """
+    assert render.received("k", LAID_LIST) == Laid("k", LAID_LIST)
+    flat = displaylist.DisplayList(0.0, 10.0, (0.0, 0.0), (), (), ())
+    for sent, why in (
+        (flat, "size"),
+        ("<svg/>", "not a display list"),
+        (None, "not a display list"),
+    ):
+        got = render.received("k", sent)
+        assert got == Failed("k", f"display list refused: {why}")
+        assert not got.transient
 
 
 # -- what any figure needs is read from what imports it ----------------------------------
