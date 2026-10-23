@@ -495,3 +495,10 @@ declared as a task.
    toggle) was never built and is not declared [read: that record, §4 and §8].
    *Open:* whether it is still wanted now that figures draw natively, and the
    selection limit §4 names: the source half is one atom to a drag.
+9. **`displaylist._Sheet` splits `<style>` rules without respecting quotes.** A
+   `stroke-width` hidden inside a quoted value still scales markers (builder-56,
+   probe, task `colour-grammar`). It is inert as a bypass, since the sanitiser does
+   not restrict `stroke-width`, and only feeds marker scale. One depth-tracking
+   splitter for both readers would close it, but would also start reading nested
+   blocks such as `@media` that are ignored today. *Open:* whether to read nested
+   blocks at all.
