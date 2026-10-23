@@ -2,13 +2,17 @@
 The fence languages a reply pane draws as something other than code, as one table
 (planning/2026-10-18-vector-displays-beside-typeset-text.md §8 slice 4).
 
-Two readers, and the reason there is one table: **the views' dispatcher** decides
+Three readers, and the reason there is one table: **the views' dispatcher** decides
 by it which fences settle into a figure or a formula (``views.settles_rendered``,
-``views._captioned``, ``figures.host.is_figure_fence``), and **the session prompt**
+``views._captioned``, ``figures.host.is_figure_fence``), **the session prompt**
 tells Claude by it what will be drawn (``prompt``, appended by
-``driver.AgentSession._system_prompt``). A language added to one and not the other
-would have Claude writing fences that show as code, or never writing ones that
-would draw.
+``driver.AgentSession._system_prompt``), and **the packaged skill** tells Claude
+how to write each one (``skill_text``, shipped as ``plugins.figures_skill``). A
+language added to one and not the others would have Claude writing fences that
+show as code, or never writing ones that would draw.
+
+The prompt is a short floor on every request; the rules for each fence are in the
+skill, which a session loads when it draws (planning record §10.5).
 
 A row whose renderer is not installed is left out of the prompt
 (``available``) and stays in the dispatcher, which is what turns such a fence into
@@ -104,12 +108,6 @@ FIGURE_WORDS = frozenset(row.word for row in RENDERED if row.kind == "figure")
 FORMULA_WORDS = frozenset(row.word for row in RENDERED if row.kind == "formula")
 WORDS = FIGURE_WORDS | FORMULA_WORDS
 
-PROMPT_LIMIT = 2_000
-"""
-The most characters ``prompt`` may run to with every row in it: it rides on every
-request of every session, so it is held short by a test rather than by care.
-"""
-
 
 def word(said: str) -> str:
     """
@@ -151,38 +149,70 @@ def available(rows: Iterable[Fence] = RENDERED) -> tuple[Fence, ...]:
     return tuple(row for row in rows if all(_present(name) for name in (*_TYPESET, *row.needs)))
 
 
-def prompt(rows: Iterable[Fence]) -> str:
+SKILL = "pptmstr:pptmstr-figures"
+"""
+The packaged skill that carries each row's rules (``skill_text``), as the floor
+names it. Namespaced, because a project skill of the same bare name also loads
+and a model asked for the bare name chose the project's (notes/vector-rendering/
+probe-skills.md, L4). ``plugins.SKILLS`` is held to this by a test.
+"""
+
+
+def prompt(rows: Iterable[Fence], *, skill: bool = True) -> str:
     """
-    What a session is told about the fences in ``rows``: those are drawn when
-    pptmstr typesets replies, which the operator can switch off after the launch,
-    no other fence is a figure or a formula, ``$`` in prose is not mathematics,
-    and a fence that cannot be drawn shows its source and why. Empty when
-    ``rows`` is: nothing is drawn, so there is nothing to tell.
+    The always-on floor for the fences in ``rows``: those are drawn when pptmstr
+    typesets replies, which the operator can switch off after the launch, no other
+    fence is a figure or a formula, ``$`` in prose is not mathematics, a fence that
+    cannot be drawn shows its source and why, the pane is the display, and a graph
+    goes to Mermaid where Mermaid is drawn. Empty when ``rows`` is: nothing is
+    drawn, so there is nothing to tell.
+
+    The rules each fence must follow are in the skill (``skill_text``), and
+    ``skill`` is whether the reader can load it: a worker whose tool list has no
+    ``Skill`` cannot, and is not told to.
+
+    The Mermaid sentence is in the floor and not only in the skill: a hand-laid
+    graph is the failure that cost a session 17 tool calls (the planning record's
+    §10.1), and a skill the model does not choose to load cannot prevent it.
     """
     rows = tuple(rows)
     if not rows:
         return ""
+    words = {row.word for row in rows}
     names = ", ".join(f"```{row.word}" for row in rows)
     lines = [
         "## Fences that are drawn",
         "",
         f"When pptmstr typesets replies, the pane showing them draws {names} fences "
         "once each is closed; otherwise they show as written. No other fence is drawn "
-        "as a figure or a formula.",
-        "",
-        *(f"- {row.says}" for row in rows),
-        "",
+        "as a figure or a formula. A fence that cannot be drawn is shown as its source "
+        "under a one-line reason.",
     ]
-    if any(row.kind == "formula" for row in rows):
+    if "math" in words:
         lines.append(
             "$...$ and $$...$$ in prose are not rendered and show as written; "
             "put mathematics in a ```math fence."
         )
     else:
         lines.append("$...$ and $$...$$ in prose are not rendered and show as written.")
-    lines.append("A fence that cannot be drawn is shown as its source under a one-line reason.")
-    lines += ["", *_guidance({row.word for row in rows}, {row.kind for row in rows})]
+    lines.append(_DISPLAY)
+    if _MERMAID_FIRST_WORDS <= words:
+        lines.append(_MERMAID_FIRST)
+    if skill:
+        lines.append(
+            f"Before drawing a diagram, chart or formula, load the {SKILL} skill: it "
+            "has the rules these fences must follow, and they win over a skill's "
+            "general advice."
+        )
     return "\n".join(lines)
+
+
+PROMPT_LIMIT = 1_000
+"""
+The most characters ``prompt`` may run to with every row in it: it rides on every
+request of every session, so it is held short by a test rather than by care. The
+floor measured 903 with every row (2026-10-21), so this leaves 97 of headroom.
+"""
 
 
 FIGURE_WIDTH = 600
@@ -197,36 +227,72 @@ the width is merman's and not the session's, and what it is for a graph of twent
 nodes, and the text size once scaled to this, is unmeasured.
 """
 
+_DISPLAY = (
+    "Write the fence; the pane is the display. Unless asked for an export, do not "
+    "render to a file, look for a converter, or preview with other tools."
+)
+_MERMAID_FIRST_WORDS = {"mermaid", "svg"}
+_MERMAID_FIRST = (
+    "For nodes and edges (dependencies, flows, sequences, states, entities) use "
+    "```mermaid, which lays them out; ```svg is for what Mermaid cannot draw. "
+    "Never compute a graph layout by hand."
+)
+_CARD = (
+    "Figures sit on a near-white card, scaled down to fit the pane: design for "
+    "white, with literal colours, text of 11 px or more, and at most about "
+    f"{FIGURE_WIDTH} px wide."
+)
 
-def _guidance(words: set[str], kinds: set[Kind]) -> list[str]:
+_SKILL_DESCRIPTION = (
+    "Rules for drawing in a pptmstr reply. Load before writing any diagram, "
+    "flowchart, dependency graph, sequence or state diagram, chart, plot or "
+    "mathematical formula, so it is written as a mermaid, svg or math fence the "
+    "reply pane draws."
+)
+
+
+def skill_text(rows: Iterable[Fence] = RENDERED) -> str:
     """
-    How to use the rows, beyond what each is: written for the failure of a session
-    that rasterised to files, hand-laid a graph Mermaid would have laid out, and
-    took a skill's HTML colour conventions into an SVG. Mermaid is named only when
-    its row is in ``rows``.
+    The packaged skill's SKILL.md (``plugins.figures_skill``): every row's rules,
+    the choice between Mermaid and SVG, the card, and the export exception.
+
+    Every row and not the installed ones: the file ships in the package and cannot
+    know what this process has, so it defers to the floor, which is built at launch
+    from ``available``. tests/test_skill_ship.py holds the shipped file equal to
+    this, rather than writing it at load time, because an installed package
+    directory may not be writable and the plugin path has to be the shipped one.
     """
-    said = [
-        "Write the fence; the pane is the display. Unless asked for an export, do "
-        "not render to a file, look for a converter, or preview with other tools."
+    rows = tuple(rows)
+    words = {row.word for row in rows}
+    lines = [
+        "---",
+        f"name: {SKILL.split(':', 1)[1]}",
+        f"description: {_SKILL_DESCRIPTION}",
+        "---",
+        "",
+        "# Drawing in a pptmstr reply",
+        "",
+        "The session prompt names the fences pptmstr draws in this session. A fence "
+        "below that it does not name is shown as code, so do not write it.",
+        "",
+        "## The fences",
+        "",
+        *(f"- {row.says}" for row in rows),
+        "",
+        "## How to use them",
+        "",
+        f"- {_DISPLAY}",
     ]
-    if {"mermaid", "svg"} <= words:
-        said.append(
-            "For nodes and edges (dependencies, flows, sequences, states, entities) use "
-            "```mermaid, which lays them out; ```svg is for what Mermaid cannot draw. "
-            "Never compute a graph layout by hand."
-        )
-    if "figure" in kinds:
-        said.append(
-            "Figures sit on a near-white card, scaled down to fit the pane: design for "
-            "white, with literal colours, text of 11 px or more, and at most about "
-            f"{FIGURE_WIDTH} px wide."
-        )
-    said.append("These rules win over a skill's general advice.")
-    return said
+    if _MERMAID_FIRST_WORDS <= words:
+        lines.append(f"- {_MERMAID_FIRST}")
+    if any(row.kind == "figure" for row in rows):
+        lines.append(f"- {_CARD}")
+    lines += ["- These rules win over a skill's general advice.", ""]
+    return "\n".join(lines)
 
 
-def session_prompt() -> str:
+def session_prompt(*, skill: bool = True) -> str:
     """
     ``prompt`` for the rows installed in this process: what a launch appends.
     """
-    return prompt(available())
+    return prompt(available(), skill=skill)

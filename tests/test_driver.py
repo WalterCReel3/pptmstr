@@ -5969,8 +5969,10 @@ def _git_launches() -> dict[str, tuple[dict[str, Any], set[str]]]:
     from pptmstr.figures import fences
     from pptmstr.sandbox import containment_settings
 
-    # Every launch appends what the reply pane draws, where anything draws.
-    before = _FIELDS_BEFORE_SWITCH | ({"system_prompt"} if fences.session_prompt() else set())
+    # Every launch appends what the reply pane draws, where anything draws, and
+    # passes the plugin pptmstr ships (tests/test_skill_ship.py).
+    before = _FIELDS_BEFORE_SWITCH | {"plugins"}
+    before |= {"system_prompt"} if fences.session_prompt() else set()
     return {
         "new": ({}, before | {"session_id"}),
         "fork": ({"cwd": "/srv/tree"}, before | {"session_id", "cwd"}),

@@ -1405,7 +1405,7 @@ Both landed in `fae81fe`.
   rasterising or hand-laying. No session has run with it (`fence-guidance`'s
   not-run list). The next real drawing session is that test.
 
-### 10.5 Skills shipped with the application
+### 10.5 Skills shipped with the application: decided and built
 
 **The operator's requirement, 2026-10-21:** pptmstr's own skills and plugins
 ship as part of the application, need no preparation in any project, and
@@ -1445,17 +1445,85 @@ two live runs by the operator, `cmd-20261021T171105Z-ba3cb4bb3e64` and
   `pptmstr:figures`. The stub's always-on cost is about 43 tokens, against
   today's 1,968 characters.
 
-**What this section adds, and leaves open.** The packaged skill and the floor
-answer different failures from 10.1. The floor has to carry what must never
-be missed: "the pane is the display" and "prefer Mermaid for graphs". Those are
-the two that cost this session 17 tool calls, and a skill the model does not
-choose to load cannot prevent them. The design rules and the TeX list can move.
-Still open:
-- **Gate decision (operator or lead):** admit `Skill` for `pptmstr:` names on
-  every rung. This is not declared.
+**Why the floor keeps two rules.** The packaged skill and the floor answer
+different failures from 10.1. The floor has to carry what must never be
+missed: "the pane is the display" and "prefer Mermaid for graphs". Those two
+cost this session 17 tool calls, and a skill the model does not choose to load
+cannot prevent them. The design rules and the TeX list could move, and did.
+
+**Decided (the operator, 2026-10-21):** admit only `pptmstr:`-prefixed
+`Skill` calls, on every policy.
+
+**Built** (task `skill-ship`, builder-37) [ran: `make check`, 14,059 passed]:
+- **The plugin.** It is `pptmstr/plugins/pptmstr/`: a manifest named
+  `pptmstr` and one skill, `skills/pptmstr-figures/SKILL.md`, listed as
+  `pptmstr:pptmstr-figures`. It holds skills and nothing else, and
+  `tests/test_skill_ship.py` holds it to that: no MCP servers, hooks, LSP
+  servers, monitors, commands, agents or `bin/`. `plugins.root()` resolves
+  it through `importlib.resources.as_file` to an absolute path.
+- **One table, three readers.** `fences.skill_text()` builds SKILL.md from
+  `fences.RENDERED`. It carries each row's rules (the SVG rules, the Mermaid
+  kinds, the TeX use and refuse lists), the Mermaid-over-SVG choice, the card
+  advice, and "the pane is the display" with its export exception.
+- **SKILL.md is checked into the tree, and a test holds it equal to
+  `skill_text()`.** It is not generated at load or at build. An installed
+  package directory may not be writable, and generating it elsewhere would
+  make the loaded path differ from the shipped one. Generating it at build
+  would need a hatch hook. A checked-in file also shows up in a diff when the
+  table changes. The test's docstring names the one-line refresh.
+- **The floor** (`fences.prompt`) is 903 characters with every row, down
+  from 1,996. `PROMPT_LIMIT` is now 1,000, which leaves 97 of headroom. The
+  floor names:
+  - the fences that render;
+  - that no other fence is drawn;
+  - that a fence that fails shows its source;
+  - that `$` in prose is not mathematics;
+  - the pane is the display, with the export exception;
+  - Mermaid for nodes and edges, when both figure rows are installed;
+  - "Before drawing a diagram, chart or formula, load the
+    pptmstr:pptmstr-figures skill". The rules win over a skill's general
+    advice.
+
+  It still leaves out a row whose renderer is missing.
+- **The gate.** `classify` admits `Skill` on every rung when
+  `tool_input["skill"]` (where the probe's live runs recorded it) equals a
+  name in `plugins.SKILLS`. A test holds that set to the plugin's `skills/`
+  directory and to `fences.SKILL`. The comparison is equality, not prefix:
+  `pptmstr:../x`, `pptmstr: x`, `/pptmstr:…`, a padded name, a list and a
+  missing key all park, as every other skill does. All are tested on all
+  three rungs.
+- **The driver.** `_options` passes `plugins=[plugins.config()]` on every
+  launch: fresh, resumed, solo, team, contained, and in another cwd.
+  `skills` and `setting_sources` stay `None`, and the argv carries
+  `--plugin-dir` with no `--setting-sources` or `--allowedTools`.
+- **Workers with a tool list (the read-only reviewer roles) are not given
+  `Skill`, and their floor leaves out the skill sentence.**
+  - Adding `Skill` is safe at the gate, which admits only the shipped names.
+    But it would let those roles load a user's or a project's skill on one
+    approval, and that skill's `` !`cmd` `` lines run as it loads.
+  - The SDK calls `Skill` in `tools` deprecated, and that form is unrun.
+  - `AgentDefinition.skills` would preload the whole body, which is the cost
+    the skill exists to avoid.
+  - These roles review; they do not draw. A worker that inherits its tools
+    loads the skill on demand (probe L7).
+- 10.6's "4 characters of headroom" is now 97, and its PD4 line about
+  `fences._guidance` now applies to `fences._DISPLAY`, which both the floor
+  and the skill use.
+
+**Not run, or open:**
+- **Pending: the live check through pptmstr's own driver.**
+  `scripts/verify_skill_ship_live.py` launches one haiku `AgentSession` with
+  a drawing prompt, records every gate disposition, and writes
+  `shots/skill-ship-live/result.json`. The operator was asked to run it as
+  `cmd-20261021T204608Z-3e9b7a20a69e`. In the sandbox it reaches the CLI with
+  the real options and ends "Not logged in".
 - **Unrun, from the probe's not-run list:** any model but haiku; whether the
   `PreToolUse` hook sees a skill's `` !`cmd` `` lines; whether
-  `strict_mcp_config` keeps out a plugin's own MCP servers.
+  `strict_mcp_config` keeps out a plugin's own MCP servers. The shipped plugin
+  has none, and the test holds it there.
+- **Behaviour risk, accepted with the design.** The rules reach a session only
+  if it loads the skill (n=2 on haiku in the probe). The floor carries the two
+  rules whose miss cost the most.
 
 ### 10.6 Scope, not built: a figure-preview bus tool
 

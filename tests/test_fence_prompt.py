@@ -1,9 +1,10 @@
 """
-The table of drawn fences (``figures.fences``): the dispatcher and the session
-prompt read the same rows, a row whose renderer is missing is not promised, and
-every launch carries the text through ``AgentSession._system_prompt``.
+The table of drawn fences (``figures.fences``): the dispatcher, the session
+prompt and the packaged skill read the same rows, a row whose renderer is missing
+is not promised, and every launch carries the floor through
+``AgentSession._system_prompt``.
 
-The prompt's TeX lists are held to the library here too: a construct it tells
+The skill's TeX lists are held to the library here too: a construct it tells
 Claude to use is one ``gate.formula`` sets, and one it calls refused is refused.
 """
 
@@ -77,9 +78,11 @@ def test_with_everything_installed_every_row_is_named() -> None:
     text = fences.session_prompt()
     if fences.available() != fences.RENDERED:
         pytest.skip(f"not every renderer is installed: {fences.available()}")
+    skill = fences.skill_text()
     for row in fences.RENDERED:
         assert f"```{row.word}" in text
-        assert row.says in text
+        assert row.says not in text, "the rules are the skill's, not the floor's"
+        assert row.says in skill
 
 
 @pytest.mark.parametrize("row", fences.RENDERED, ids=lambda row: row.word)
@@ -93,7 +96,7 @@ def test_a_row_whose_renderer_is_missing_is_not_named(
     text = fences.session_prompt()
     assert f"```{row.word}" not in text
     for other in named:
-        assert f"```{other.word}" in text and other.says in text
+        assert f"```{other.word}" in text
 
 
 def test_mermaid_is_promised_by_the_read_mark_refuses_by(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,7 +187,10 @@ def test_reading_what_is_installed_imports_no_renderer() -> None:
     assert done.stdout.strip() == "[]"
 
 
-def test_the_text_says_what_the_task_asks_and_stays_short() -> None:
+LOAD_SKILL = "Before drawing a diagram, chart or formula, load the pptmstr:pptmstr-figures skill"
+
+
+def test_the_floor_says_what_the_task_asks_and_stays_short() -> None:
     text = fences.prompt(fences.RENDERED)
     assert len(text) <= fences.PROMPT_LIMIT, len(text)
     assert "When pptmstr typesets replies, the pane showing them draws" in text
@@ -193,16 +199,39 @@ def test_the_text_says_what_the_task_asks_and_stays_short() -> None:
     assert "Any other fence shows as code" not in text, "an honest diff fence is a diff view"
     assert "$...$ and $$...$$ in prose are not rendered" in text
     assert "shown as its source under a one-line reason" in text
-    assert "End every font-family with serif, sans-serif or monospace." in text
-    assert "<script>" in text and "<image>" in text
+    assert LOAD_SKILL in text
+    assert "win over a skill's general advice" in text
+    assert "<script>" not in text and "\\frac" not in text, "the rules are in the skill"
     assert fences.prompt(()) == ""
+
+
+def test_a_reader_that_cannot_load_the_skill_is_not_told_to() -> None:
+    text = fences.prompt(fences.RENDERED, skill=False)
+    assert "pptmstr-figures" not in text and "skill" not in text
+    assert "the pane is the display" in text
+    assert text == fences.prompt(fences.RENDERED).rsplit("\n", 1)[0]
 
 
 MERMAID_FIRST = "use ```mermaid, which lays them out"
 
 
-def test_the_guidance_says_the_pane_is_the_display_and_how_to_design_for_it() -> None:
+def test_the_floor_keeps_what_a_skill_left_unloaded_cannot_prevent() -> None:
+    """
+    The pane being the display and Mermaid for graphs are the two failures that
+    cost a session its tool calls (the planning record's §10.1), so they stay
+    always on; the skill repeats them beside the rest.
+    """
     text = fences.prompt(fences.RENDERED)
+    assert "the pane is the display" in text
+    assert "Unless asked for an export, do not render to a file" in text
+    assert MERMAID_FIRST in text and "Never compute a graph layout by hand" in text
+
+
+def test_the_skill_says_how_to_write_each_fence_and_design_for_the_pane() -> None:
+    text = fences.skill_text()
+    assert text.startswith("---\nname: pptmstr-figures\ndescription: ")
+    assert "End every font-family with serif, sans-serif or monospace." in text
+    assert "<script>" in text and "<image>" in text
     assert "the pane is the display" in text
     assert "Unless asked for an export, do not render to a file" in text
     assert "near-white card" in text and "literal colours" in text
@@ -211,17 +240,27 @@ def test_the_guidance_says_the_pane_is_the_display_and_how_to_design_for_it() ->
     assert MERMAID_FIRST in text and "Never compute a graph layout by hand" in text
 
 
+def test_the_skills_description_triggers_on_what_is_drawn() -> None:
+    head = fences.skill_text().split("\n---\n", 1)[0]
+    description = head.split("description: ", 1)[1].lower()
+    for word in ("diagram", "graph", "chart", "formula"):
+        assert word in description, word
+    assert ": " not in description, "a plain YAML scalar may not hold ': '"
+
+
 @pytest.mark.parametrize(
     "words", [("svg", "math"), ("svg",), ("math",)], ids=["svg+math", "svg", "math"]
 )
 def test_without_the_mermaid_row_the_text_says_nothing_of_mermaid(words: tuple[str, ...]) -> None:
     rows = tuple(row for row in fences.RENDERED if row.word in words)
     text = fences.prompt(rows)
+    skill = fences.skill_text(rows)
     assert "mermaid" not in text.lower()
+    assert "mermaid" not in skill.split("\n---\n", 1)[1].lower(), "the body follows the rows"
     for row in rows:
-        assert f"```{row.word}" in text and row.says in text
+        assert f"```{row.word}" in text and row.says in skill
     assert len(text) <= fences.PROMPT_LIMIT
-    assert ("near-white card" in text) == ("svg" in words), "card advice is for figures"
+    assert ("near-white card" in skill) == ("svg" in words), "card advice is for figures"
     assert "the pane is the display" in text
 
 
@@ -277,15 +316,20 @@ def test_every_worker_is_told_what_the_pane_draws(text: str) -> None:
     session = AgentSession(Bridge(), task="t", template=FEATURE)
     team = session._team()
     assert team and set(team) == {role.name for role in FEATURE.roles}
+    without = fences.session_prompt(skill=False)
+    assert {role.tools is None for role in FEATURE.roles} == {True, False}, "both kinds"
     for role in FEATURE.roles:
         own = worker_prompt(role, session.brief, session.policy, session.contained)
-        assert team[role.name].prompt == f"{own}\n\n{text}"
+        # A role with a tool list has no Skill tool, so it is not sent to one.
+        drawn = text if role.tools is None else without
+        assert team[role.name].prompt == f"{own}\n\n{drawn}"
+        assert team[role.name].tools is None or "Skill" not in team[role.name].tools
 
 
 def test_a_worker_is_told_nothing_more_when_nothing_is_drawn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(fences, "session_prompt", lambda: "")
+    monkeypatch.setattr(fences, "session_prompt", lambda **_: "")
     session = AgentSession(Bridge(), task="t", template=FEATURE)
     team = session._team()
     assert team
@@ -305,7 +349,7 @@ def test_a_resumed_session_carries_the_same_text_as_a_fresh_one(text: str, templ
 
 
 def test_with_nothing_drawn_a_solo_launch_has_no_append(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fences, "session_prompt", lambda: "")
+    monkeypatch.setattr(fences, "session_prompt", lambda **_: "")
     assert AgentSession(Bridge(), task="t")._system_prompt() is None
     resumed = AgentSession(Bridge(), task="t", resume=RESUMED)._system_prompt()
     assert resumed == {"type": "custom", "prompt": "", "snapshot": False}

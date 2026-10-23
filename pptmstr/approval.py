@@ -27,6 +27,7 @@ from typing import Any, assert_never
 
 from . import settings
 from .commandtext import visible
+from .plugins import SKILLS as _SHIPPED_SKILLS
 from .shellscan import _split_segments, is_read_only
 
 
@@ -366,6 +367,29 @@ _BUS_AUTO = frozenset(
         f"mcp__{_BUS_SERVER}__withdraw_command",
     }
 )
+
+
+def _shipped_skill(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
+    """
+    Whether this is a ``Skill`` call loading a skill pptmstr ships
+    (``plugins.SKILLS``), which every rung admits (the operator's decision,
+    2026-10-21; planning record §10.5).
+
+    The skill is pptmstr's own text, from its own package, and loading it runs
+    nothing. Any other skill keeps falling through: a user's or a project's skill
+    may carry `` !`command` `` lines the CLI runs as it loads, and whether the
+    ``PreToolUse`` hook sees those is unmeasured.
+
+    The name sits at ``tool_input["skill"]`` (``Skill {"skill":
+    "pptmstr:pptmstr-figures", "args": ...}``, recorded by the skill probe's live
+    runs). It is compared whole against the shipped names rather than by its
+    prefix, so ``pptmstr:../x``, ``pptmstr: x`` and a name with the prefix and no
+    such skill all park as any other skill does.
+    """
+    if tool_name != "Skill":
+        return False
+    name = tool_input.get("skill")
+    return isinstance(name, str) and name in _SHIPPED_SKILLS
 
 
 # -- another session's records ----------------------------------------------------
@@ -1044,6 +1068,8 @@ def classify(
         if records_read(tool_name, tool_input, session_id=session_id, cwd=cwd) is not None:
             return Disposition.REQUIRE_APPROVAL
     if tool_name in _AUTO or tool_name in _BUS_AUTO:
+        return Disposition.AUTO_APPROVE
+    if _shipped_skill(tool_name, tool_input):
         return Disposition.AUTO_APPROVE
     if _policy_admits(policy, tool_name, tool_input):
         return Disposition.AUTO_APPROVE
