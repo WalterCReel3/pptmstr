@@ -60,6 +60,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .sanitise import css_split, is_colour
+
 # ----------------------------------------------------------------------------------
 # The schema and its bounds
 # ----------------------------------------------------------------------------------
@@ -1014,15 +1016,18 @@ _PART = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?(%|deg)?")
 def parse_colour(text: str | None) -> int | None:
     """
     A CSS colour as ``0xRRGGBB``, or ``None`` for anything else (``none``,
-    ``transparent``, ``currentColor``, a URL, a malformed value). A trailing
-    ``!important`` is ignored. Alpha is not part of the answer: ``opacity`` says
-    it, and what the builder does with it is there.
+    ``transparent``, ``currentColor``, a URL, a malformed value). What is a colour is
+    the sanitiser's ``is_colour``, the grammar its paint fallbacks are held to. A
+    trailing ``!important`` is ignored. Alpha is not part of the answer: ``opacity``
+    says it, and what the builder does with it is there.
     """
     if not text:
         return None
     value = text.strip().lower()
     if value.endswith("!important"):
         value = value[: -len("!important")].strip()
+    if not is_colour(value):
+        return None
     if value in _NAMED:
         return _NAMED[value]
     hexed = _HEX.fullmatch(value)
@@ -1072,6 +1077,8 @@ def opacity(text: str | None) -> float:
     if not text:
         return 1.0
     value = text.strip().lower().removesuffix("!important").strip()
+    if not is_colour(value):
+        return 1.0
     hexed = _HEX.fullmatch(value)
     if hexed:
         digits = hexed.group(1)
@@ -1408,8 +1415,13 @@ def arc_to_cubics(
 
 
 def _style(el: ET.Element) -> dict[str, str]:
+    """
+    ``el``'s ``style=`` declarations by lowered property. Split as the sanitiser
+    splits it (``css_split``), so a ``;`` inside a string does not end a declaration
+    here either.
+    """
     out: dict[str, str] = {}
-    for decl in el.get("style", "").split(";"):
+    for decl, _ in css_split(el.get("style", ""), ";"):
         if ":" in decl:
             k, v = decl.split(":", 1)
             out[k.strip().lower()] = v.strip()
@@ -2111,7 +2123,10 @@ def _drawn(text: str) -> str:
 
 
 def _paints(value: str) -> bool:
-    return value.strip().removesuffix("!important").strip() not in ("none", "transparent")
+    """
+    False for ``none`` and ``transparent``, which are CSS keywords and so in any case.
+    """
+    return value.strip().lower().removesuffix("!important").strip() not in ("none", "transparent")
 
 
 def _owned(it: PathItem | TextRun, edge: int) -> PathItem | TextRun:

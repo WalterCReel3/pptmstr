@@ -784,6 +784,12 @@ WORST = {
         ROOT + '<rect style="--c:foo;', "fill:var(--c);", '"/></svg>'
     ),
     "one long colour function": _at_cap(ROOT + '<rect fill="url(#g) rgb(', "1,", ')"/></svg>'),
+    "one long spaced colour function": _at_cap(
+        ROOT + '<rect fill="url(#g) hsl(', "1deg / ", ')"/></svg>'
+    ),
+    "one long colour function of parentheses": _at_cap(
+        ROOT + '<rect fill="url(#g) rgb(', "(", ')"/></svg>'
+    ),
     "repeats of a long var in one <style>": _at_cap(
         ROOT + f"<style>:root{{--a:{'1 ' * 50_000}}}", ".c{x:var(--a)}", "</style></svg>"
     ),
@@ -971,7 +977,9 @@ def test_dangling_stroke_keeps_its_fallback() -> None:
     [
         ("url(#gone) foo", "none"),
         ("url(#gone) foo bar", "none"),
-        ("url(#gone) hsl(120deg, 50%, 50%)", "none"),
+        ("url(#gone) hsl(120rad, 50%, 50%)", "none"),
+        ("url(#gone) hsl(120deg, 50%, 50%)", "hsl(120deg, 50%, 50%)"),
+        ("url(#gone) rgb(1 2 3 / 50%)", "rgb(1 2 3 / 50%)"),
         ("url(#gone) rgb(1, 2, 3)", "rgb(1, 2, 3)"),
         ("url(#gone) rebeccapurple", "rebeccapurple"),
     ],
@@ -1008,13 +1016,20 @@ COLOURS = [
     "hsl(120,50%,50%)",
     "hsla(120,50%,50%,0.5)",
     "hsl(-120 50% 50%)",
+    "NONE",
+    "rgba(1,2,3,50%)",
+    "rgb(1 2 3 / 0.5)",
+    "rgb(1 2 3/50%)",
+    "rgb(10% 20% 30% / .5)",
+    "hsl(120deg,50%,50%)",
+    "HSLA(120DEG 50% 50% / 0.5)",
+    "hsl(-1.5e2deg, 50%, 50%)",
 ]
 NOT_COLOURS = [
     "",
     "foo",
     "red red",
     "red icc-color(x)",
-    "NONE",
     "inherit",
     "transparent",
     "#e8590",
@@ -1026,16 +1041,30 @@ NOT_COLOURS = [
     "rgb(,1,2,3)",
     "rgb(1, 2 3)",
     "rgb(1,2,3%)",
-    "rgba(1,2,3,50%)",
-    "rgb(1 2 3 / 0.5)",
     "rgb (1,2,3)",
     "rgb(1,2,3",
     "rgb(1,2,(3))",
-    "hsl(120deg,50%,50%)",
     "hsl(120,50,50)",
     "hsl(120%,50%,50%)",
     "lab(50 0 0)",
     "url(#a)",
+    # Only numbers, units and separators stand between the parentheses.
+    'rgb(1 2 3 @import "x")',
+    'rgb(1 2 3 "a;display:none")',
+    "rgb(1,2,3 @import)",
+    "rgb(1 2 3 / url(#a))",
+    "rgb(1 2 3 / 0.5 x)",
+    "rgb(1 2 3 0.5)",
+    "rgb(1,2,3/0.5)",
+    "rgb(1 2 3 /)",
+    "rgb(1 2 / 3)",
+    "rgb(1 2 3 / 0.5 / 1)",
+    "rgb(1deg,2,3)",
+    "rgb(1e999,0,0)",
+    "rgba(1,2,3,1e999)",
+    "hsl(1rad,50%,50%)",
+    "hsl(deg,50%,50%)",
+    "hsl(120 50% 50% / 5px)",
 ]
 
 
@@ -1064,6 +1093,75 @@ def test_every_kept_colour_is_one_the_display_list_reads() -> None:
         assert parse_colour(kept) is not None, (colour, kept)
 
 
+@pytest.mark.parametrize("text", NOT_COLOURS)
+def test_the_display_list_refuses_what_the_sanitiser_refuses(text: str) -> None:
+    """
+    One grammar: `parse_colour` reads no colour, and `opacity` no alpha, from anything
+    `is_colour` refuses, so `rgb(1 2 3 @import "x")` is no more a colour to the pane
+    than to the sanitiser.
+    """
+    from pptmstr.figures.displaylist import opacity, parse_colour
+
+    assert parse_colour(text) is None
+    assert opacity(text) == 1.0
+
+
+@pytest.mark.parametrize(
+    "colour, rgb, alpha",
+    [
+        ("hsl(120deg, 50%, 50%)", 0x40BF40, 1.0),
+        ("rgba(255, 0, 0, 50%)", 0xFF0000, 0.5),
+        ("rgb(255 0 0 / 0.25)", 0xFF0000, 0.25),
+        ("hsl(240deg 100% 50% / 40%)", 0x0000FF, 0.4),
+    ],
+)
+@pytest.mark.parametrize("where", ["fill", "style"])
+def test_a_widened_fallback_survives_and_is_drawn(
+    colour: str, rgb: int, alpha: float, where: str
+) -> None:
+    from pptmstr.figures import displaylist as D
+
+    value = f"url(#gone) {colour}"
+    paint = f'fill="{value}"' if where == "fill" else f'style="fill:{value}"'
+    out = passed(doc(f'<g class="node" id="n"><rect width="50" height="50" {paint}/></g>'))
+    assert last_fill(out) == colour
+    (drawn,) = D.from_svg(out.svg).items
+    assert isinstance(drawn, D.PathItem) and drawn.fill
+    assert (D.parse_colour(colour), D.opacity(colour)) == (rgb, pytest.approx(alpha))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "url(http://x) rgb(1 2 3 @import 'y')",
+        'url(#gone) rgb(1 2 3 "a;display:none")',
+        "url(http://x) rgb(1 2 3 / url(http://y))",
+        "url(#gone) hsl(1 2% 3% / 1 @import)",
+    ],
+)
+def test_a_repainted_fallback_is_held_to_the_grammar_in_attributes_and_css(value: str) -> None:
+    """
+    `_repaint` and step 8 put only a colour `is_colour` accepts, or `none`, in place of
+    the paint: in a presentation attribute, in `style=`, and in a `<style>` rule, where
+    a fallback carrying `@import` would otherwise cost the whole sheet.
+    """
+    from pptmstr.figures.sanitise import is_colour
+
+    out = passed(
+        doc(
+            f"<style>.a{{stroke-width:3; fill:{value}}}</style>"
+            f'<rect class="a" fill="{quoted(value)}" style="stroke:{quoted(value)}"/>'
+        )
+    )
+    assert "@import" not in out.svg and '"a;' not in out.svg
+    rect = find_all(out, "rect")[0]
+    assert rect.get("fill") == "none" and is_colour(rect.get("fill") or "")
+    assert (rect.get("style") or "").replace(" ", "") == "stroke:none"
+    sheets = [(s.text or "").replace(" ", "") for s in find_all(out, "style")]
+    # An `@import` anywhere in a `<style>` drops it whole (step 4), before any repaint.
+    assert sheets == ([] if "@import" in value else [".a{stroke-width:3;fill:none}"])
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -1077,11 +1175,11 @@ def test_every_kept_colour_is_one_the_display_list_reads() -> None:
 )
 def test_an_invalid_fallback_becomes_none(body: str) -> None:
     svg = doc(
-        "<style>.a{fill:url(#gone) rgba(1,2,3,50%)}</style>"
+        "<style>.a{fill:url(#gone) rgba(1,2,3,50px)}</style>"
         f'<rect width="200" height="100" fill="#fff"/><rect width="200" height="100" {body}/>'
     )
     out = passed(svg)
-    assert "foo" not in out.svg and "50%" not in out.svg and "url(" not in out.svg
+    assert "foo" not in out.svg and "50px" not in out.svg and "url(" not in out.svg
     style = find_all(out, "style")[0].text or ""
     assert last_fill(out) == "none" or (
         body == 'class="a"' and "fill:none" in style.replace(" ", "")
@@ -1356,8 +1454,8 @@ def test_a_fragment_url_through_a_var_is_kept_and_still_resolved() -> None:
         f'<g style="--c: foo"><rect {FULL} fill="var(--c)"/></g>',
         f'<style>:root{{--c:1px solid}} .a{{fill:var(--c)}}</style><rect class="a" {FULL}/>',
         f'<rect {FULL} fill="var(--gone, foo bar)"/>',
-        f'<g style="--c: NONE"><rect {FULL} fill="var(--c)"/></g>',
-        f'<g style="--c: hsl(120deg, 50%, 50%)"><rect {FULL} fill="var(--c)"/></g>',
+        f'<g style="--c: rgb(1 2 3 0.5)"><rect {FULL} fill="var(--c)"/></g>',
+        f'<g style="--c: hsl(120rad, 50%, 50%)"><rect {FULL} fill="var(--c)"/></g>',
     ],
 )
 def test_a_var_resolving_to_a_non_colour_paint_is_painted_none(body: str) -> None:
@@ -1596,6 +1694,14 @@ REMOVED_RULES_PROBE = (
     "  class B p\n  style A fill:#bbf,filter:blur(2px),font-family:Papyrus\n"
     "  style C fill:rebeccapurple\n  linkStyle 0 stroke:rebeccapurple\n"
 )
+# Custom properties in a statement, which step 9 substitutes: a colour, a removed
+# rule's `rebeccapurple` and `color` among them, and a value that is not a colour.
+VAR_PROBE = (
+    "flowchart LR\n  A[One] --> B[Two]\n  B --> C[Three]\n"
+    "  classDef p --f:#f00,fill:var(--f),--c:rebeccapurple,color:var(--c)\n"
+    "  class B p\n  style A --g:#0f0,fill:var(--g),stroke:var(--s)\n"
+    "  style C --k:foo,color:var(--k),stroke:var(--k)\n"
+)
 _SPELLED = re.compile(r"(?<![\w-])rebeccapurple(?![\w-])", re.IGNORECASE)
 _GENERICS = ("serif", "sans-serif", "monospace")
 
@@ -1654,6 +1760,7 @@ def _golden_sources() -> dict[str, str]:
         "styled": golden.STYLED,
         **{f"clash {n}": source for n, source in enumerate(clash)},
         "removed-rules probe": REMOVED_RULES_PROBE,
+        "var() probe": VAR_PROBE,
     }
 
 
@@ -1661,9 +1768,9 @@ def test_the_removed_rules_change_no_golden_display_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    The five families, the 21-node graph, the styled and clash diagrams, and a probe
-    that uses every removed rule: each one's display list, byte for byte, is the same
-    with those rules applied as without them.
+    The five families, the 21-node graph, the styled and clash diagrams, a probe that
+    uses every removed rule, and one that reaches them through `var()`: each one's
+    display list, byte for byte, is the same with those rules applied as without them.
     """
     from pptmstr.figures import displaylist as D
     from pptmstr.figures import mermaid
@@ -1680,8 +1787,8 @@ def test_the_removed_rules_change_no_golden_display_list(
         assert D.encode(D.from_mermaid(source, then)) == now, name
         if ET.tostring(ET.fromstring(then)) != ET.tostring(ET.fromstring(laid.svg)):
             changed.append(name)
-    # Not vacuous: the probe's SVG is one the removed rules would have changed.
-    assert "removed-rules probe" in changed
+    # Not vacuous: the probes' SVG is one the removed rules would have changed.
+    assert "removed-rules probe" in changed and "var() probe" in changed
 
 
 def test_a_chain_of_masks_and_unread_colours_leave_the_display_list_as_it_is() -> None:
@@ -1725,6 +1832,60 @@ def test_a_repainted_fill_is_one_the_display_list_reads_differently(fill: str) -
     (raw,) = D.from_svg(svg).items
     assert isinstance(drawn, D.PathItem) and isinstance(raw, D.PathItem)
     assert (drawn.fill, raw.fill) == (False, True)
+
+
+@pytest.mark.parametrize("value", ["NONE", "None", "TRANSPARENT", "none !IMPORTANT"])
+def test_none_in_any_case_is_no_paint(value: str) -> None:
+    from pptmstr.figures import displaylist as D
+
+    out = passed(doc(f'<rect width="50" height="50" fill="{value}" style="stroke:{value}"/>'))
+    assert D.from_svg(out.svg).items == ()
+
+
+# A declaration hidden in a string, where the sanitiser sees one property (`x`) and
+# a splitter that ignored quotes would see a second: a marker or a paint server that
+# names a `<g>`, which step 8 removes when it is written in the open.
+HIDDEN = '<g id="G"><rect width="30" height="30" fill="#f00"/></g>'
+
+
+EDGE = '<path class="flowchart-link" d="M0 0L90 90" stroke="#000" style="{s}"/>'
+BOX = '<rect x="40" y="40" width="50" height="50" fill="none" stroke="#000" style="{s}"/>'
+
+
+# An edge is never filled, so a hidden fill is tried on a box.
+@pytest.mark.parametrize(
+    "shape, hidden",
+    [(EDGE, "marker-end:url(#G)"), (BOX, "marker-end:url(#G)"), (BOX, "fill:url(#G)")],
+)
+def test_a_declaration_inside_a_string_is_not_read_by_the_display_list(
+    shape: str, hidden: str
+) -> None:
+    from pptmstr.figures import displaylist as D
+
+    crafted = passed(doc(HIDDEN + shape.format(s=f"x:'a;{hidden}'")))
+    plain = passed(doc(HIDDEN + shape.format(s="x:'a'")))
+    assert D.encode(D.from_svg(crafted.svg)) == D.encode(D.from_svg(plain.svg))
+    # In the open, step 8 removes or repaints it, and the display list draws the same.
+    opened = passed(doc(HIDDEN + shape.format(s=hidden)))
+    assert D.encode(D.from_svg(opened.svg)) == D.encode(D.from_svg(plain.svg))
+
+
+@pytest.mark.parametrize(
+    "style",
+    [
+        "x:'a;fill:red'; stroke:blue",
+        'x:"a;b:c" ; fill : red',
+        "fill:red/*;stroke:blue*/;opacity:0.5",
+        "x:'unclosed;fill:red",
+        "font-family:\"a;b:c\", 'c;d:e'; fill:#fff",
+    ],
+)
+def test_the_display_list_splits_style_as_the_sanitiser_does(style: str) -> None:
+    from pptmstr.figures import displaylist as D
+    from pptmstr.figures.sanitise import css_split
+
+    split = [p.partition(":")[0].strip().lower() for p, _ in css_split(style, ";") if ":" in p]
+    assert list(D._style(ET.Element("rect", style=style))) == split
 
 
 # Totality -----------------------------------------------------------------------------

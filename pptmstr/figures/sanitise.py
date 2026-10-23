@@ -18,7 +18,7 @@ inventory:
 - it changes what the display list is built from. The element allow-list (step 2)
   keeps the parser out of subtrees it would otherwise walk and draw (a `<pattern>`'s
   children). A `fill` or `stroke` the display list reads as painting unless it is
-  `none` or `transparent` (`displaylist._paints`), so the repaints of steps 3, 8 and
+  `none` or `transparent` in any case (`displaylist._paints`), so the repaints of steps 3, 8 and
   9 decide whether a shape is filled.
 
 A rule that did neither once the display list replaced rasterising has been removed:
@@ -53,7 +53,9 @@ Policy, in the order it is applied:
    stroked by its role: there the value becomes the colour after a leading `url()`
    (`url(http://x) red` is `red`) or `none`, as in step 8, and `Sanitised.notes` says
    so; the same holds for those declarations in CSS (step 4). Such a fallback is kept
-   only if it is a colour in the grammar of `_colour_or_none`.
+   only if it is a colour in the grammar of `is_colour`, which `displaylist.parse_colour`
+   holds a colour to as well; it admits only numbers and separators inside a colour
+   function, so a fallback cannot carry what this step removes.
 4. **CSS** in `style=` and in `<style>` is split into declarations, and a declaration
    with a backslash, `@import`, a non-fragment `url(` or a URL-taking function is
    dropped whole, or repainted if it sets `fill` or `stroke` (step 3). In a `<style>`,
@@ -646,12 +648,12 @@ def _custom_properties(root: ET.Element, env: _Vars) -> None:
 
 def _split(css: str, delimiters: str, env: _Vars) -> list[tuple[str, str]]:
     """
-    `_css_split` once per text: step 9 reads each text twice, to collect and to
+    `css_split` once per text: step 9 reads each text twice, to collect and to
     substitute, and a stylesheet is up to a megabyte.
     """
     pieces = env.splits.get((css, delimiters))
     if pieces is None:
-        pieces = env.splits[css, delimiters] = list(_css_split(css, delimiters))
+        pieces = env.splits[css, delimiters] = list(css_split(css, delimiters))
     return pieces
 
 
@@ -982,42 +984,65 @@ NAMED_COLOURS: frozenset[str] = frozenset("""
     """.split())
 
 _HEX_COLOUR = re.compile(r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})")
-_COLOUR_FUNCTION = re.compile(r"(rgba?|hsla?)\(", re.IGNORECASE)
+_COLOUR_FUNCTION = re.compile(r"(rgba?|hsla?)\((.*)\)", re.IGNORECASE | re.DOTALL)
+
+
+def is_colour(text: str) -> bool:
+    """
+    True if `text`, stripped, is a colour in the one grammar both this module and
+    `displaylist.parse_colour` hold a colour to; keywords and function names in any
+    case. Accepted: a named colour (`NAMED_COLOURS`), `#rgb`, `#rgba`, `#rrggbb`,
+    `#rrggbbaa`, `currentColor`, `none`, `rgb()`/`rgba()` of three numbers or three
+    percentages, and `hsl()`/`hsla()` of a hue (a number, or one in `deg`) and two
+    percentages. The arguments are separated either by commas, with an optional
+    fourth for alpha, or by whitespace, with an optional `/ alpha`; alpha is a number
+    or a percentage. A number may be signed or have an exponent, and must be finite.
+
+    Every argument is one whole token, so nothing but numbers, units, separators and
+    whitespace can stand inside the parentheses: `rgb(1 2 3 @import "x")` is not a
+    colour. Other units (`rad`, `turn`), `none` as an argument, and the other CSS
+    colour functions are refused, because the display list does not draw them.
+    """
+    colour = text.strip()
+    lowered = colour.lower()
+    if lowered in NAMED_COLOURS or lowered in ("none", "currentcolor"):
+        return True
+    if _HEX_COLOUR.fullmatch(colour):
+        return True
+    function = _COLOUR_FUNCTION.fullmatch(colour)
+    if function is None:
+        return False
+    inner = function.group(2)
+    alpha: str | None
+    if "," in inner:
+        args = [a.strip() for a in inner.split(",")]
+        if len(args) not in (3, 4):
+            return False
+        channels, alpha = args[:3], (args[3] if len(args) == 4 else None)
+    else:
+        body, slash, after = inner.partition("/")
+        channels = body.split()
+        alpha = after.strip() if slash else None
+        if len(channels) != 3:
+            return False
+    if alpha is not None and not (_is_number(alpha) or _is_percentage(alpha)):
+        return False
+    if function.group(1).lower().startswith("rgb"):
+        return all(map(_is_number, channels)) or all(map(_is_percentage, channels))
+    hue = channels[0][:-3] if channels[0][-3:].lower() == "deg" else channels[0]
+    return _is_number(hue) and _is_percentage(channels[1]) and _is_percentage(channels[2])
 
 
 def _colour_or_none(text: str) -> str:
     """
-    `text` stripped if it is a colour, else `none`. Accepted: a named colour, `#rgb`,
-    `#rgba`, `#rrggbb`, `#rrggbbaa`, `currentColor`, `none`, and `rgb()`/`rgba()` of
-    three numbers or three percentages and `hsl()`/`hsla()` of a number and two
-    percentages, each with an optional numeric alpha, separated by commas or by
-    whitespace; a number may be signed or have an exponent. This is narrower than
-    `displaylist.parse_colour`, which also reads `hsl(120deg, ...)`, a percentage alpha
-    and `rgb(1 2 3 / 0.5)`: those are `none` here. `NONE` is not `none`.
+    `text` stripped if it is a colour (`is_colour`), else `none`.
     """
     colour = text.strip()
-    lowered = colour.lower()
-    if lowered in NAMED_COLOURS:
-        return colour
-    if colour == "none" or lowered == "currentcolor" or _HEX_COLOUR.fullmatch(colour):
-        return colour
-    function = _COLOUR_FUNCTION.match(colour)
-    if function is None or not colour.endswith(")"):
-        return "none"
-    inner = colour[function.end() : -1]
-    args = [a.strip() for a in inner.split(",")] if "," in inner else inner.split()
-    if len(args) not in (3, 4):
-        return "none"
-    alpha_ok = len(args) == 3 or _is_number(args[3])
-    if function.group(1).lower().startswith("rgb"):
-        channels_ok = all(map(_is_number, args[:3])) or all(map(_is_percentage, args[:3]))
-    else:
-        channels_ok = _is_number(args[0]) and _is_percentage(args[1]) and _is_percentage(args[2])
-    return colour if alpha_ok and channels_ok else "none"
+    return colour if is_colour(colour) else "none"
 
 
 def _is_number(text: str) -> bool:
-    return _NUMBER.fullmatch(text) is not None
+    return _NUMBER.fullmatch(text) is not None and math.isfinite(float(text))
 
 
 def _is_percentage(text: str) -> bool:
@@ -1033,7 +1058,7 @@ def _resolve_declarations(
     without one it is a stylesheet and its delimiters are kept in place.
     """
     pieces: list[str] = []
-    for piece, delimiter in _css_split(text, ";" if joiner else ";{}"):
+    for piece, delimiter in css_split(text, ";" if joiner else ";{}"):
         prop, colon, value = piece.partition(":")
         if colon and _LOCAL_URL.search(value):
             resolved = _resolve_value(prop, value, kinds, notes)
@@ -1069,12 +1094,15 @@ def _css_unsafe(text: str) -> bool:
 _CSS_SPECIAL: dict[str, re.Pattern[str]] = {}
 
 
-def _css_split(text: str, delimiters: str) -> Iterator[tuple[str, str]]:
+def css_split(text: str, delimiters: str) -> Iterator[tuple[str, str]]:
     """
     Split CSS at top-level `delimiters`, outside strings, with comments removed (a
     comment separates tokens, so it becomes a space). Yields `(piece, delimiter)`;
     the last delimiter is "". A backslash is not interpreted: a piece holding one is
     dropped by the caller, so where an escaped quote ends a string does not matter.
+    `displaylist._style` splits `style=` with this too: a `;` inside a string must end
+    a declaration for both or for neither, or a declaration hidden in a value this
+    module checked as one property reaches the display list as another.
     """
     # It jumps from one character that matters to the next, rather than stepping a
     # character at a time: this runs over up to a megabyte.
@@ -1112,7 +1140,7 @@ def _css_split(text: str, delimiters: str) -> Iterator[tuple[str, str]]:
 
 def _clean_declarations(text: str, notes: dict[str, None]) -> str:
     kept = []
-    for declaration, _ in _css_split(text, ";"):
+    for declaration, _ in css_split(text, ";"):
         if not declaration.strip():
             continue
         if _css_unsafe(declaration):
@@ -1192,7 +1220,7 @@ def _clean_stylesheet(text: str, notes: dict[str, None]) -> str | None:
             return None
     pieces: list[str] = []
     skipping = 0  # open braces inside a rule being dropped
-    for piece, delimiter in _css_split(text, ";{}"):
+    for piece, delimiter in css_split(text, ";{}"):
         if skipping:
             skipping += (delimiter == "{") - (delimiter == "}")
             continue
@@ -1266,7 +1294,7 @@ def _view_box(text: str | None) -> tuple[float, float] | None:
 def _max_width(style: str | None) -> float | None:
     if style is None:
         return None
-    for declaration, _ in _css_split(style, ";"):
+    for declaration, _ in css_split(style, ";"):
         name, colon, value = declaration.partition(":")
         if colon and name.strip().lower() == "max-width":
             return _positive(value)
