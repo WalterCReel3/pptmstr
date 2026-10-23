@@ -1062,3 +1062,89 @@ def test_prose_code_and_mermaid_blocks_are_not_resized() -> None:
         else:
             assert now is was
             assert all(run.scale == 0.0 for run in getattr(now, "runs", ()))
+
+
+# -- the space around a formula -----------------------------------------------------
+
+
+def test_a_formula_s_air_is_half_a_line_at_one_and_grows_with_its_scale() -> None:
+    from imscribe import BlockKind
+
+    paragraph = themes.document_theme().blocks[BlockKind.PARAGRAPH]
+    at_1 = views.formula_style(paragraph, 1.0)
+    at_2 = views.formula_style(paragraph, 2.0)
+    assert at_1.space_above == round(0.5 * paragraph.leading)
+    assert at_2.space_above == round(0.75 * paragraph.leading)
+    for style in (at_1, at_2):
+        assert style.space_below == paragraph.space_below + style.space_above
+        assert (style.font, style.leading, style.align, style.left_indent) == (
+            paragraph.font,
+            paragraph.leading,
+            paragraph.align,
+            paragraph.left_indent,
+        )
+
+
+def test_a_drawn_formula_carries_its_air_and_prose_keeps_the_theme_s_style() -> None:
+    from imscribe import BlockKind
+
+    cache = typeset.ViewCache()
+    source = f"Before.\n\n```math\n{SUM}\n```\n\nAfter.\n"
+    frame(lambda: typeset.markdown(cache, "doc", source))
+    view = cache.view("doc")
+    paragraph = themes.document_theme().blocks[BlockKind.PARAGRAPH]
+    (block,) = formulas(view)
+    assert block.scale == 2.0
+    assert block.style.space_above == round(0.75 * block.style.leading) > 0
+    for other in view.blocks:
+        if not views._is_formula(other):
+            assert other.style == paragraph
+
+
+def _gaps(source: str) -> tuple[float, float, float]:
+    """
+    How far the formula's set lines stand from the prose line over it and the one
+    under it, and the height claimed on the first frame and on the second.
+    """
+    cache = typeset.ViewCache()
+    frame(lambda: typeset.markdown(cache, "doc", source))
+    first = cache.height("doc")
+    frame(lambda: typeset.markdown(cache, "doc", source))
+    assert cache.height("doc") == first, "the height changed after the first draw"
+    view = cache.view("doc")
+    (at,) = [i for i, block in enumerate(view.blocks) if views._is_formula(block)]
+    above = max(float(line.bottom) for line in view.set_lines(at - 1, at))
+    lines = view.set_lines(at, at + 1)
+    top = min(float(line.top) for line in lines)
+    bottom = max(float(line.bottom) for line in lines)
+    below = min(float(line.top) for line in view.set_lines(at + 1, at + 2))
+    assert first is not None
+    return top - above, below - bottom, first
+
+
+def test_the_air_is_on_screen_either_side_and_counted_before_the_first_draw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The same document with no air and with it: the formula stands its air further
+    from the prose on each side, and the height claimed on the first frame, which
+    the second keeps, is taller by both.
+    """
+    from imscribe import px_from_sp
+
+    source = f"Before.\n\n```math\n{SUM}\n```\n\nAfter.\n"
+    monkeypatch.setattr(views, "FORMULA_AIR", 0.0)
+    monkeypatch.setattr(views, "FORMULA_AIR_PER_SCALE", 0.0)
+    over_0, under_0, tall_0 = _gaps(source)
+    monkeypatch.undo()
+    monkeypatch.setattr(views, "_SIZED", {})
+    over, under, tall = _gaps(source)
+    theme_ = themes.document_theme()
+    from imscribe import BlockKind
+
+    leading = theme_.blocks[BlockKind.PARAGRAPH].leading
+    air = px_from_sp(round(0.75 * leading), theme_.px_per_inch)
+    assert air > 5.0
+    assert over - over_0 == pytest.approx(air, abs=1.0)
+    assert under - under_0 == pytest.approx(air, abs=1.0)
+    assert tall - tall_0 == pytest.approx(2 * air, abs=2.0)

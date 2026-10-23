@@ -105,7 +105,9 @@ measure hands the blocks again only when a scale changes (``_draw``,
 ``_Captioned.revision``), and nothing is read again. **A formula wider than the
 measure at 1 runs past it**: the library never breaks a display formula, so the
 window is told how far it reaches (``_reach``) and scrolls sideways to it, as
-to a long line of code.
+to a long line of code. **A formula has space above and below it that grows with
+its scale** (``formula_style``), a field of its block's style, so its height is
+known before it is drawn; no other block's style is touched.
 
 ## When the library stops
 
@@ -1498,6 +1500,7 @@ def _formula_type() -> Any:
                 size: tuple[float, float, float] = (0.0, 0.0, 0.0),
             ) -> Any:
                 kept = {name: getattr(made, name) for name in MarkdownText.__dataclass_fields__}
+                kept["style"] = formula_style(made.style, scale)
                 return cls(**kept, body=body, fence=fence, theme=theme, scale=scale, size=size)
 
         _FORMULA_TYPE.append(_Formula)
@@ -1528,6 +1531,38 @@ limits beside a ``\\frac`` is 2.2 lines at 1 and keeps its 2, and a ``\\sum`` wi
 limits over a stacked fraction, 2.7 lines at 1, is set at 1.75 rather than 2,
 about five lines of the text around it, where at 2 it would be five and a half.
 """
+
+FORMULA_AIR = 0.5
+"""
+The space a display formula at 1 has above and below it, in lines of the text it
+was read in (its style's ``leading``), on top of the gap that text already keeps
+after a paragraph.
+"""
+
+FORMULA_AIR_PER_SCALE = 0.25
+"""
+The lines of space a display formula gains above and below for each step of
+scale over 1: at 2, three quarters of a line. A formula set larger is set apart
+more, so the prose either side of it does not read as sitting on it.
+"""
+
+
+def formula_style(style: Any, scale: float) -> Any:
+    """
+    The style a display formula at ``scale`` is set in: ``style``, the paragraph
+    style its ``$$`` was read in, with ``FORMULA_AIR`` plus ``FORMULA_AIR_PER_SCALE``
+    a step of scale over 1 of its lines above it and below it.
+
+    The library stacks two blocks the lower's ``space_above`` plus the upper's
+    ``space_below`` apart, so the gap over a formula is the paragraph's own
+    ``space_below`` and this air. Under it the paragraph's ``space_below`` is kept
+    and the air added, so a formula between two paragraphs has the same gap on
+    either side. It is a field of the block's style, so the library knows the
+    block's height from the style before the block is drawn.
+    """
+    air = round(style.leading * (FORMULA_AIR + FORMULA_AIR_PER_SCALE * (scale - 1.0)))
+    return replace(style, space_above=air, space_below=style.space_below + air)
+
 
 _SCALE_STEPS = 8
 """
