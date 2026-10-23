@@ -36,6 +36,8 @@ def _im(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """
     monkeypatch.setattr(gate, "_FORMULAS", OrderedDict())
     monkeypatch.setattr(gate, "_REFUSED", OrderedDict())
+    monkeypatch.setattr(gate, "_SIZES", OrderedDict())
+    monkeypatch.setattr(views, "_SIZED", {})
     _IM[:] = [seam]
     yield
     _IM.clear()
@@ -852,3 +854,211 @@ def test_a_formula_in_a_view_carries_the_theme_its_view_was_made_in() -> None:
     after = formulas(cache.view("doc"))[0].theme
     assert after is themes.document_theme() and after is not before
     assert formulas(handle.view)[0].theme is handle._source.theme
+
+
+# -- the size a formula is set at ------------------------------------------------------
+
+TALL = r"\sum_{k=1}^{n} \frac{\sum_{j=1}^{k} a_j}{\frac{b_k}{c_k}}"
+
+
+def test_the_scale_is_two_stepped_down_for_width_and_height_and_never_below_one() -> None:
+    line = 17.0
+    assert views.formula_scale((100.0, 20.0, line), None) == views.FORMULA_SCALE == 2.0
+    assert views.formula_scale((100.0, 20.0, line), 1000.0) == 2.0
+    # Fits at 1.5 exactly, and at 1.4 rounds down to a step that still fits.
+    assert views.formula_scale((100.0, 20.0, line), 150.0) == 1.5
+    assert views.formula_scale((100.0, 20.0, line), 140.0) == 1.375
+    assert 1.375 * 100.0 <= 140.0
+    # Wider than the measure at 1: today's size, which scrolls as it does today.
+    assert views.formula_scale((300.0, 20.0, line), 200.0) == 1.0
+    # Taller than the cap at 2, and taller than the cap at 1.
+    tall = views.FORMULA_LINES * line / 1.6
+    assert views.formula_scale((50.0, tall, line), None) == 1.5
+    assert views.formula_scale((50.0, views.FORMULA_LINES * line * 2, line), None) == 1.0
+    # Not measured: today's size.
+    assert views.formula_scale((0.0, 0.0, 0.0), 1000.0) == 1.0
+
+
+def _drawn(view: Any) -> list[tuple[Any, float, float]]:
+    """
+    Each formula of the view, with how far right and how tall its set lines are.
+    """
+    out = []
+    for at, block in enumerate(view.blocks):
+        if views._is_formula(block):
+            lines = view.set_lines(at, at + 1)
+            right = max(float(line.right) for line in lines)
+            out.append(
+                (
+                    block,
+                    right,
+                    max(float(line.bottom) for line in lines)
+                    - min(float(line.top) for line in lines),
+                )
+            )
+    return out
+
+
+def test_a_short_formula_is_set_at_twice_today_s_size() -> None:
+    cache = typeset.ViewCache()
+    frame(lambda: typeset.markdown(cache, "doc", f"Before.\n\n```math\n{SUM}\n```\n"))
+    ((block, _, tall),) = _drawn(cache.view("doc"))
+    assert block.scale == 2.0
+    assert all(run.scale == 2.0 for run in block.runs)
+    wide_1, tall_1, _ = block.size
+    assert tall == pytest.approx(2.0 * tall_1, rel=0.05)
+
+
+def test_a_formula_wider_than_the_measure_at_two_steps_down_to_fit_and_back_up() -> None:
+    """
+    The window narrows past the formula's width at 2: it is set again at the largest
+    step that fits, the part is not read again, and it never runs past the measure.
+    Wider again, it is 2 again.
+    """
+    source = f"Before.\n\n```math\n{SUM}\n```\n"
+    cache = typeset.ViewCache()
+    parts = (Part(source),)
+    frame(lambda: typeset.document(cache, "doc", parts), width=700.0)
+    entry = cache._entries["doc"]
+    read = dict(entry.read)
+    ((block, _, _),) = _drawn(cache.view("doc"))
+    wide_1 = block.size[0]
+    assert block.scale == 2.0
+    narrow = 1.5 * wide_1 + 40.0
+    frame(lambda: typeset.document(cache, "doc", parts), width=narrow)
+    ((block, right, _),) = _drawn(cache.view("doc"))
+    measure = entry.measure
+    assert measure is not None and 1.0 < block.scale < 2.0
+    assert block.scale * wide_1 <= measure
+    assert right <= measure + 0.5
+    assert entry.read.keys() == read.keys()
+    assert all(entry.read[key] is read[key] for key in read), "the part was read again"
+    assert cache.unbuilt("doc") == 0
+    frame(lambda: typeset.document(cache, "doc", parts), width=700.0)
+    ((block, _, _),) = _drawn(cache.view("doc"))
+    assert block.scale == 2.0
+
+
+def test_a_formula_wider_than_the_measure_at_one_is_set_at_one_and_reaches_as_today() -> None:
+    wide = " + ".join(f"a_{i}" for i in range(1, 9)) + " = b"
+    source = f"```math\n{wide}\n```\n"
+    cache = typeset.ViewCache()
+    for _ in range(2):
+        frame(lambda: typeset.markdown(cache, "doc", source), width=200.0)
+    ((block, right, _),) = _drawn(cache.view("doc"))
+    assert block.scale == 1.0
+    (segment,) = cache._entries["doc"].segments
+    assert segment.reach is not None
+    assert segment.reach[2] == pytest.approx(block.size[0], abs=1.0)
+    assert right == pytest.approx(block.size[0], abs=1.0)
+
+
+def test_a_tall_formula_is_capped_in_height() -> None:
+    cache = typeset.ViewCache()
+    frame(lambda: typeset.markdown(cache, "doc", f"```math\n{TALL}\n```\n"))
+    ((block, _, tall),) = _drawn(cache.view("doc"))
+    _, tall_1, line = block.size
+    assert tall_1 * 2.0 > views.FORMULA_LINES * line, "the formula is not tall enough to cap"
+    assert 1.0 < block.scale < 2.0
+    assert block.scale * tall_1 <= views.FORMULA_LINES * line
+    assert tall <= views.FORMULA_LINES * line + 2.0
+
+
+def test_the_pre_check_is_asked_at_the_size_drawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[float] = []
+    real = gate._refusal
+
+    def recording(block: Any, theme_: Any) -> str | None:
+        asked.append(block.runs[0].scale)
+        return real(block, theme_)
+
+    monkeypatch.setattr(gate, "_refusal", recording)
+    cache = typeset.ViewCache()
+    frame(lambda: typeset.markdown(cache, "doc", f"```math\n{SUM}\n```\n"))
+    ((block, _, _),) = _drawn(cache.view("doc"))
+    assert block.scale == 2.0 and block.runs[0].scale in asked
+
+
+def test_a_formula_the_pre_check_refuses_at_two_is_set_at_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    No formula is known that the library refuses at 2 and sets at 1, so the library's
+    answer is stood in for. The formula is then set at 1, which was asked, and is not
+    code; the entry stays the library's.
+    """
+    real = gate._refusal
+
+    def above_one(block: Any, theme_: Any) -> str | None:
+        if any(run.scale > 1.0 for run in block.runs):
+            return "too large at this size"
+        return real(block, theme_)
+
+    monkeypatch.setattr(gate, "_refusal", above_one)
+    cache = typeset.ViewCache()
+    for _ in range(2):
+        frame(lambda: typeset.markdown(cache, "doc", f"```math\n{SUM}\n```\n"))
+    assert kinds(cache.view("doc")) == ["formula"]
+    ((block, _, _),) = _drawn(cache.view("doc"))
+    assert block.scale == 1.0
+    assert cache._entries["doc"].unset is None and cache.unbuilt("doc") == 0
+
+
+def test_the_guard_reads_the_formula_at_the_size_drawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    With the ask standing aside, the view meets the refused formula at 2, the size it
+    was handed, and the guard keeps it: the fence is code, at every size.
+    """
+    monkeypatch.setattr(gate, "_refusal", lambda block, theme_: None)
+    kept: list[float] = []
+    real = gate.refused
+
+    def recording(body: str, theme_: Any, reason: str) -> None:
+        view = cache.view("doc")
+        kept.extend(b.scale for b in view.blocks if views._is_formula(b) and b.body == body)
+        real(body, theme_, reason)
+
+    monkeypatch.setattr(gate, "refused", recording)
+    cache = typeset.ViewCache()
+    for _ in range(2):
+        frame(lambda: typeset.markdown(cache, "doc", f"```math\n{ALIGNED}\n```\n"))
+    assert kept == [2.0]
+    assert kinds(cache.view("doc")) == ["warn", "code:math"]
+    assert gate.formula(ALIGNED, themes.document_theme(), 1.0)[0] is None
+
+
+def test_a_stream_sizes_its_formula_and_resizes_it_with_the_measure() -> None:
+    cache = typeset.ViewCache()
+    handle = typeset.stream(cache, "reply")
+    handle.append(f"Before.\n\n```math\n{SUM}\n```\n")
+    frame(lambda: handle.draw(), width=700.0)
+    ((block, _, _),) = _drawn(handle.view)
+    assert block.scale == 2.0
+    narrow = 1.5 * block.size[0] + 40.0
+    frame(lambda: handle.draw(), width=narrow)
+    ((block, right, _),) = _drawn(handle.view)
+    assert 1.0 < block.scale < 2.0 and right <= narrow + 0.5
+    assert handle.unbuilt == 0
+
+
+def test_prose_code_and_mermaid_blocks_are_not_resized() -> None:
+    """
+    Every block that is not a formula is handed to the view as it was read: the
+    same object, so nothing about it changed.
+    """
+    source = (
+        f"Price $PATH.\n\n```python\nx = 1\n```\n\n```mermaid\ngraph TD; A-->B\n```\n\n"
+        f"```math\n{SUM}\n```\n"
+    )
+    cache = typeset.ViewCache()
+    frame(lambda: typeset.markdown(cache, "doc", source))
+    entry = cache._entries["doc"]
+    (read,) = entry.read.values()
+    handed = cache.view("doc").blocks
+    assert len(read) == len(handed)
+    for was, now in zip(read, handed, strict=True):
+        if views._is_formula(now):
+            assert now.scale == 2.0 and was.scale == 1.0
+        else:
+            assert now is was
+            assert all(run.scale == 0.0 for run in getattr(now, "runs", ()))

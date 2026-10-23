@@ -92,9 +92,20 @@ first whether it will set the formula (``gate.formula``), and one it refuses sta
 code under a line in the warn ink saying why; one it refuses in a view all the
 same is caught after the draw and made code the same way (``_formulas_refused``),
 so one formula never takes its entry off the library. A copy gives the fence as
-written (``_formula_copy``). **A formula wider than the measure runs past it**:
-the library never breaks a display formula, so the window is told how far it
-reaches (``_reach``) and scrolls sideways to it, as to a long line of code.
+written (``_formula_copy``).
+
+**A formula is set at twice its text's size, stepped down to fit**
+(``formula_scale``): no wider than the measure, no taller than
+``FORMULA_LINES`` lines of its theme, and never smaller than its text's size.
+The scale is a run's (``RunDescription.scale``), so the body text around it is
+untouched and it follows the operator's size setting. It is chosen when the
+blocks are handed to a view, at the measure of the draw (``_sized``), and asked
+of the library at that scale; one refused there is set at 1. A draw at another
+measure hands the blocks again only when a scale changes (``_draw``,
+``_Captioned.revision``), and nothing is read again. **A formula wider than the
+measure at 1 runs past it**: the library never breaks a display formula, so the
+window is told how far it reaches (``_reach``) and scrolls sideways to it, as
+to a long line of code.
 
 ## When the library stops
 
@@ -413,6 +424,12 @@ class _Entry:
     unset: str | None = None
     # The parts as ImGui draws them then: markdown as its source.
     written: tuple[Part, ...] = ()
+    # The measure the views' formulas were sized for, what each is sized by
+    # (``_fits``), and the scales that gave (``_scales``): a draw at another
+    # measure sizes them again only where a scale changes (``_refit``).
+    measure: float | None = None
+    fits: tuple[tuple[float, float, float], ...] = ()
+    scales: tuple[float, ...] = ()
     # For the kind ``stream``: the ``Stream`` a pane appends to.
     stream: Stream | None = None
     # For the kind ``diff``: the library's model of what was last handed over,
@@ -680,6 +697,10 @@ class _Captioned:
         self.plain = False
         self.hosting = False
         self.closed = False
+        # The measure the stream is drawn at, which its formulas are sized for
+        # (``_sized``), and what each formula last answered is sized by.
+        self.measure: float | None = None
+        self._fits: tuple[tuple[float, float, float], ...] = ()
         # Whether a defect in this class's own reading has made it answer the
         # stream's blocks as they are (``_own``).
         self.raw = False
@@ -709,7 +730,8 @@ class _Captioned:
 
     @property
     def revision(self) -> Any:
-        return (self._stream.revision, self.hosting, self.closed, self.raw)
+        sizes = _scales(self._fits, self.measure)
+        return (self._stream.revision, self.hosting, self.closed, self.raw, sizes)
 
     @property
     def blocks(self) -> tuple[Any, ...]:
@@ -737,7 +759,7 @@ class _Captioned:
                 answer = _captioned((block,), hosting, plain=plain, figures=settled, theme=theme)
                 held = (block, plain, hosting, settled, answer)
             made[id(block)] = held
-            answer = held[4]
+            answer = tuple(_sized(each, self.measure) for each in held[4])
             out += answer
             came += [at] * len(answer)
             # A formula stands for its fence one for one, and has no info string.
@@ -747,6 +769,7 @@ class _Captioned:
             own += [mine] * len(answer)
         self._made = made
         self._out, self._from, self._mine = tuple(out), came, own
+        self._fits = _fits(self._out)
         return self._out
 
     @property
@@ -1016,9 +1039,12 @@ class Stream:
         top = im.get_cursor_pos().y
         try:
             noted = gate.noted()
+            wide = _width(im, width)
             self._catch_up()
+            if self._captioned is not None:
+                self._captioned.measure = wide
             self._ink(ink, frame)
-            _show_view(im, entry.segments[0], _width(im, width), themes.palette(ink), None)
+            _show_view(im, entry.segments[0], wide, themes.palette(ink), None)
             short = _short(entry, noted)
             entry.missing = 0
             if short == _NOT_ALL_SET and self._unset is None and _formulas_refused(entry):
@@ -1115,6 +1141,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
     read: dict[tuple[str, int, bool, bool], tuple[Any, ...]] = {}
     segments: list[_Segment] = []
     run: list[int] = []
+    fits: list[tuple[float, float, float]] = []
 
     def close_run() -> None:
         if not run:
@@ -1132,7 +1159,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
                     parsed = gate.read(part.text, theme).blocks
                 made = _captioned(parsed, hosting, plain=plain, figures=True, theme=theme)
             read[key] = made
-            blocks += made
+            blocks += (_sized(block, entry.measure) for block in made)
             owner += [index] * len(made)
         view: Any = kept.pop(0) if kept else None
         if view is None:
@@ -1155,6 +1182,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
         segment = _Segment(tuple(run), view, tuple(owner), captions)
         segment.warned = _warned_lengths(blocks)
         segments.append(segment)
+        fits.extend(_fits(blocks))
         run.clear()
 
     for index, part in enumerate(parts):
@@ -1176,6 +1204,8 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
     entry.parts = parts
     entry.segments = segments
     entry.read = read
+    entry.fits = tuple(fits)
+    entry.scales = _scales(entry.fits, entry.measure)
     entry.inked = None
     entry.pending = []
     entry.natural = None
@@ -1403,6 +1433,7 @@ def _as_written(entry: _Entry, why: str) -> None:
     entry.pending = []
     entry.natural = None
     entry.shown = None
+    entry.fits = entry.scales = ()
 
 
 def is_math_fence(said: str) -> bool:
@@ -1451,11 +1482,23 @@ def _formula_type() -> Any:
             fence: str = ""
             # What it was read in: what a refusal is kept by.
             theme: Any = field(default=None, compare=False)
+            # The scale its runs are set at, and what ``formula_scale`` sizes
+            # it by: its width and height at 1 and its theme's line height.
+            scale: float = 1.0
+            size: tuple[float, float, float] = field(default=(0.0, 0.0, 0.0), compare=False)
 
             @classmethod
-            def of(cls, made: Any, body: str, fence: str, theme: Any) -> Any:
+            def of(
+                cls,
+                made: Any,
+                body: str,
+                fence: str,
+                theme: Any,
+                scale: float = 1.0,
+                size: tuple[float, float, float] = (0.0, 0.0, 0.0),
+            ) -> Any:
                 kept = {name: getattr(made, name) for name in MarkdownText.__dataclass_fields__}
-                return cls(**kept, body=body, fence=fence, theme=theme)
+                return cls(**kept, body=body, fence=fence, theme=theme, scale=scale, size=size)
 
         _FORMULA_TYPE.append(_Formula)
     return _FORMULA_TYPE[0]
@@ -1466,6 +1509,100 @@ def _is_formula(block: Any) -> bool:
     Whether a block is a settled math fence set as a formula (``_formula_type``).
     """
     return bool(_FORMULA_TYPE) and isinstance(block, _FORMULA_TYPE[0])
+
+
+FORMULA_SCALE = 2.0
+"""
+How many times its text's size a display formula is set at when nothing stops
+it. The operator's finding of 2026-10-22, from the running app: formulas set at
+the body's size are undersized for how legible math glyphs are on screen, and
+could be twice as large while taking the formula's own size into account.
+"""
+
+FORMULA_LINES = 5.0
+"""
+The tallest a display formula is set, in lines of its theme's paragraphs, unless
+that is less than its height at 1. Chosen from screenshots under Xvfb in both
+themes (2026-10-22, the planning record says what they showed): a ``\\sum`` with
+limits beside a ``\\frac`` is 2.2 lines at 1 and keeps its 2, and a ``\\sum`` with
+limits over a stacked fraction, 2.7 lines at 1, is set at 1.75 rather than 2,
+about five lines of the text around it, where at 2 it would be five and a half.
+"""
+
+_SCALE_STEPS = 8
+"""
+A scale is a whole number of eighths, rounded down: a window dragged wider sets
+a formula again at most eight times between 1 and 2, and a scale rounded down
+still fits what it was fitted to.
+"""
+
+
+def formula_scale(size: tuple[float, float, float], measure: float | None) -> float:
+    """
+    The scale a display formula is set at: ``FORMULA_SCALE``, stepped down until
+    it is no wider than ``measure`` and no taller than ``FORMULA_LINES`` of its
+    theme's lines, and never below 1, today's size. ``size`` is its width and
+    height at 1 and the line height (``gate.formula_size``), all in pixels. One
+    not measured is set at 1, and so is one already wider than the measure at 1:
+    it runs past it and the window scrolls to it (``_reach``), as far as before.
+    """
+    wide, tall, line = size
+    if not (wide > 0.0 and tall > 0.0):
+        return 1.0
+    scale = FORMULA_SCALE
+    if line > 0.0:
+        scale = min(scale, FORMULA_LINES * line / tall)
+    if measure is not None:
+        scale = min(scale, measure / wide)
+    return max(1.0, math.floor(scale * _SCALE_STEPS) / _SCALE_STEPS)
+
+
+def _fits(blocks: Sequence[Any]) -> tuple[tuple[float, float, float], ...]:
+    """
+    What ``formula_scale`` sizes each formula of ``blocks`` by, in order.
+    """
+    return tuple(block.size for block in blocks if _is_formula(block))
+
+
+def _scales(fits: Sequence[tuple[float, float, float]], measure: float | None) -> tuple[float, ...]:
+    return tuple(formula_scale(size, measure) for size in fits)
+
+
+_SIZED_KEPT = 256
+_SIZED: dict[tuple[str, str, int, float], Any] = {}
+"""
+A formula at another scale than 1, by its body, its fence, its theme and the
+scale: the same block each time it is asked for, so a view handed it again finds
+nothing changed. Held for the theme's identity, as ``gate``'s answers are.
+"""
+
+
+def _sized(block: Any, measure: float | None) -> Any:
+    """
+    A formula block (``_formula_type``, read at 1) at the scale ``formula_scale``
+    gives it at ``measure``, asked of the library at that scale
+    (``gate.formula``). One the library would not set at that scale is set at
+    1, the size it was asked at when it was read. Any other block as it is.
+    """
+    if not _is_formula(block):
+        return block
+    scale = formula_scale(block.size, measure)
+    if scale == block.scale:
+        return block
+    key = (block.body, block.fence, id(block.theme), scale)
+    held = _SIZED.get(key)
+    if held is not None and held.theme is block.theme:
+        return held
+    made, _ = gate.formula(block.body, block.theme, scale)
+    if made is None:
+        return block
+    sized = _formula_type().of(
+        made, block.body, block.fence, block.theme, scale=scale, size=block.size
+    )
+    _SIZED[key] = sized
+    while len(_SIZED) > _SIZED_KEPT:
+        del _SIZED[next(iter(_SIZED))]
+    return sized
 
 
 def _formula_copy(view: Any) -> str:
@@ -1565,7 +1702,8 @@ def _formula_block(block: Any, said: str, theme: Any) -> tuple[Any, ...]:
     if made is not None:
         try:
             fence = figures_host.fence_text(said, block.text)
-            return (_formula_type().of(made, block.text, fence, theme),)
+            size = gate.formula_size(made, block.text, theme)
+            return (_formula_type().of(made, block.text, fence, theme, size=size),)
         except TypesetUnavailable:
             raise
         except Exception as failure:
@@ -2181,6 +2319,13 @@ def _estimate(im: Any, entry: _Entry, wide: float) -> float:
     return tall
 
 
+def _inner(im: Any, wide: float) -> float:
+    """
+    The measure inside a capped child ``wide`` across (``_capped``).
+    """
+    return max(_MIN_WIDTH_PX, wide - float(im.get_style().scrollbar_size))
+
+
 def _capped(
     im: Any,
     key: Hashable,
@@ -2198,7 +2343,7 @@ def _capped(
     showing, so the text is not broken again on the frame one appears.
     """
     style = im.get_style()
-    inner = max(_MIN_WIDTH_PX, wide - style.scrollbar_size)
+    inner = _inner(im, wide)
     if entry.natural is None or entry.natural[1] != inner:
         entry.natural = (_estimate(im, entry, inner), inner)
     tall = max(1.0, min(entry.natural[0], float(cap)))
@@ -2254,6 +2399,7 @@ def _draw(
             return float(entry.height or 0.0)
         noted = gate.noted()
         bare = ink is not None
+        entry.measure = wide if height_cap is None else _inner(im, wide)
         if not same or entry.bare is not bare:
             given = parts if isinstance(parts, tuple) else tuple(parts)
             if given != entry.parts or entry.bare is not bare:
@@ -2262,6 +2408,10 @@ def _draw(
                 entry.bare = bare
                 _open(entry, given, on_link)
             entry.token = given
+        if entry.fits and _scales(entry.fits, entry.measure) != entry.scales:
+            # A formula's scale changed with the measure: its views are handed
+            # their blocks again, read as they were, and lay out only what changed.
+            _open(entry, entry.parts, on_link)
         if entry.inked is not ui_theme.current() or entry.pending:
             _ink(entry, frame)
         if entry.unset is not None:

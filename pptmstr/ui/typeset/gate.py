@@ -585,21 +585,27 @@ def read(source: str, theme: Any) -> Any:
 
 
 _FORMULAS_KEPT = 256
-_FORMULAS: OrderedDict[tuple[str, int], tuple[Any, Any, str]] = OrderedDict()
+_FORMULAS: OrderedDict[tuple[Any, ...], tuple[Any, Any, str]] = OrderedDict()
 """
-What ``formula`` answered, by the body and the theme it was read with: the
-last few hundred, because a stream made again reads every fence again and a
-settled document is read again when its text changes. A theme is a dict-holding
-dataclass and has no hash, so it is held by identity, and kept in the answer so
-that its identity is not another's: the seam's themes are made once an epoch
-(``themes.demoted``), so a theme of another size is another key.
+What ``formula`` answered, by the body, the theme it was read with and the scale
+it was asked at: the last few hundred, because a stream made again reads every
+fence again and a settled document is read again when its text changes. A theme
+is a dict-holding dataclass and has no hash, so it is held by identity, and kept
+in the answer so that its identity is not another's: the seam's themes are made
+once an epoch (``themes.demoted``), so a theme of another size is another key.
 """
 
-_REFUSED: OrderedDict[tuple[str, int], tuple[Any, Any, str]] = OrderedDict()
+_REFUSED: OrderedDict[tuple[Any, ...], tuple[Any, Any, str]] = OrderedDict()
 """
-What a view refused after ``formula`` said it would set it (``refused``), keyed
-as ``_FORMULAS`` is and held apart from it: only another such refusal evicts one,
-so reading other formulas cannot make the view meet it again.
+What a view refused after ``formula`` said it would set it (``refused``), by the
+body and the theme, at every scale, and held apart from ``_FORMULAS``: only
+another such refusal evicts one, so reading other formulas cannot make the view
+meet it again.
+"""
+
+_SIZES: OrderedDict[tuple[Any, ...], tuple[Any, tuple[float, float, float]]] = OrderedDict()
+"""
+What ``formula_size`` measured, keyed and kept as ``_FORMULAS`` is.
 """
 
 _NOT_ONE_FORMULA = "the fence does not hold one display formula"
@@ -613,10 +619,11 @@ about it (``formula``, ``own_defect``).
 _READING_FORMULA = into_library("reading a formula")
 
 
-def formula(body: str, theme: Any) -> tuple[Any, str]:
+def formula(body: str, theme: Any, scale: float = 1.0) -> tuple[Any, str]:
     """
     The body of a ```` ```math ```` fence as one display formula, set in
-    ``theme``: ``(block, "")``, or ``(None, reason)`` where it will not be set.
+    ``theme`` at ``scale`` times its text's size: ``(block, "")``, or
+    ``(None, reason)`` where it will not be set.
 
     Read alone, as ``$$`` + body + ``$$`` with mathematics on: **nothing else
     is ever read with mathematics on**, so a ``$`` in prose is text. The lines
@@ -633,8 +640,13 @@ def formula(body: str, theme: Any) -> tuple[Any, str]:
     a theme of another size is another key here and is asked again. The
     library's reason is the answer's.
 
+    **At a scale other than 1 it is asked at that size**: the block is the one
+    read at 1 with every run's ``scale`` set (``_scaled``), the size the view
+    then draws it at, and that block is what the library is asked about. One
+    refused at 1 is refused at every scale without asking again.
+
     What a view still refuses after this said yes is kept by ``refused``, and
-    answered from here from then on.
+    answered from here from then on, at every scale.
 
     The read and the pre-check's calls into the native module (``_refusal``)
     are calls into the library (``into_library``): what they raise stops the
@@ -646,7 +658,7 @@ def formula(body: str, theme: Any) -> tuple[Any, str]:
     from imscribe import TypesetUnavailable
 
     try:
-        return _formula(body, theme)
+        return _formula(body, theme, scale)
     except TypesetUnavailable:
         raise
     except Exception as failure:
@@ -654,46 +666,113 @@ def formula(body: str, theme: Any) -> tuple[Any, str]:
         return None, OWN_ERROR
 
 
-def _formula(body: str, theme: Any) -> tuple[Any, str]:
+def _held(answers: OrderedDict[Any, Any], key: tuple[Any, ...], theme: Any) -> Any:
+    held = answers.get(key)
+    if held is None or held[0] is not theme:
+        return None
+    answers.move_to_end(key)
+    return held
+
+
+def _formula(body: str, theme: Any, scale: float) -> tuple[Any, str]:
     from imscribe import MarkdownText, parse_markdown
 
-    key = (body, id(theme))
-    for answers in (_REFUSED, _FORMULAS):
-        held = answers.get(key)
-        if held is not None and held[0] is theme:
-            answers.move_to_end(key)
+    for held in (
+        _held(_REFUSED, (body, id(theme)), theme),
+        _held(_FORMULAS, (body, id(theme), scale), theme),
+    ):
+        if held is not None:
             return held[1], held[2]
-    with _READING_FORMULA:
-        read = parse_markdown(f"$$\n{body}\n$$", theme, references=False, math=True)
-    blocks = read.blocks
     answer: tuple[Any, str] = (None, _NOT_ONE_FORMULA)
-    if len(blocks) == 1 and isinstance(blocks[0], MarkdownText):
-        block = blocks[0]
-        found = block.formulas
-        if len(found) == 1 and found[0].display and found[0].state == "set":
-            why = _refusal(block, theme)
-            answer = (block, "") if why is None else (None, why)
-    _keep_formula(body, theme, answer)
+    if scale != 1.0:
+        block, why = _formula(body, theme, 1.0)
+        answer = (None, why)
+        if block is not None:
+            block = _scaled(block, scale)
+            why_not = _refusal(block, theme)
+            answer = (block, "") if why_not is None else (None, why_not)
+    else:
+        with _READING_FORMULA:
+            read = parse_markdown(f"$$\n{body}\n$$", theme, references=False, math=True)
+        blocks = read.blocks
+        if len(blocks) == 1 and isinstance(blocks[0], MarkdownText):
+            block = blocks[0]
+            found = block.formulas
+            if len(found) == 1 and found[0].display and found[0].state == "set":
+                why_not = _refusal(block, theme)
+                answer = (block, "") if why_not is None else (None, why_not)
+    _keep(_FORMULAS, (body, id(theme), scale), theme, answer)
     return answer
+
+
+def _scaled(block: Any, scale: float) -> Any:
+    """
+    A formula block read at 1 with every run set at ``scale`` times its size.
+    """
+    from dataclasses import replace
+
+    return replace(block, runs=tuple(run._replace(scale=scale) for run in block.runs))
 
 
 def refused(body: str, theme: Any, reason: str) -> None:
     """
     Keep that a view refused the formula of ``body`` in ``theme``, which
-    ``formula`` had said it would set: ``formula`` answers the refusal from now on.
+    ``formula`` had said it would set: ``formula`` answers the refusal from now
+    on, at every scale. Whatever size it was refused at, the fence is then code:
+    no formula has been found that the library refuses at one size and sets at
+    another (``tests/test_math_fence.py``), so a smaller size is not tried.
     """
-    _keep_formula(body, theme, (None, reason), _REFUSED)
+    _keep(_REFUSED, (body, id(theme)), theme, (None, reason))
 
 
-def _keep_formula(
-    body: str, theme: Any, answer: tuple[Any, str], answers: OrderedDict[Any, Any] | None = None
-) -> None:
-    held = _FORMULAS if answers is None else answers
-    key = (body, id(theme))
-    held[key] = (theme, *answer)
-    held.move_to_end(key)
-    while len(held) > _FORMULAS_KEPT:
-        held.popitem(last=False)
+def _keep(answers: OrderedDict[Any, Any], key: tuple[Any, ...], theme: Any, answer: Any) -> None:
+    answers[key] = (theme, *answer)
+    answers.move_to_end(key)
+    while len(answers) > _FORMULAS_KEPT:
+        answers.popitem(last=False)
+
+
+_MEASURING_FORMULA = into_library("measuring a formula")
+
+
+def formula_size(block: Any, body: str, theme: Any) -> tuple[float, float, float]:
+    """
+    How wide and how tall a formula block read at 1 (``formula``) is set in
+    ``theme``, and the height of a line of that theme's paragraphs, in pixels:
+    what ``views.formula_scale`` sizes it by. Every call into the native module
+    is the library's (``into_library``).
+
+    Measured once at 1, because the library sets a formula at a run's scale
+    linearly: ``\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}`` is 95.43 x 37.66 px at
+    1 and 190.86 x 75.31 at 2 (2026-10-22, the default theme), so its size at
+    any scale is this one times the scale.
+    """
+    from imscribe import BlockKind, px_from_sp
+
+    held = _held(_SIZES, (body, id(theme)), theme)
+    if held is not None:
+        size: tuple[float, float, float] = held[1]
+        return size
+    typesetter = _typesetter()
+    with _MEASURING_FORMULA:
+        ts = typesetter.module()
+        if ts is None:
+            return 0.0, 0.0, 0.0
+        runs = [ts.Run(*run) for run in block.runs]
+        with ts.Paragraph() as paragraph:
+            paragraph.set_text(block.text, runs)
+            paragraph.layout(_ASKED_WIDTH_PX, typesetter.base_style(theme))
+            lines = paragraph.lines()
+        # The pitch of the theme's paragraph lines, which follows the size the
+        # operator set for the text.
+        line = float(px_from_sp(theme.style(BlockKind.PARAGRAPH).leading, theme.px_per_inch))
+    left = min((float(line_.min[0]) for line_ in lines), default=0.0)
+    right = max((float(line_.max[0]) for line_ in lines), default=0.0)
+    top = min((float(line_.min[1]) for line_ in lines), default=0.0)
+    foot = max((float(line_.max[1]) for line_ in lines), default=0.0)
+    size = (right - left, foot - top, line)
+    _keep(_SIZES, (body, id(theme)), theme, (size,))
+    return size
 
 
 _ASKED_WIDTH_PX = 100_000.0

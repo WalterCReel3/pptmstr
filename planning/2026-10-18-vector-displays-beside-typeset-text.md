@@ -1112,6 +1112,50 @@ interactive native rendering ever needs one.
   rebuilt cleanly from it (fence-fix; `fence-review` #10) [ran: the probe of
   `parse_markdown` that showed it].
 
+**The formula's size** (task `math-size`, 2026-10-22). The operator found in the
+running app that formulas rendered correctly but small for how legible math
+glyphs are on screen, and that they could be twice as large as a floor while
+still taking the formula's own size into account. Decided:
+
+- **Twice the text's size, stepped down, never below 1.** A display formula is
+  set at `views.FORMULA_SCALE` (2) times its text's size. It steps down, in
+  eighths, to fit the measure and to stay within `views.FORMULA_LINES` (5)
+  lines of its theme's paragraphs. It never goes below 1, the size it had
+  before. A formula wider than the measure at 1 is set at 1 and scrolls
+  sideways exactly as before, so nothing needs more scrolling than it did.
+  This reads the operator's "as a floor" as the default rather than a minimum,
+  because a minimum of 2 would make a wide formula scroll further than it does
+  today.
+- **The mechanism is the run's scale, not a theme.** imscribe 0.2.0 has no
+  math size or display scale in its theme or `ReaderOptions`. Its
+  `RunDescription.scale` reaches imtypeset's `Run.scale`, and the library sets
+  a display formula at it linearly: `\sum_{i=1}^{n} i = \frac{n(n+1)}{2}` is
+  95.43 x 37.66 px at 1 and 190.86 x 75.31 px at 2 [ran]. So the formula
+  block's runs carry the scale. No theme is derived and the library is not
+  edited. The prose around the formula keeps its own runs, and the scale
+  follows the operator's size setting, because it multiplies the theme's
+  paragraph size.
+- **Measured once, sized at draw.** `gate.formula_size` lays the formula out
+  once at 1 and keeps its width, its height and the theme's line pitch. The
+  scale is arithmetic on those numbers and the draw's measure
+  (`views.formula_scale`). A document re-hands its blocks to its views only
+  when a scale changes (`_draw`), and a stream re-hands them when its
+  `revision` changes (`_Captioned`). Neither path reads any text again.
+- **Asked at the size drawn.** `gate.formula(body, theme, scale)` asks the
+  library about the block at the scale it will be drawn at. A formula refused
+  at a scale above 1 is set at 1, the size it was already asked at. A refusal
+  by the view after the draw (`_formulas_refused`) is read from the block the
+  view held at its drawn size. It is kept for the formula at every size, so
+  the fence is then code. No size-dependent refusal is known (above), so no
+  smaller size is tried.
+- **Why 5 lines.** This comes from screenshots under Xvfb in both themes, at
+  760 and 420 px, with prose around the formulas [ran,
+  `shots/math-size/shoot.py`, git-ignored]. The sum above is 2.2 lines at 1 and
+  is set at 2. `\sum_{k=1}^{n} \frac{\sum_{j=1}^{k} a_j}{\frac{b_k}{c_k}}` is
+  2.7 lines at 1 and is set at 1.75, about five lines of the prose around it.
+  An eight-term polynomial, 349.5 px wide at 1, is set at 2 in 760 px and at
+  1.125 in 420 px, and fits both.
+
 **Slice 1 in the running app, 2026-10-21.** The operator ran `make run` on
 Linux x86-64 and checked it against a scripted reply (two screenshots, read by
 the lead):
