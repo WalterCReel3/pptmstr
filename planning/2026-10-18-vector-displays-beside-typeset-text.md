@@ -1155,6 +1155,13 @@ still taking the formula's own size into account. Decided:
   2.7 lines at 1 and is set at 1.75, about five lines of the prose around it.
   An eight-term polynomial, 349.5 px wide at 1, is set at 2 in 760 px and at
   1.125 in 420 px, and fits both.
+- **In the running app, 2026-10-22.** The operator ran a reply of physics and
+  discrete-mathematics formulas (Lorentz factor, Maxwell, Schrödinger,
+  Heisenberg, binomial theorem, Pascal's rule) on Linux and found sub- and
+  superscripts clear rather than lost to blur; the lead read the screenshot,
+  in which nested radicals, `\hbar^2/2m`, stretched delimiters and `\binom`
+  render cleanly in both the session and detail panes, with even spacing around
+  each formula [operator, ran; relayed by the lead].
 
 **Slice 1 in the running app, 2026-10-21.** The operator ran `make run` on
 Linux x86-64 and checked it against a scripted reply (two screenshots, read by
