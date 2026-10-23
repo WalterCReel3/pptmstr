@@ -22,7 +22,6 @@ from pptmstr.figures.sanitise import (
     MAX_ELEMENTS,
     MAX_INPUT_BYTES,
     MAX_INPUT_ELEMENTS,
-    MAX_LAYER_CHAIN,
     MAX_NOTES,
     MAX_VAR_DEPTH,
     MAX_VAR_VALUES,
@@ -372,7 +371,8 @@ def test_url_in_a_presentation_attribute_is_dropped(attribute: str, value: str) 
     assert find_all(out, "path")[0].attrib == {"d": "M0 0"}
 
 
-# A removed fill paints black, so an unsafe paint is repainted instead (step 3).
+# A removed fill is the role's fill to the display list, so an unsafe paint is
+# repainted instead (step 3).
 @pytest.mark.parametrize("value", FOREIGN_URLS)
 @pytest.mark.parametrize("attribute", ["fill", "stroke"])
 def test_url_in_a_paint_attribute_becomes_none(attribute: str, value: str) -> None:
@@ -532,8 +532,8 @@ def test_style_attribute_with_nothing_left_is_dropped() -> None:
     assert find_all(out, "rect")[0].attrib == {"width": "1"}
 
 
-# An unsafe fill or stroke: removed, it would paint black (measured 2026-10-21), so it
-# keeps the colour after its url() or becomes none.
+# An unsafe fill or stroke: removed, the display list would fill or stroke the shape
+# by its role, so it keeps the colour after its url() or becomes none.
 
 OFF_DOCUMENT = "a url() outside the document"
 LOADER = "a function that loads a URL"
@@ -551,7 +551,7 @@ UNSAFE_PAINTS = [
     ("url(http://x) foo", "none", OFF_DOCUMENT),
     ("url(http://x) red blue", "none", OFF_DOCUMENT),
     ("url(http://x) rgb(1, 2)", "none", OFF_DOCUMENT),
-    ("url(http://x) RebeccaPurple", "#663399", OFF_DOCUMENT),
+    ("url(http://x) RebeccaPurple", "RebeccaPurple", OFF_DOCUMENT),
 ]
 
 
@@ -688,48 +688,8 @@ def test_very_deep_nesting_does_not_raise() -> None:
     assert "deeper" in refused(doc(deep))
 
 
-def _mask_chain(n: int) -> str:
-    levels = "".join(
-        f'<mask id="m{i}"><rect' + (f' mask="url(#m{i + 1})"' if i + 1 < n else "") + "/></mask>"
-        for i in range(n)
-    )
-    return doc(f'<defs>{levels}</defs><rect mask="url(#m0)"/>')
-
-
-def _clip_chain(n: int) -> str:
-    levels = "".join(
-        f'<clipPath id="c{i}"'
-        + (f' clip-path="url(#c{i + 1})"' if i + 1 < n else "")
-        + "><rect/></clipPath>"
-        for i in range(n)
-    )
-    return doc(f'<defs>{levels}</defs><rect clip-path="url(#c0)"/>')
-
-
-@pytest.mark.parametrize("chain", [_mask_chain, _clip_chain])
-def test_a_reference_chain_of_layers_past_the_cap_is_refused(chain: Callable[[int], str]) -> None:
-    passed(chain(MAX_LAYER_CHAIN))
-    assert f"over {MAX_LAYER_CHAIN}" in refused(chain(MAX_LAYER_CHAIN + 1))
-
-
-def test_layers_nested_and_referenced_count_together() -> None:
-    inner = '<clipPath id="p"><rect/></clipPath>'
-    nested = (
-        "<mask>" * (MAX_LAYER_CHAIN - 1)
-        + '<rect clip-path="url(#p)"/>'
-        + "</mask>" * (MAX_LAYER_CHAIN - 1)
-    )
-    passed(doc(f"<defs>{inner}</defs>{nested}"))
-    assert "deep" in refused(doc(f"<defs>{inner}</defs><mask>{nested}</mask>"))
-
-
-def test_many_layers_side_by_side_are_not_a_chain() -> None:
-    passed(doc('<defs><mask id="m"><rect/></mask></defs>' + '<rect mask="url(#m)"/>' * 200))
-
-
 def test_a_pattern_is_dropped_and_what_it_filled_takes_its_fallback() -> None:
-    # resvg allocates a tile whole under every transform above it, and macOS has no
-    # RLIMIT_AS to catch that in the render child (probe R3).
+    # The display list's walk would draw the tile's shapes in place.
     out = passed(
         doc(
             '<defs><pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse">'
@@ -741,40 +701,20 @@ def test_a_pattern_is_dropped_and_what_it_filled_takes_its_fallback() -> None:
     assert find_all(out, "rect")[0].get("fill") == "green"
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        '<rect filter="blur(20px)" width="5"/>',
-        '<rect FILTER="drop-shadow(1px 1px 2px red)" width="5"/>',
-        '<rect style="filter: blur(20px); opacity: 1" width="5"/>',
-    ],
-)
-def test_the_filter_property_never_survives(body: str) -> None:
-    out = passed(doc(body))
-    rect = find_all(out, "rect")[0]
-    assert {k.lower() for k in rect.attrib} <= {"width", "style"}
-    assert "filter" not in (rect.get("style") or "")
-
-
-def test_a_filter_declaration_in_a_stylesheet_is_removed() -> None:
-    out = passed(doc("<style>.a{filter:blur(9px);fill:red}</style>"))
-    assert find_all(out, "style")[0].text == ".a{;fill:red}"
-
-
 def test_input_elements_past_the_cap_are_refused_before_cleaning() -> None:
     # Dropped elements count: what is bounded is the work, not what survives.
     passed(doc("<x/>" * (MAX_INPUT_ELEMENTS - 1)))
     assert f"more than {MAX_INPUT_ELEMENTS} elements" in refused(doc("<x/>" * MAX_INPUT_ELEMENTS))
 
 
-# Step 5: time on the frame thread -------------------------------------------------------
+# Step 5: time in the render child ------------------------------------------------------
 
-# sanitise runs on the frame thread, once per fence. Measured worst here at the byte cap
-# is about 0.5 s (35,000 repainted declarations in one <style>, 2026-10-21); before every
-# pattern was made linear, the whitespace runs below took 8-26 s at 100,000 spaces and
-# over five minutes at the cap. The bound leaves twice the measured worst for a slower
-# machine, and is enforced by an alarm so a regression fails here in seconds rather
-# than hanging the suite.
+# sanitise runs in the render child, once per layout, inside its timeout. Measured worst
+# here at the byte cap is 0.55-0.63 s best of five on a loaded machine (35,000
+# repainted declarations in one <style>, 2026-10-22); before every pattern was made
+# linear, whitespace runs took 8-26 s at 100,000 spaces and over five minutes at the
+# cap. The bound leaves about 1.6 times the measured worst, and is enforced by an alarm
+# so a regression fails here in seconds rather than hanging the suite.
 SANITISE_BOUND_S = 1.0
 
 
@@ -788,11 +728,6 @@ def _spaces(before: str, after: str) -> str:
 
 ROOT = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
 WORST = {
-    "font-family run in style=": _spaces(ROOT + '<text style="font-family:a', 'b">x</text></svg>'),
-    "font-family run in <style>": _spaces(ROOT + "<style>text{font-family:a", "b}</style></svg>"),
-    "font run with !important": _spaces(
-        ROOT + '<text style="font:a', '! important x">x</text></svg>'
-    ),
     "length run in the root width": _spaces(
         '<svg xmlns="http://www.w3.org/2000/svg" width="1', 'x" viewBox="0 0 9 9"/>'
     ),
@@ -806,7 +741,6 @@ WORST = {
     "dangling paint run": _spaces(ROOT + '<rect fill="url(#gone)', 'x"/></svg>'),
     "url( run": _spaces(ROOT + '<rect fill="url(', '#a x"/></svg>'),
     "viewBox run": _spaces('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 9', 'x"/>'),
-    "font declarations": _at_cap(ROOT + '<rect style="', "font-family:a;", '"/></svg>'),
     "style declarations": _at_cap(ROOT + '<rect style="', "fill:red;", '"/></svg>'),
     "stylesheet rules": _at_cap(ROOT + "<style>", "a{fill:red}", "</style></svg>"),
     "css comments": _at_cap(ROOT + '<rect style="', "/**/", '"/></svg>'),
@@ -845,12 +779,6 @@ WORST = {
     "harmless at-rules": _at_cap(ROOT + "<style>", "@media x{a{fill:red}}", "</style></svg>"),
     "dangling paint fallbacks": _at_cap(
         ROOT + '<rect style="', "fill:url(#g) rgb(1 2 3 4);", '"/></svg>'
-    ),
-    "spelled colours in <style>": _at_cap(
-        ROOT + "<style>a{", "fill:rebeccapurple;", "}</style></svg>"
-    ),
-    "spelled colours in style=": _at_cap(
-        ROOT + '<rect style="', "stroke:rebeccapurple;", '"/></svg>'
     ),
     "var paints that are not colours": _at_cap(
         ROOT + '<rect style="--c:foo;', "fill:var(--c);", '"/></svg>'
@@ -1001,50 +929,6 @@ def test_natural_size_over_the_pixel_cap_is_refused(attrs: str) -> None:
     assert "over the cap" in refused(f'<svg xmlns="http://www.w3.org/2000/svg" {attrs}/>')
 
 
-# Step 7: font families ----------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "given, expected",
-    [
-        ("Arial", "Arial, sans-serif"),
-        ("'Trebuchet MS', Verdana", "'Trebuchet MS', Verdana, sans-serif"),
-        ('"sans-serif"', '"sans-serif", sans-serif'),
-        ("cursive", "cursive, sans-serif"),
-        ("Arial, serif", "Arial, serif"),
-        ("MONOSPACE", "MONOSPACE"),
-        ("inherit", "inherit"),
-        ("", "sans-serif"),
-    ],
-)
-def test_font_family_attribute_without_a_mapped_generic_gets_one(given: str, expected: str) -> None:
-    out = passed(doc(f'<text font-family="{quoted(given)}">a</text>'))
-    assert find_all(out, "text")[0].get("font-family") == expected
-
-
-def test_font_family_in_a_style_attribute_gets_a_generic() -> None:
-    out = passed(doc('<text style="font-size:12px;font-family:Arial !important">a</text>'))
-    assert find_all(out, "text")[0].get("style") == (
-        "font-size:12px; font-family:Arial, sans-serif !important"
-    )
-
-
-def test_font_family_in_a_style_element_gets_a_generic() -> None:
-    css = '#m{font-family:"trebuchet ms",verdana,arial;fill:#333}.a text{font-family: x}'
-    out = passed(doc(f"<style>{css}</style>"))
-    assert find_all(out, "style")[0].text == (
-        '#m{font-family:"trebuchet ms",verdana,arial, sans-serif;fill:#333}'
-        ".a text{font-family: x, sans-serif}"
-    )
-
-
-def test_font_shorthand_gets_a_generic() -> None:
-    out = passed(doc('<text font="12px Arial" style="font: bold 10px serif">a</text>'))
-    text = find_all(out, "text")[0]
-    assert text.get("font") == "12px Arial, sans-serif"
-    assert text.get("style") == "font: bold 10px serif"
-
-
 # Step 8: references to what is not there -----------------------------------------------
 
 SHADOW = '<defs><filter id="merman-drop-shadow"><feDropShadow dx="2" dy="2"/></filter></defs>'
@@ -1089,7 +973,7 @@ def test_dangling_stroke_keeps_its_fallback() -> None:
         ("url(#gone) foo bar", "none"),
         ("url(#gone) hsl(120deg, 50%, 50%)", "none"),
         ("url(#gone) rgb(1, 2, 3)", "rgb(1, 2, 3)"),
-        ("url(#gone) rebeccapurple", "#663399"),
+        ("url(#gone) rebeccapurple", "rebeccapurple"),
     ],
 )
 def test_a_dangling_paint_keeps_its_fallback_only_if_it_is_a_colour(
@@ -1238,64 +1122,7 @@ def test_a_paint_that_resolves_is_not_noted() -> None:
     assert out.notes == ()
 
 
-# rebeccapurple is the one CSS named colour resvg_py 0.5.0 painted black (measured
-# 2026-10-21), so it is spelled #663399 in every value that can hold a colour.
 FULL = 'width="200" height="100"'
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        f'<rect {FULL} fill="rebeccapurple"/>',
-        f'<rect {FULL} fill="RebeccaPurple"/>',
-        f'<rect {FULL} style="fill: REBECCAPURPLE !important"/>',
-        f'<style>.a{{fill:rebeccapurple}}</style><rect class="a" {FULL}/>',
-        f'<rect {FULL} fill="none" stroke="rebeccapurple" stroke-width="400"/>',
-        f'<style>.a{{stroke:rebeccapurple}}</style><rect class="a" {FULL} stroke-width="400"/>',
-        '<linearGradient id="g"><stop stop-color="rebeccapurple"/></linearGradient>'
-        f'<rect {FULL} fill="url(#g)"/>',
-        '<linearGradient id="g"><stop style="stop-color:rebeccapurple"/></linearGradient>'
-        f'<rect {FULL} fill="url(#g)"/>',
-        "<style>stop{stop-color:rebeccapurple}</style>"
-        f'<linearGradient id="g"><stop/></linearGradient><rect {FULL} fill="url(#g)"/>',
-        f'<g color="rebeccapurple"><rect {FULL} fill="currentColor"/></g>',
-        f'<rect {FULL} style="color:rebeccapurple" fill="currentColor"/>',
-        f'<g style="--c:rebeccapurple"><rect {FULL} fill="var(--c)"/></g>',
-        f'<g style="--c:rebeccapurple"><rect {FULL} style="fill:var(--c)"/></g>',
-        f'<rect {FULL} fill="url(#gone) rebeccapurple"/>',
-        f'<rect {FULL} fill="url(http://x) rebeccapurple"/>',
-    ],
-)
-def test_rebeccapurple_is_spelled_out_in_every_colour_value(body: str) -> None:
-    out = passed(doc(f'<rect {FULL} fill="#fff"/>{body}'))
-    assert "rebeccapurple" not in out.svg.lower()
-    assert "#663399" in out.svg
-
-
-def test_rebeccapurple_is_spelled_only_as_a_whole_colour_name() -> None:
-    out = passed(
-        doc(
-            "<style>.rebeccapurple{fill:rebeccapurple2; stroke:x-rebeccapurple}</style>"
-            '<rect class="rebeccapurple" font-family="rebeccapurple, serif"'
-            ' fill="rgb(1,2,3) rebeccapurple"/>'
-        )
-    )
-    assert find_all(out, "style")[0].text == (
-        ".rebeccapurple{fill:rebeccapurple2; stroke:x-rebeccapurple}"
-    )
-    rect = find_all(out, "rect")[0]
-    assert rect.get("class") == "rebeccapurple"
-    assert rect.get("font-family") == "rebeccapurple, serif"
-    assert rect.get("fill") == "rgb(1,2,3) #663399"
-
-
-def test_a_filter_reference_to_a_kept_element_is_removed() -> None:
-    # resvg erases a shape whose filter names a <rect> (measured), and no <filter>
-    # survives, so every filter reference is removed.
-    out = passed(doc('<rect id="someRect"/><rect filter="url(#someRect)" width="5"/>'))
-    assert find_all(out, "rect")[1].attrib == {"width": "5"}
-    out = passed(doc('<rect id="a"/><g style="filter:url(#a);opacity:1"><rect/></g>'))
-    assert find_all(out, "g")[0].get("style") == "opacity:1"
 
 
 WRONG_KIND = (
@@ -1385,7 +1212,7 @@ def test_references_to_kept_ids_are_untouched() -> None:
 
 # Step 9: custom properties ------------------------------------------------------------
 
-# The case measured on 2026-10-21: resvg painted `fill:var(--c)` black.
+# A design-token sheet: the colour reaches the rect only through `var()`.
 DATAVIZ = doc(
     "<style>.viz{--c:#e8590c} .a{fill:var(--c)}</style>"
     '<g class="viz"><rect class="a" width="200" height="100"/></g>'
@@ -1471,7 +1298,7 @@ def test_an_undeclared_var_in_css_paint_becomes_none() -> None:
 
 
 def test_a_var_resolving_to_nothing_fails() -> None:
-    # An empty fallback is legal CSS, and an empty fill paints black.
+    # An empty fallback is legal CSS, and an empty fill is not `none` to the display list.
     out = passed(doc('<rect fill="var(--x,)" stroke="var(--x, )" opacity="var(--x,)"/>'))
     assert find_all(out, "rect")[0].attrib == {"fill": "none", "stroke": "none"}
 
@@ -1564,8 +1391,15 @@ def test_a_var_paint_of_inherit_inherits() -> None:
 
 
 def test_a_var_outside_a_paint_is_not_held_to_a_colour() -> None:
-    out = passed(doc('<g style="--c:foo"><text font-family="var(--c)">x</text></g>'))
-    assert find_all(out, "text")[0].get("font-family") == "foo, sans-serif"
+    svg = doc(
+        '<g style="--c:foo"><text font-family="var(--c)" color="var(--c)">x</text>'
+        '<stop stop-color="var(--c)"/></g>'
+    )
+    out = passed(svg)
+    text = find_all(out, "text")[0]
+    assert (text.get("font-family"), text.get("color")) == ("foo", "foo")
+    assert find_all(out, "stop")[0].get("stop-color") == "foo"
+    assert out.notes == ()
 
 
 def test_a_var_in_a_selector_empties_the_stylesheet() -> None:
@@ -1671,40 +1505,10 @@ GRADIENT = (
 )
 
 
-@pytest.mark.parametrize(
-    "stop, rect",
-    [
-        ('stop-color="var(--x, va)r(--c)"', ""),
-        ('stop-color="var(--gone)"', ""),
-        ('stop-color="var(--c)"', 'style="--c:foo"'),
-        ('style="stop-color:var(--c)"', 'style="--c:none"'),
-    ],
-    ids=["joined var", "undeclared", "not a colour", "none"],
-)
-def test_a_failed_var_in_stop_color_is_transparent_not_black(stop: str, rect: str) -> None:
-    # The --c on the rect does not reach the stops by inheritance (the table is
-    # document-wide), which is what this relies on.
-    out = passed(doc(GRADIENT.format(stop=stop, rect=rect)))
-    assert all(
-        "transparent" in (s.get("stop-color") or s.get("style") or "")
-        for s in find_all(out, "stop")
-    )
-    assert any("set to transparent" in note for note in out.notes), out.notes
-
-
 def test_a_var_in_stop_color_that_is_a_colour_is_kept() -> None:
     out = passed(doc(GRADIENT.format(stop='stop-color="var(--c)"', rect='style="--c:#e8590c"')))
     assert [s.get("stop-color") for s in find_all(out, "stop")] == ["#e8590c", "#e8590c"]
     assert out.notes == ()
-
-
-def test_a_var_in_color_that_is_not_a_colour_is_removed_and_inherits() -> None:
-    svg = doc(
-        f'<g color="green"><rect {FULL} style="--c:foo" color="var(--c)" fill="currentColor"/></g>'
-    )
-    out = passed(svg)
-    assert find_all(out, "rect")[0].get("color") is None
-    assert out.notes == ("color: var() resolves to 'foo', not a colour; removed",)
 
 
 @pytest.mark.parametrize(
@@ -1778,6 +1582,149 @@ def test_a_benign_mermaid_like_svg_round_trips_with_shapes_and_text() -> None:
 def test_sanitising_twice_changes_nothing() -> None:
     once = passed(MERMAID_LIKE)
     assert passed(once.svg) == once
+
+
+# What the display list reads ----------------------------------------------------------
+
+# A diagram that exercises every rule removed when the display list replaced the
+# rasteriser: `rebeccapurple` in each kind of statement, a family naming no generic, and
+# a `filter` declaration.
+REMOVED_RULES_PROBE = (
+    "flowchart LR\n  A[One] --> B[Two]\n  B --> C[Three]\n"
+    "  classDef p fill:rebeccapurple,stroke:RebeccaPurple,color:rebeccapurple,"
+    "font-family:Comic Sans MS\n"
+    "  class B p\n  style A fill:#bbf,filter:blur(2px),font-family:Papyrus\n"
+    "  style C fill:rebeccapurple\n  linkStyle 0 stroke:rebeccapurple\n"
+)
+_SPELLED = re.compile(r"(?<![\w-])rebeccapurple(?![\w-])", re.IGNORECASE)
+_GENERICS = ("serif", "sans-serif", "monospace")
+
+
+def _as_the_removed_rules_left_it(svg: str) -> str:
+    """
+    Sanitised `svg` with the removed rules applied again, after the fact: every
+    `filter` dropped, `rebeccapurple` written `#663399` in a colour, and `sans-serif`
+    appended to a font family naming no generic. Coarser than the rules were (it
+    spells the name in any declaration), which only widens what is shown unread.
+    """
+
+    def declaration(text: str) -> str:
+        name, colon, value = text.partition(":")
+        prop = name.strip().lower()
+        if not colon:
+            return text
+        if prop == "filter":
+            return ""
+        if prop in ("font-family", "font") and not any(g in value.lower() for g in _GENERICS):
+            return f"{name}:{value.rstrip()}, sans-serif"
+        if prop in ("fill", "stroke", "stop-color", "flood-color", "color"):
+            return f"{name}:{_SPELLED.sub('#663399', value)}"
+        return text
+
+    def css(text: str) -> str:
+        return re.sub(r"[^;{}]+", lambda m: declaration(m.group()), text)
+
+    ET.register_namespace("", SVG_NS)
+    root = ET.fromstring(svg)
+    for element in root.iter():
+        for name, value in list(element.attrib.items()):
+            if name == "style":
+                element.set(name, css(value))
+            elif name == "filter":
+                del element.attrib[name]
+            elif ":" not in name:
+                rewritten = declaration(f"{name}:{value}")
+                element.set(name, rewritten.partition(":")[2])
+        if local(element.tag) == "style" and element.text:
+            element.text = css(element.text)
+    return ET.tostring(root, encoding="unicode")
+
+
+def _golden_sources() -> dict[str, str]:
+    from tests import test_figure_displaylist as golden
+
+    clash = [
+        "flowchart LR\n  A[Ink] --> B[Plain]\n  B --> C[Also plain]\n"
+        "  classDef ink color:#28253D\n  class A ink\n",
+        "flowchart LR\n  A[Ink] --> B[Plain]\n  B --> C[Also plain]\n  style A color:#28253D\n",
+        "stateDiagram-v2\n  Ink --> Plain\n  classDef ink color:#28253D\n  class Ink ink\n",
+    ]
+    return {
+        **golden.SOURCES,
+        "styled": golden.STYLED,
+        **{f"clash {n}": source for n, source in enumerate(clash)},
+        "removed-rules probe": REMOVED_RULES_PROBE,
+    }
+
+
+def test_the_removed_rules_change_no_golden_display_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The five families, the 21-node graph, the styled and clash diagrams, and a probe
+    that uses every removed rule: each one's display list, byte for byte, is the same
+    with those rules applied as without them.
+    """
+    from pptmstr.figures import displaylist as D
+    from pptmstr.figures import mermaid
+
+    if mermaid.version() is None:
+        pytest.skip("the optional 'mermaid' extra (merman) is not installed")
+    monkeypatch.setattr(mermaid, "in_render_child", lambda: True)
+    changed = []
+    for name, source in _golden_sources().items():
+        laid = mermaid.layout(source)
+        assert isinstance(laid, Sanitised), (name, laid)
+        then = _as_the_removed_rules_left_it(laid.svg)
+        now = D.encode(D.from_mermaid(source, laid.svg))
+        assert D.encode(D.from_mermaid(source, then)) == now, name
+        if ET.tostring(ET.fromstring(then)) != ET.tostring(ET.fromstring(laid.svg)):
+            changed.append(name)
+    # Not vacuous: the probe's SVG is one the removed rules would have changed.
+    assert "removed-rules probe" in changed
+
+
+def test_a_chain_of_masks_and_unread_colours_leave_the_display_list_as_it_is() -> None:
+    """
+    The display list skips `<mask>` and `<clipPath>` and reads no `color`,
+    `stop-color` or `flood-color`, so a mask chain of any depth and a non-colour in
+    those pass and draw what the shapes alone draw.
+    """
+    from pptmstr.figures import displaylist as D
+
+    chain = "".join(
+        f'<mask id="m{i}"><rect width="5" height="5" mask="url(#m{i + 1})"/></mask>'
+        for i in range(12)
+    )
+    plain = '<rect width="50" height="50" fill="#fff"/>'
+    dressed = (
+        f'<defs>{chain}<linearGradient id="g"><stop stop-color="foo"/></linearGradient></defs>'
+        '<rect width="50" height="50" fill="#fff" mask="url(#m0)" color="foo"'
+        ' flood-color="foo"/>'
+    )
+    assert D.encode(D.from_svg(passed(doc(dressed)).svg)) == D.encode(
+        D.from_svg(passed(doc(plain)).svg)
+    )
+
+
+@pytest.mark.parametrize(
+    "fill",
+    ["url(#gone)", "url(http://x)", "var(--gone)", "url(#gone) foo"],
+)
+def test_a_repainted_fill_is_one_the_display_list_reads_differently(fill: str) -> None:
+    """
+    Steps 3, 8 and 9 stay: the display list reads any fill but `none` and
+    `transparent` as a fill, so without the repaint a node's box would be filled.
+    """
+    from pptmstr.figures import displaylist as D
+
+    svg = doc(f'<g class="node" id="n"><rect width="50" height="50" fill="{quoted(fill)}"/></g>')
+    out = passed(svg)
+    assert find_all(out, "rect")[0].get("fill") == "none"
+    (drawn,) = D.from_svg(out.svg).items
+    (raw,) = D.from_svg(svg).items
+    assert isinstance(drawn, D.PathItem) and isinstance(raw, D.PathItem)
+    assert (drawn.fill, raw.fill) == (False, True)
 
 
 # Totality -----------------------------------------------------------------------------

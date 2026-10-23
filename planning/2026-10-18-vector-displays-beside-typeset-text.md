@@ -2047,7 +2047,10 @@ nothing exercises is a second renderer to keep correct by hand.
   (`displaylist._Builder._authored`) and sets every label in the pane's face, so
   those rules are inert for it, and harmless. They are kept, not removed: their
   removal changes a security module's output with nothing left to measure it
-  against, for no gain. The sanitiser's docstring says so.
+  against, for no gain. The sanitiser's docstring says so. (Overturned in part
+  by §11.4: those rules were inventoried against what the display list reads,
+  and the ones it does not read were removed. Most of the black-paint fallbacks
+  turned out not to be inert, and stay.)
 - Its tests that measured resvg's pixels now hold the sanitiser's output
   instead (the fill or stop colour it writes) or, for the kept-colour grammar,
   that every colour it keeps is one `displaylist.parse_colour` reads. The test
@@ -2205,3 +2208,99 @@ and found it correct. No change was needed.
 
 These four cases are now a golden test
 (`test_link_style_n_paints_the_nth_edge_mermaid_counts`).
+
+### 11.4 The sanitiser keeps only what the display list relies on (task `sanitise-cleanup`, 2026-10-22)
+
+The operator decided to do this cleanup now. The sanitiser's only reader is
+`displaylist.from_svg`, in the render child. Its input is merman's SVG after
+`mermaid.visible_labels`, and that SVG carries the text of the fence's `style`,
+`classDef` and `linkStyle` statements, so the input is partly the model's.
+Each rule was sorted three ways: (a) it bounds or confines the child's parse;
+(b) it changes what the display list is built from; (c) it does neither.
+Only (c) was removed.
+
+**What the display list reads** [read, `displaylist._Builder`]: geometry,
+`transform`, `class`, `id` and the `data-*` attributes merman writes. From an
+element's `style=` or its attribute, it reads `fill`, `stroke`, `stroke-width`,
+`stroke-dasharray`, `fill-rule`, `font-size`, `font-weight`, `text-anchor`,
+`dominant-baseline`, `opacity`, `display` and `visibility`. From `<style>` it
+reads `stroke-width` alone (`_Sheet`, to scale markers). It also reads `href`
+on `<use>` and `marker-start`/`marker-end`.
+
+It does not read `font-family`, `font`, `color`, `stop-color`, `flood-color`,
+`filter`, `clip-path` or `mask`. It skips `<mask>`, `<clipPath>`, `<defs>`,
+`<marker>` (except through a reference) and `<style>` in its walk. **One
+correction to §11.2:** a colour is the author's only through `_authored`, but
+whether a shape is filled or stroked at all comes from `_paints`. Any `fill` or
+`stroke` value other than `none` or `transparent` counts as paint there, and an
+absent one falls back to the role's default.
+
+| Rule | Class | Why |
+|---|---|---|
+| Step 1, markup declarations | (a) | billion laughs and XXE in the child's parse |
+| Step 2, element allow-list | (a)+(b) | the walk descends into any element it does not skip, so a `<pattern>` or `<filter>` would have its shapes drawn |
+| Step 2, `foreignObject` to `<text>` | (b) | merman's labels |
+| Step 3, `on*`, namespaced attributes, `href` held to `#id`, url/escape/loader drop | (a) | kept even though the parser fetches nothing |
+| Step 3, unsafe `fill`/`stroke` repainted to its fallback or `none` | (b) | dropped, the shape would take the role's fill |
+| Step 3, `filter` property dropped | **(c), removed** | never read; a dangling `filter: url(#x)` is still removed by step 8 |
+| Step 3/4, `rebeccapurple` written `#663399` | **(c), removed** | `parse_colour` reads both as 0x663399, and `opacity` and `_paints` agree |
+| Step 4, CSS cut per declaration and rule; `<style>` dropped on `@import` or an unknown at-rule | (a)+(b) | dropping a whole `<style>` loses the `stroke-width` that scales markers |
+| Step 5, byte, input-element, depth and expanded-element caps; natural size | (a) | |
+| Step 5, `MAX_LAYER_CHAIN` | **(c), removed** | the walk never enters a mask or clip path, and no reference to one is followed |
+| Step 6, rebuild and serialise | (a) | |
+| Step 7, `sans-serif` appended to a family | **(c), removed** | no family is read; labels use the pane's face |
+| Step 8, dangling or wrong-kind `url(#id)` | (b) | for paint: an unresolved url reads as paint; for markers: the walk would draw a `<g>` target's children as the marker. The clip-path/mask arm is inert but shares the code |
+| Step 9, `var()` substitution and its bounds | (a)+(b) | `fill: var(--c)` would read as paint |
+| Step 9, failed `fill`/`stroke` to `none`, non-colour result held | (b) | as for step 3 |
+| Step 9, `stop-color` to `transparent`; `color`, `flood-color`, `lighting-color` held to a colour | **(c), removed** | none of these is read; a failed one is now removed and a resolved one kept as written |
+
+**Evidence for the removals** [ran]:
+
+- The display lists are byte-identical before and after for 11 diagrams: the
+  five families, the 21-node graph, `STYLED`, the three clash diagrams, and a
+  probe that uses every removed rule (`rebeccapurple` in `classDef`, `style` and
+  `linkStyle`; a `filter:blur()`; families with no generic). Each was compared
+  by the sha256 of `displaylist.encode`, taken before the edit and again after
+  it. The probe's SVG did change: it now carries `rebeccapurple`, `filter:blur`
+  and the bare family names.
+- That check is kept as a test,
+  `test_the_removed_rules_change_no_golden_display_list`. It applies the
+  removed rules to today's sanitised SVG and asserts that the encoded display
+  list is unchanged. It also asserts that the probe's SVG is one they would have
+  changed, so the test cannot pass vacuously. It was mutation-checked: spelling
+  `rebeccapurple` as `#000000` fails on the probe, and writing `fill:none`
+  fails on the flowchart.
+- `test_a_chain_of_masks_and_unread_colours_leave_the_display_list_as_it_is`
+  shows that a 12-deep mask chain and non-colour `color`/`stop-color`/
+  `flood-color` give the same list as the bare shape.
+- `test_a_repainted_fill_is_one_the_display_list_reads_differently` holds the
+  other side, the reason the repaints stay. The raw unsafe or dangling fill is
+  filled, and the sanitised one is not.
+
+Tests for removed rules were deleted: the step-7 tests, the `rebeccapurple`
+placements, the filter-property tests, the layer-chain tests, the `stop-color`
+and `color` fallback tests, and their six `WORST` timing inputs. About 200 lines
+went, not ~1,500: most of the black-paint tests guard (b) rules and stay. The
+four comments that cited resvg_py 0.5.0 now state the present reason or went
+with their rule. Other comments that gave a resvg reason for a kept rule were
+rewritten the same way.
+
+**Re-measured** [ran, best of five at the byte cap, HEAD and this tree
+alternated twice on a machine other agents were loading]. The worst input is
+unchanged within noise: unsafe declarations in a `<style>` took 0.59-0.60 s at
+HEAD and 0.55-0.63 s now. The stylesheet inputs fell 10-25 % (stylesheet rules
+went from 0.36 s to 0.27-0.31 s), since the font and colour passes no longer
+run per declaration. The 1.0 s bound now has about 1.6x headroom on this load,
+not the 2x §10 recorded at 0.5 s.
+
+**Left as it is, for a later decision:**
+
+- `_colour_or_none` is narrower than `parse_colour`. It turns `hsl(120deg, ...)`,
+  a percentage alpha, and `rgb(1 2 3 / 0.5)` into `none` when they appear as a
+  fallback or as a `var()` result. That narrowing was set to what resvg painted.
+  It now makes a valid fallback unfilled where the display list would have
+  filled it. Widening it is a change to a (b) rule, not a removal, so it was
+  not made here.
+- `MAX_NATURAL_PIXELS` (4096x4096) is an area cap from the raster. The display
+  list checks each side only. It still refuses layouts, so it is a cap and was
+  kept.

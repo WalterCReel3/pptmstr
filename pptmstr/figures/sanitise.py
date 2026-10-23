@@ -6,22 +6,26 @@ An allow-list SVG sanitiser: model-written SVG in, safe SVG and its natural size
 clock, no ImGui. It never raises; every failure is a `Refused` with a one-line reason
 the host shows above the fence's source.
 
-It is mandatory and not defence in depth: both renderers measured (resvg, novasvg) read
-`<image href="/abs/path">` from disk and draw it, and resvg reads relative hrefs too
-(notes/vector-rendering/svg-renderers.md, "Measured"). Nothing here relies on what a
-renderer happens to ignore.
+What reads the output is ``displaylist.from_svg``, in the render child; the input is
+merman's SVG after ``mermaid.visible_labels``, which carries text from the fence's
+`style`, `classDef` and `linkStyle` statements. Each rule here does one of two jobs,
+and planning/2026-10-18-vector-displays-beside-typeset-text.md §11.4 has the
+inventory:
 
-What reads the output now is ``displaylist.from_svg``, in the render child: nothing
-rasterises it. The policy below was measured against resvg, which drew figures
-before the display list, and is kept whole. The caps and the natural size bound the
-parse and refuse the largest layouts; the element, attribute, URL and CSS rules keep
-what the parse reads to a known subset whatever a later reader of sanitised SVG is.
-Some rules guard only what resvg would have painted -- the `rebeccapurple`
-rewrite, the black-paint fallbacks of steps 3, 8 and 9, the font-family fallback
-of step 7 -- since the display list takes an SVG colour only where the diagram's
-source authored it (`displaylist._Builder._authored`) and sets every label in the
-pane's own face. They are inert for it and harmless, and are kept rather than
-removed without a renderer to measure their removal against.
+- it bounds or confines the child's parse (steps 1, 5, 6; the URL, escape and
+  `on*` rules of steps 3 and 4; step 9's work and size bounds), which holds however
+  merman behaves; or
+- it changes what the display list is built from. The element allow-list (step 2)
+  keeps the parser out of subtrees it would otherwise walk and draw (a `<pattern>`'s
+  children). A `fill` or `stroke` the display list reads as painting unless it is
+  `none` or `transparent` (`displaylist._paints`), so the repaints of steps 3, 8 and
+  9 decide whether a shape is filled.
+
+A rule that did neither once the display list replaced rasterising has been removed:
+it changed only what the parser never reads (a font family, a `filter`, a mask
+chain) or nothing it reads differently (`rebeccapurple`, which
+`displaylist.parse_colour` knows). ``tests/test_figure_sanitise.py`` holds the
+display list of every golden diagram unchanged by those rules.
 
 Policy, in the order it is applied:
 
@@ -34,75 +38,56 @@ Policy, in the order it is applied:
    its subtree, which includes `script`, `image`, `a`, `iframe`, `filter`, `feImage`,
    `pattern` and the animation elements. `foreignObject` is rewritten to a centred
    `<text>` at the same place in the tree (see `_rewrite_foreign_object`), because
-   Mermaid hangs its labels on it. `filter` stays out: merman's drop shadow is about
-   half of resvg's render time for a flowchart (54 ms without it, 112 ms with it;
-   notes/vector-rendering/probe-m1-r2.md). `pattern` stays out because resvg
-   allocates its tile whole at its size under every transform above it, which no
-   check here can bound: a 100-unit tile under `scale(160)` took 1 GB and under
-   `scale(1000)` asked for 40 GB (probe R3). The render child's `RLIMIT_AS` catches
-   that on Linux, but macOS does not enforce `RLIMIT_AS`, and there it would be
-   bounded only by the render timeout. Mermaid and merman emit no patterns; a fill
-   that named one takes its fallback or `none` (step 8).
+   Mermaid hangs its labels on it. The display list's walk descends into any element
+   it does not skip, so an element left in would have its shapes drawn in place: a
+   `<pattern>`'s tile, a `<filter>`'s contents. merman emits neither; a fill that
+   named a pattern takes its fallback or `none` (step 8).
 3. **Attributes.** Every `on*` attribute is dropped, compared case-insensitively.
    `href` and `xlink:href` survive only as a same-document `#id`, and come out as
-   plain `href` (SVG 2, which resvg reads), so the output needs no xlink namespace.
+   plain `href` (SVG 2, which the display list reads), so the output needs no xlink
+   namespace.
    Any other namespaced attribute except `xml:space` is dropped. An attribute whose
    value contains a backslash, a `url(` other than `url(#id)`, or a function that
    takes a URL as a string (`image(`, `image-set(`, `src(`) is dropped whole, except
-   in `fill` and `stroke`, where a removed paint is black: there the value becomes
-   the colour after a leading `url()` (`url(http://x) red` is `red`) or `none`, as in
-   step 8, and `Sanitised.notes` says so; the same holds for those declarations in
-   CSS (step 4). Such a fallback is kept only if it is a colour in the grammar of
-   `_colour_or_none`, since an invalid paint is black too (`fill="foo bar"`,
-   measured). The `filter` property is dropped wherever it is set, attribute or
-   CSS: with `<filter>` gone it can only name the wrong thing or be a filter
-   function, and resvg draws those (`blur(200px)` on 50 full-canvas rects took 44 s
-   at 1600x1200; probe R3). `rebeccapurple`, in any case, is written `#663399` in
-   every `fill`, `stroke`, `stop-color`, `flood-color` and `color`, attribute or CSS:
-   it is the one CSS named colour resvg_py 0.5.0 does not know, and it paints it black
-   (measured 2026-10-21; see `_COLOUR_SPELLED`). This is a gap in that version, and
-   the rewrite can go when the renderer knows the name.
+   in `fill` and `stroke`, where a removed paint would leave the shape filled and
+   stroked by its role: there the value becomes the colour after a leading `url()`
+   (`url(http://x) red` is `red`) or `none`, as in step 8, and `Sanitised.notes` says
+   so; the same holds for those declarations in CSS (step 4). Such a fallback is kept
+   only if it is a colour in the grammar of `_colour_or_none`.
 4. **CSS** in `style=` and in `<style>` is split into declarations, and a declaration
    with a backslash, `@import`, a non-fragment `url(` or a URL-taking function is
    dropped whole, or repainted if it sets `fill` or `stroke` (step 3). In a `<style>`,
    a rule whose selector has one of those is dropped with its block. A `<style>` is
    dropped whole only where its contents cannot be trusted to parse as rules: an
    `@import`, or an at-rule not in `HARMLESS_AT_RULES` (`@font-face` among them).
-   Dropping it whole would paint black every shape its classes coloured.
+   Dropping it whole would lose the stroke widths its rules set, which scale the
+   markers the display list draws (`displaylist._Sheet`).
    Nothing is cut out of the middle of a value: a CSS escape makes `u\\72l(` a url
    token, so substring stripping can be evaded, and the backslash rule closes that.
 5. **Caps** (`MAX_INPUT_BYTES`, `MAX_INPUT_ELEMENTS`, `MAX_DEPTH`, `MAX_ELEMENTS`,
-   `MAX_LAYER_CHAIN`, `MAX_SIDE`, `MAX_NATURAL_PIXELS`). The element cap counts the
-   sanitised tree *after* reference expansion: see `_expanded_size`. What these do
-   not bound is render time: a full-canvas layer (opacity, mask) costs about 0.1 s
-   at 1600x1200 nested or not, and marker repetition and tiny dashes cost seconds
-   from a few elements (probe R3). The render process's timeout bounds those.
+   `MAX_SIDE`, `MAX_NATURAL_PIXELS`). The element cap counts the sanitised tree
+   *after* reference expansion: see `_expanded_size`. The display list has bounds of
+   its own on what it builds (`displaylist.MAX_ITEMS` and the rest).
 6. The text is parsed with `xml.etree` after step 1, a new tree is built from what
    passes, and that is serialised with the SVG namespace as the default. Comments
    and processing instructions are not kept (`<?xml-stylesheet?>` among them).
-7. **Every font-family names a family the renderer maps.** pptmstr renders with
-   `skip_system_fonts` and maps only `serif`, `sans-serif` and `monospace` to its own
-   face. `sans-serif` is appended to a list naming none of those, in `font-family=`,
-   in the `font` shorthand and in CSS, so the face is chosen by the document and not
-   by resvg's fallback for an unmatched family (which probe R1c measured to be
-   `serif_family`). `cursive` and `fantasy` are generic families that are not
-   mapped, so a list with only those gets `sans-serif` too.
+7. (No step: font families pass as written. The display list sets every label in
+   the pane's own face and reads no family.)
 8. **A reference whose target is not in the output is resolved, last.** A `url(#id)`
-   or `href="#id"` naming an id the sanitised tree does not have -- a `<filter>` this
-   policy dropped, or an id that never existed -- makes resvg skip the referencing
-   element (probe R1b: merman's `filter:url(#merman-drop-shadow)` erased every node
-   box). So does a `url(#id)` naming an element of the wrong kind for its property
-   (`_TARGET_KINDS`: a clip-path naming a `<rect>`), which is treated as dangling.
-   In `fill` and `stroke` the value becomes its fallback (`url(#gone) red` is `red`)
-   or `none`, which is what SVG 2 makes of a missing paint server; a fallback that is
-   not a colour (step 3) is `none` too. Each such repaint is a line in
-   `Sanitised.notes`, as in step 3. Anywhere else
-   (`clip-path`, `mask`, `marker-*`, `href`, ...) the attribute or the CSS
-   declaration is removed, so the element draws without the effect. An `href` needs
-   only its target to exist.
+   or `href="#id"` naming an id the sanitised tree does not have -- an element this
+   policy dropped, or an id that never existed -- is dangling. So is a `url(#id)`
+   naming an element of the wrong kind for its property (`_TARGET_KINDS`: a marker
+   naming a `<g>`, whose children the display list would otherwise draw as the
+   marker). In `fill` and `stroke` the value becomes its fallback (`url(#gone) red`
+   is `red`) or `none`, which is what SVG 2 makes of a missing paint server, where
+   the display list would read the url as a paint and fill the shape; a fallback
+   that is not a colour (step 3) is `none` too. Each such repaint is a line in
+   `Sanitised.notes`, as in step 3. Anywhere else (`clip-path`, `mask`, `marker-*`,
+   `filter`, `href`, ...) the attribute or the CSS declaration is removed, so the
+   element draws without the effect. An `href` needs only its target to exist.
 9. **CSS custom properties are substituted, right after the parse and before step 2**
-   (see `_substitute_custom_properties`). resvg does not implement them: a `var()`
-   reaches it as an unknown value and `fill:var(--c)` paints black. Every
+   (see `_substitute_custom_properties`). The display list does not resolve them: a
+   `var()` would reach it as text, and `fill:var(--c)` would read as a paint. Every
    `--name: value` declaration, in a `<style>` rule or a `style=` attribute, goes into
    one document-wide table, a later one replacing an earlier: selectors, inheritance
    and the cascade are not modelled, so a property declared differently under two
@@ -112,20 +97,19 @@ Policy, in the order it is applied:
    declared and no fallback, a cycle, nested deeper than `MAX_VAR_DEPTH`, malformed --
    or that resolves to text step 3 or 4 would refuse (an escape, a non-fragment
    `url(`), or to text that spells `var(` again -- fails its attribute or declaration.
-   In `fill` and `stroke` that becomes `none`, as in step 8, and in `stop-color`
-   `transparent`, because each of those removed is black; anything else is removed.
-   A colour-taking property (`_COLOUR_TAKING`) that resolves is held to a colour resvg
-   paints, since the substitution is this module's output: it stays only if it is a
-   colour (`_colour_or_none`), `inherit`, or in a paint a `url(#id)`, and is otherwise
-   failed as above (`--c: foo; fill: var(--c)` would paint black). Each failure is a
-   line in `Sanitised.notes`. A `var()` inside a selector empties
+   In `fill` and `stroke` that becomes `none`, as in step 8; anything else is removed.
+   A `fill` or `stroke` that resolves is held to a paint, since the substitution is
+   this module's output: it stays only if it is a colour (`_colour_or_none`),
+   `inherit`, or a `url(#id)`, and is otherwise failed as above (`--c: foo;
+   fill: var(--c)` would read as a paint). Each failure is a line in
+   `Sanitised.notes`. A `var()` inside a selector empties
    that `<style>`. Text is substituted wherever `var(` appears, inside a CSS string
    too, so none survives. The work and the output are bounded: see `_Vars` and
    `MAX_VAR_VALUES`. A document whose substitution would pass `MAX_INPUT_BYTES` is
    refused as soon as it would, each use of a value counted, before the text is built.
 
-The root's `width` and `height` are rewritten to the natural size, so a renderer that
-sizes its canvas from them gets the size the host laid out for.
+The root's `width` and `height` are rewritten to the natural size, which is what the
+display list takes as its own.
 """
 
 from __future__ import annotations
@@ -145,28 +129,16 @@ XML_NS = "http://www.w3.org/XML/1998/namespace"
 # megabyte is past anything a reply should carry inline and parses in milliseconds.
 MAX_INPUT_BYTES = 1 << 20
 
-# 5,000 elements after reference expansion. The probe's 2,400-element document took
-# about 450 ms in resvg (text-dominated, ~0.3 ms a label), so this bounds one render to
-# about a second on the worker. A typical Mermaid diagram is a few hundred.
+# 5,000 elements after reference expansion: about what the display list's walk visits,
+# since it follows `<use>` and markers. A typical Mermaid diagram is a few hundred.
 MAX_ELEMENTS = 5_000
 
 # Elements in the parsed input, before anything is dropped. The walks that clean the tree
 # are Python and cost about 2 us an element, so this is what bounds them: a megabyte of
-# `<g/>` is 262,000 elements and took 1.4 s on the frame thread before this cap. Four
+# `<g/>` is 262,000 elements and took 1.4 s before this cap. Four
 # times MAX_ELEMENTS leaves room for what the cleaning drops (Mermaid's HTML labels are a
 # few XHTML elements inside each foreignObject; merman's output keeps all but four).
 MAX_INPUT_ELEMENTS = 4 * MAX_ELEMENTS
-
-# How many masks and clip paths may be live inside one another, through
-# nesting or through `url(#id)`. resvg holds a canvas-sized pixmap for each while it
-# draws what is inside: a mask chain 68 deep (the deepest MAX_ELEMENTS admits) took
-# 655 MB and 11.8 s at 1600x1200 (probe R3, 2026-10-20). Mermaid uses none deeper than
-# one. At the largest raster (4096x4096) a mask chain of four peaked at 692 MB of
-# address space and eight at 1.28 GB, over the render child's limit
-# (`render.MEMORY_LIMIT_BYTES`). References made from `<style>` rules are not followed
-# (see `_expanded_size`); that limit is what bounds those.
-MAX_LAYER_CHAIN = 4
-_LAYERS = frozenset({"mask", "clipPath"})
 
 # Nesting depth of the parsed input. Mermaid nests about a dozen deep. The bound is what
 # lets every walk here recurse without meeting Python's recursion limit.
@@ -187,7 +159,7 @@ MAX_VAR_DEPTH = 8
 
 # Distinct values holding a `var()` that one document may have resolved. Each costs
 # about 10 us of Python, so at the byte cap (50,000 of them) step 9 alone took about a
-# second on the frame thread. A chart's values repeat a palette of a few dozen, and a
+# second. A chart's values repeat a palette of a few dozen, and a
 # repeat is a lookup (`_Vars.resolved`).
 MAX_VAR_VALUES = MAX_ELEMENTS
 
@@ -232,13 +204,6 @@ ALLOWED_ELEMENTS: frozenset[str] = frozenset(
 # Elements whose content is text only; child elements inside them are discarded.
 _TEXT_ONLY = frozenset({"style", "title", "desc"})
 
-# The generic families the renderer seam maps to pptmstr's own face (§3.4, "Fonts").
-MAPPED_GENERICS: frozenset[str] = frozenset({"serif", "sans-serif", "monospace"})
-FALLBACK_FAMILY = "sans-serif"
-
-_CSS_WIDE = frozenset({"inherit", "initial", "unset", "revert", "revert-layer"})
-_SYSTEM_FONTS = frozenset({"caption", "icon", "menu", "message-box", "small-caption", "status-bar"})
-
 # XHTML elements whose boundaries are line breaks in a foreignObject label.
 _BLOCK = frozenset(
     {"br", "div", "p", "li", "ul", "ol", "tr", "table", "pre", "blockquote", "section"}
@@ -263,14 +228,13 @@ _AT_KEYWORD = re.compile(r"@([\w-]*)")
 HARMLESS_AT_RULES: frozenset[str] = frozenset(
     {"media", "supports", "keyframes", "-webkit-keyframes", "layer"}
 )
-# Every pattern here runs on model-written text on the frame thread, so none may
+# Every pattern here runs on model-written text in the render child, so none may
 # backtrack super-linearly: no two unbounded quantifiers over overlapping classes may
 # be adjacent or nested. Where whitespace has to be split off around a token, that is
 # done with str methods (`_split_important`, `_number`), not with `\s*` either side of
 # a lazy or optional group: three such patterns took 8-26 s on a 100,000-space run.
 _NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
 _UNIT_PX = {"px": 1.0, "pt": 4 / 3, "pc": 16.0, "in": 96.0, "cm": 96 / 2.54, "mm": 96 / 25.4}
-_FONT_PROPS = ("font-family", "font")
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,16 +451,10 @@ def _clean_attributes(attrib: dict[str, str], notes: dict[str, None]) -> dict[st
             if key != "href" or not _FRAGMENT.fullmatch(fragment):
                 continue
             value = fragment
-        elif lowered == "filter":
-            continue
         elif _css_unsafe(value):
             if lowered not in _PAINT:
                 continue
             value = _repaint(key, value, notes)
-        elif lowered in ("font-family", "font"):
-            value = _fix_font_value(lowered, value)
-        elif lowered in _COLOUR_PROPS:
-            value = _spell_colours(value)
         out[key] = value
     return out
 
@@ -749,10 +707,10 @@ def _substitute_css(text: str, env: _Vars, *, stylesheet: bool) -> str | None:
 def _substitute_value(prop: str, value: str, env: _Vars) -> str | None:
     """
     `value` with every `var()` substituted. A failed one is what `_IN_PLACE_OF` says
-    for the property: `none` in a paint, `transparent` in `stop-color`, and None
-    (remove it) in any other. A resolved text that still spells `var(` has failed: one
-    substitution can join the text around it into a new `var()` (`var(--x, va)r(--c)`
-    with `--x` undeclared is `var(--c)`), and substitution does not rescan its output.
+    for the property: `none` in a paint, and None (remove it) in any other. A resolved
+    text that still spells `var(` has failed: one substitution can join the text around
+    it into a new `var()` (`var(--x, va)r(--c)` with `--x` undeclared is `var(--c)`),
+    and substitution does not rescan its output.
     """
     outcome = env.resolved.get(value)
     if outcome is None:
@@ -771,7 +729,7 @@ def _substitute_value(prop: str, value: str, env: _Vars) -> str | None:
             outcome = env.resolved[value] = why
     name = prop.strip().lower()
     if isinstance(outcome, str):
-        if name in _COLOUR_TAKING:
+        if name in _PAINT:
             return _substituted_colour(prop, outcome, env)
         return outcome
     instead = _IN_PLACE_OF.get(name)
@@ -780,35 +738,25 @@ def _substitute_value(prop: str, value: str, env: _Vars) -> str | None:
 
 
 def _put_instead(name: str, instead: str | None) -> str:
-    if instead is None:
-        return "removed"
-    return f"painted {instead}" if name in _PAINT else f"set to {instead}"
+    return "removed" if instead is None else f"painted {instead}"
 
 
-# The properties step 9 holds to a colour, and what a failed one becomes. A removed
-# fill, stroke or stop-color is black (its initial value), so those take a value that
-# paints nothing; `stop-color: none` is black too, and `transparent` is not (measured
-# on resvg_py 0.5.0, 2026-10-21). A removed `color` inherits its parent's, which is
-# what CSS does with an invalid one. `flood-color` and `lighting-color` take effect
-# only in a filter, and step 2 drops every filter element.
+# The properties step 9 holds to a paint, and what a failed one becomes: `none`,
+# because the display list reads a removed fill or stroke as the role's own
+# (`displaylist._Builder.shape`) and anything but `none` or `transparent` as painting.
+# No other colour-taking property is read by the display list, so none is held.
 _IN_PLACE_OF: dict[str, str | None] = {
     "fill": "none",
     "stroke": "none",
-    "stop-color": "transparent",
 }
-_COLOUR_TAKING = frozenset(
-    {"fill", "stroke", "stop-color", "flood-color", "lighting-color", "color"}
-)
 
 
 def _substituted_colour(prop: str, value: str, env: _Vars) -> str | None:
     """
-    A resolved value of a `_COLOUR_TAKING` property held to what resvg paints, since
-    the substitution is this module's output and a non-colour paints black: a colour
-    (`_colour_or_none`), `inherit` (measured to inherit), or, in `fill` and `stroke`, a
-    `url(#id)` paint (step 8 resolves it). Anything else is `_IN_PLACE_OF` for the
-    property, with a note. Memoised in `env.coloured`, because a stylesheet repeats a
-    value and checking it copies it.
+    A resolved `fill` or `stroke` held to a paint, since the substitution is this
+    module's output: a colour (`_colour_or_none`), `inherit`, or a `url(#id)` paint
+    (step 8 resolves it). Anything else is `none`, with a note. Memoised in
+    `env.coloured`, because a stylesheet repeats a value and checking it copies it.
     """
     name = prop.strip().lower()
     key = (name, value)
@@ -817,19 +765,13 @@ def _substituted_colour(prop: str, value: str, env: _Vars) -> str | None:
     body, important = _split_important(value)
     stripped = body.strip()
     out: str | None = value
-    paint_url = name in _PAINT and _LOCAL_URL.match(stripped)
-    if not (paint_url or stripped.lower() == "inherit"):
-        colour = _colour_or_none(stripped)
-        lead = body[: len(body) - len(body.lstrip())]
-        if colour == "none" and (stripped != "none" or name not in _PAINT):
-            instead = _IN_PLACE_OF.get(name)
+    if not (_LOCAL_URL.match(stripped) or stripped.lower() == "inherit"):
+        if stripped != "none" and _colour_or_none(stripped) == "none":
             env.note(
-                f"{prop.strip()}: var() resolves to {stripped[:40]!r}, not a colour;"
-                f" {_put_instead(name, instead)}"
+                f"{prop.strip()}: var() resolves to {stripped[:40]!r}, not a colour; painted none"
             )
-            out = None if instead is None else f"{lead}{instead}{important}"
-        elif colour != stripped:
-            out = f"{lead}{colour}{important}"
+            lead = body[: len(body) - len(body.lstrip())]
+            out = f"{lead}none{important}"
     env.coloured[key] = out
     return out
 
@@ -935,10 +877,10 @@ _PAINT_SERVERS = frozenset({"linearGradient", "radialGradient"})
 _MARKERS = frozenset({"marker"})
 
 # What a `url(#id)` in each property may name. A property absent here needs only an
-# element with the id. Measured on resvg_py 0.5.0 (2026-10-20): a filter, clip-path or
-# mask naming a <rect> erases the shape, as a dangling one does; fill or stroke naming
-# one paints nothing, ignoring a fallback; a marker naming one draws no marker.
-# `filter` is not here because the property never survives step 3.
+# element with the id. The display list reads a fill or stroke naming anything as a
+# paint, and draws a marker reference's target's children as the marker, so those two
+# are what this guards; the display list reads no clip-path or mask, and the entries
+# for them keep their reference as SVG means it.
 _TARGET_KINDS: dict[str, frozenset[str]] = {
     "fill": _PAINT_SERVERS,
     "stroke": _PAINT_SERVERS,
@@ -1016,7 +958,8 @@ def _resolve_value(prop: str, value: str, kinds: _Kinds, notes: dict[str, None])
 
 # A paint's fallback colour ----------------------------------------------------------
 
-# The CSS named colours. Matched case-insensitively, as CSS and resvg both do.
+# The CSS named colours. Matched case-insensitively, as CSS and
+# `displaylist.parse_colour` both do.
 NAMED_COLOURS: frozenset[str] = frozenset("""
     aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue
     blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk
@@ -1038,58 +981,24 @@ NAMED_COLOURS: frozenset[str] = frozenset("""
     wheat white whitesmoke yellow yellowgreen
     """.split())
 
-# Names written out as their value because resvg_py 0.5.0 does not know them and paints
-# them black (measured 2026-10-21; the other 147 paint their colour). Spelled in every
-# value of `_COLOUR_PROPS` (`_spell_colours`), not only in a fallback this module keeps.
-_COLOUR_SPELLED = {"rebeccapurple": "#663399"}
-_SPELLED_NAME = re.compile(
-    r"(?<![\w-])(" + "|".join(_COLOUR_SPELLED) + r")(?![\w-])", re.IGNORECASE
-)
-
-# The properties whose value can hold a colour. `color` is here because it is what
-# `currentColor` paints: `color="rebeccapurple"` under `fill="currentColor"` paints black
-# too (measured 2026-10-21). `flood-color` has no effect while `filter` is dropped.
-_COLOUR_PROPS = frozenset({"fill", "stroke", "stop-color", "flood-color", "color"})
-
-
-def _spell_colours(value: str) -> str:
-    return _SPELLED_NAME.sub(lambda m: _COLOUR_SPELLED[m.group(1).lower()], value)
-
-
-def _fix_colour_declaration(declaration: str) -> str:
-    """
-    A declaration of one of `_COLOUR_PROPS` with its names spelled; any other as it is.
-    """
-    if _SPELLED_NAME.search(declaration) is None:
-        return declaration
-    name, colon, value = declaration.partition(":")
-    if not colon or name.strip().lower() not in _COLOUR_PROPS:
-        return declaration
-    return f"{name}{colon}{_spell_colours(value)}"
-
-
 _HEX_COLOUR = re.compile(r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})")
 _COLOUR_FUNCTION = re.compile(r"(rgba?|hsla?)\(", re.IGNORECASE)
 
 
 def _colour_or_none(text: str) -> str:
     """
-    `text` stripped if it is a colour resvg paints as written, else `none`: an invalid
-    paint is black. Accepted: a named colour, `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`,
-    `currentColor`, `none`, and `rgb()`/`rgba()` of three numbers or three percentages
-    and `hsl()`/`hsla()` of a number and two percentages, each with an optional numeric
-    alpha, separated by commas or by whitespace. This is narrower than CSS where resvg
-    is: it paints `NONE`, `hsl(120deg, ...)`, a percentage alpha and `rgb(1 2 3 / 0.5)`
-    black, so those are `none` here. A number may be signed or have an exponent:
-    resvg paints `rgb(1e2,0,0)` as (100,0,0) and `rgb(+5,-1,300)` clamped to (5,0,255)
-    (measured 2026-10-21). `currentColor` is kept although it paints black where no
-    `color` is set, since that is CSS's own initial value and not a value this module
-    wrote.
+    `text` stripped if it is a colour, else `none`. Accepted: a named colour, `#rgb`,
+    `#rgba`, `#rrggbb`, `#rrggbbaa`, `currentColor`, `none`, and `rgb()`/`rgba()` of
+    three numbers or three percentages and `hsl()`/`hsla()` of a number and two
+    percentages, each with an optional numeric alpha, separated by commas or by
+    whitespace; a number may be signed or have an exponent. This is narrower than
+    `displaylist.parse_colour`, which also reads `hsl(120deg, ...)`, a percentage alpha
+    and `rgb(1 2 3 / 0.5)`: those are `none` here. `NONE` is not `none`.
     """
     colour = text.strip()
     lowered = colour.lower()
     if lowered in NAMED_COLOURS:
-        return _COLOUR_SPELLED.get(lowered, colour)
+        return colour
     if colour == "none" or lowered == "currentcolor" or _HEX_COLOUR.fullmatch(colour):
         return colour
     function = _COLOUR_FUNCTION.match(colour)
@@ -1168,7 +1077,7 @@ def _css_split(text: str, delimiters: str) -> Iterator[tuple[str, str]]:
     dropped by the caller, so where an escaped quote ends a string does not matter.
     """
     # It jumps from one character that matters to the next, rather than stepping a
-    # character at a time: this runs over up to a megabyte on the frame thread.
+    # character at a time: this runs over up to a megabyte.
     special = _CSS_SPECIAL.get(delimiters)
     if special is None:
         special = re.compile("[" + re.escape("\"'/" + delimiters) + "]")
@@ -1204,7 +1113,7 @@ def _css_split(text: str, delimiters: str) -> Iterator[tuple[str, str]]:
 def _clean_declarations(text: str, notes: dict[str, None]) -> str:
     kept = []
     for declaration, _ in _css_split(text, ";"):
-        if _is_filter(declaration) or not declaration.strip():
+        if not declaration.strip():
             continue
         if _css_unsafe(declaration):
             prop, colon, value = declaration.partition(":")
@@ -1212,7 +1121,7 @@ def _clean_declarations(text: str, notes: dict[str, None]) -> str:
             if not colon or prop.lower() not in _PAINT or _css_unsafe(prop):
                 continue
             declaration = f"{prop}:{_repaint(prop, value, notes)}"
-        kept.append(_fix_colour_declaration(_fix_font_declaration(declaration)).strip())
+        kept.append(declaration.strip())
     return "; ".join(kept)
 
 
@@ -1291,39 +1200,14 @@ def _clean_stylesheet(text: str, notes: dict[str, None]) -> str | None:
             if _css_unsafe(piece):
                 skipping = 1
                 continue
-        elif _css_unsafe(piece) or _is_filter(piece):
+        elif _css_unsafe(piece):
             piece = _clean_declarations(piece, notes)
-        else:
-            piece = _fix_colour_declaration(_fix_font_declaration(piece))
         pieces.append(piece + delimiter)
     css = "".join(pieces)
     # Each kept piece passed `_css_unsafe` and the delimiters between them cannot
     # complete a token, so this holds by construction; it is checked because the
     # consequence of being wrong is a fetch.
     return None if _css_unsafe(css) else css
-
-
-def _is_filter(declaration: str) -> bool:
-    name, colon, _ = declaration.partition(":")
-    return bool(colon) and name.strip().lower() == "filter"
-
-
-# Step 7 -------------------------------------------------------------------------------
-
-
-def _fix_font_declaration(declaration: str) -> str:
-    """
-    A `font-family` or `font` declaration with its family list fixed (step 7); any
-    other declaration as it is.
-    """
-    lead = declaration[: len(declaration) - len(declaration.lstrip())]
-    name, colon, value = declaration[len(lead) :].partition(":")
-    prop = name.rstrip()
-    if not colon or prop.lower() not in _FONT_PROPS:
-        return declaration
-    body, important = _split_important(value)
-    fixed = _fix_font_value(prop.lower(), body)
-    return f"{lead}{name}{colon}{fixed}{important}"
 
 
 def _split_important(value: str) -> tuple[str, str]:
@@ -1339,24 +1223,6 @@ def _split_important(value: str) -> tuple[str, str]:
         return value, ""
     end = len(bang[:-1].rstrip())
     return value[:end], value[end:]
-
-
-def _fix_font_value(prop: str, value: str) -> str:
-    stripped = value.strip()
-    if stripped.lower() in _CSS_WIDE:
-        return value
-    if prop == "font":
-        if stripped.lower() in _SYSTEM_FONTS:
-            return value
-        words = (w for family, _ in _css_split(stripped, ",") for w in family.split())
-    else:
-        words = (family.strip() for family, _ in _css_split(stripped, ","))
-    if any(word.lower() in MAPPED_GENERICS for word in words):
-        return value
-    if not stripped:
-        return FALLBACK_FAMILY
-    lead = value[: len(value) - len(value.lstrip())]
-    return f"{lead}{stripped}, {FALLBACK_FAMILY}"
 
 
 # Step 5: sizes ------------------------------------------------------------------------
@@ -1464,7 +1330,7 @@ def _references(element: ET.Element) -> list[str]:
 
 def _expanded_size(root: ET.Element) -> int:
     """
-    The number of elements a renderer instantiates: each element, plus its children,
+    The number of elements the display list's walk could visit: each element, plus its children,
     plus for every same-document reference it makes (`href`, and `url(#id)` in any
     attribute) the expanded size of what it names, once per referencing element.
 
@@ -1475,8 +1341,6 @@ def _expanded_size(root: ET.Element) -> int:
     twice, the larger target is counted. References made from `<style>` rules, and a
     marker's repetition per path vertex, are not counted.
 
-    The same walk refuses a chain of more than `MAX_LAYER_CHAIN` masks and clip
-    paths inside one another, by nesting or by reference.
     """
     by_id: dict[str, list[ET.Element]] = {}
     for element in root.iter():
@@ -1489,7 +1353,6 @@ def _expanded_size(root: ET.Element) -> int:
         return [*element, *targets]
 
     size: dict[int, int] = {}
-    layers: dict[int, int] = {}
     on_path: set[int] = set()
     stack: list[tuple[ET.Element, bool]] = [(root, False)]
     while stack:
@@ -1503,10 +1366,6 @@ def _expanded_size(root: ET.Element) -> int:
             if total > MAX_ELEMENTS:
                 return total
             size[key] = total
-            inner = max((layers[id(d)] for d in dependencies(element)), default=0)
-            layers[key] = inner + (_local(element.tag) in _LAYERS)
-            if layers[key] > MAX_LAYER_CHAIN:
-                raise _Refusal(f"masks or clip paths {layers[key]} deep, over {MAX_LAYER_CHAIN}")
             continue
         if key in size:
             continue
