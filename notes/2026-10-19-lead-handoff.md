@@ -23,9 +23,9 @@ starts with an empty board and can't read this one.
 
 ## State (after round three)
 
-- Commits: 3fb14fc (research), 70cad9c (round one), 3e9dbca (graph evidence), 8f3a16c (round
-  two), f76ab50 (merge of origin/main 713af05), 7409e82 and 4ac737e (this note), then round
-  three.
+- Commits: 1513a23 (research), a6b0f51 (round one), 944c207 (graph evidence), 720b406 (round
+  two), 88af369 (merge of origin/main 713af05), 83f31b0 and 769c898 (this note), 91d4426 (round
+  three), 982e20d (coordinator concept), then the merge of origin/main 7d3a21f.
 - `make check` green at G-r3: 14569 passed, 14 skipped, 23 xfailed (14606 collected; every test
   file collects at least as many as before the round).
 - Baselines for the next gate:
@@ -69,8 +69,9 @@ starts with an empty board and can't read this one.
   - mypy ignores `PYTHONPATH`.
 - **`make shot-xvfb`** can't keep an image outside the tree (its namespace tmpfs hides `$TMPDIR`),
   so a gate's shot step proves only that a frame rendered.
-- **Commit timestamps** (operator, 2026-10-20). Author and committer dates go outside work hours
-  (Mon–Fri 08:00–18:00 local) and at a sensible time: evenings 19:00–23:30, or weekend daytime.
+- **Commit timestamps** (operator, 2026-10-20; tightened 2026-10-24). Author and committer dates,
+  and any other timestamp written, fall outside 09:00–17:30 ET on every day, weekends included,
+  and at a sensible time (early morning or evening). The 2026-10-24 rule re-dated the first commit.
   Dates keep commit order. Set both `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` on every commit.
   Re-dating an existing commit uses `git commit-tree` on its tree, so the trees stay identical
   and a merge isn't re-resolved, then updates the hashes cited in notes.
