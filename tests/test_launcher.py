@@ -1251,6 +1251,100 @@ def test_a_relative_cwd_in_the_draft_survives_as_the_directory_it_names(
     assert state.spec().cwd == str(Path(tmp_path).resolve())
 
 
+# -- a leading ~ in the field is the operator's home
+
+
+@pytest.fixture
+def home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """A home under the temporary directory, with a project in it."""
+    home = tmp_path.resolve() / "home"
+    (home / "proj").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.mark.parametrize(
+    ("typed", "under"), [("~", ""), ("~/proj", "proj"), ("  ~/proj/ \n", "proj")]
+)
+def test_a_tilde_in_the_field_names_the_home_directory(home: Path, typed: str, under: str) -> None:
+    """
+    The field is typed as a shell path is, and ``~`` there is the operator's home.
+    Resolved as written it is a directory named ``~`` under this process's directory,
+    which the own-checkout refusal -- it expands ``~`` -- would not have been asked
+    about: the gate would judge one directory and the session would run in another.
+    """
+    spec = LauncherState(task="t", cwd=typed).spec()
+    assert spec.cwd == str(home / under if under else home)
+    assert spec.session_base == spec.cwd
+
+
+def test_a_tilde_is_expanded_only_at_the_front(home: Path, tmp_path: Path) -> None:
+    """A ``~`` inside a path is a name, as it is to the shell."""
+    (tmp_path / "a~b").mkdir()
+    assert LauncherState(task="t", cwd=str(tmp_path / "a~b")).spec().cwd == str(
+        (tmp_path / "a~b").resolve()
+    )
+
+
+def test_a_tilde_in_the_field_is_where_a_session_with_no_directory_resumes(
+    home: Path,
+) -> None:
+    state = _picked(home, _row("a", cwd=None))
+    state.cwd = "~/proj"
+    assert state.launch_directory() == launcher.UnrecordedDirectory(str(home / "proj"))
+    pressed = state.press()
+    assert pressed is not None
+    assert (pressed.resume, pressed.cwd) == ("a", str(home / "proj"))
+
+
+def test_a_tilde_in_the_field_is_the_directory_the_session_list_scans(home: Path) -> None:
+    seen: list[str] = []
+
+    def scanner(cwd: str) -> tuple[tuple[SessionRow, ...], Overlay]:
+        seen.append(cwd)
+        return (), {}
+
+    worker = LauncherState(task="t", cwd="~/proj").begin_open(scanner=scanner)
+    assert worker is not None
+    worker.join(timeout=5.0)
+    assert seen == [str(home / "proj")]
+
+
+def test_a_tilde_in_the_field_is_refused_where_its_expansion_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The refusal and the spawn are about one directory: a home inside pptmstr's
+    checkout makes ``~`` a directory the top rung is refused for.
+    """
+    monkeypatch.setenv("HOME", INSIDE_THE_CHECKOUT)
+    state = LauncherState(task=A_PREMISE, cwd="~", policy=Policy.AUTONOMOUS)
+    _settled(state)
+    spec = state.spec()
+    assert spec.cwd == INSIDE_THE_CHECKOUT
+    assert spec.policy is not Policy.AUTONOMOUS and spec.containment is None
+
+
+def test_a_tilde_naming_no_user_is_refused_the_top_rung(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    ``~nosuchuser`` is left as typed, as the shell leaves it, and an ordinary launch
+    runs in that relative path. Whether the operator meant a directory of that name
+    or mistyped a user cannot be told apart, so the top rung is refused as it is for
+    any path with no location.
+    """
+    # Outside the checkout, so the refusal cannot be the own-checkout one.
+    monkeypatch.chdir(tmp_path)
+    typed = "~nosuchuser-pptmstr/x"
+    state = LauncherState(task=A_PREMISE, cwd=typed, policy=Policy.AUTONOMOUS)
+    _settled(state)
+    assert state.containment_refusal() is not None
+    spec = state.spec()
+    assert spec.cwd == os.path.realpath(typed)
+    assert spec.policy is Policy.STRICT and spec.containment is None
+
+
 # ---------------------------------------------------------------------------
 # The dangerously autonomous mode
 # ---------------------------------------------------------------------------
@@ -4117,9 +4211,10 @@ def test_a_directory_with_no_location_is_refused_and_not_raised_about(tmp_path: 
 
     state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
     assert state.dangerous_engaged
-    state.cwd = "a\x00b"
-    assert state.containment_refusal() is not None
-    assert not state.dangerous_engaged
+    for unlocatable in ("a\x00b", "~a\x00b"):
+        state.cwd = unlocatable
+        assert state.containment_refusal() is not None
+        assert not state.dangerous_engaged
 
 
 def test_a_worktree_made_while_the_modal_was_shut_is_seen_when_it_opens(
