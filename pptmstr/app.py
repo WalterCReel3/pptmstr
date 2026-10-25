@@ -13,6 +13,7 @@ import asyncio
 import concurrent.futures
 import dataclasses
 import functools
+import gc
 import os
 import queue
 import signal
@@ -41,6 +42,7 @@ from . import (
     effects,
     fleetsync,
     layout_ini,
+    links,
     model_catalog,
     sessionfile,
     templates,
@@ -66,6 +68,8 @@ from .command import (
 from .command import Withdrawn as CommandWithdrawnEnd
 from .driver import AgentSession, UncontainedAutonomy
 from .fake_driver import FakeDriver
+from .figures import host as figure_host
+from .figures import render as figure_render
 from .intents import (
     BoardRestored,
     CommandApproved,
@@ -1484,6 +1488,10 @@ def begin_frame(state: AppState) -> None:
     # ImGui's font size is the UI font's and not one a pane pushed.
     typeset.pre_frame()
     _keep_baked_sizes()
+    # Every frame, figure or none on screen: the render process's timeout is
+    # enforced here, and laid-out diagrams arrive here, between frames.
+    figure_host.pump()
+    _keep_gc_settled(state.frame_now)
     if state.pending_layout is not None:
         hello_imgui.switch_layout(state.pending_layout)
         state.pending_layout = None
@@ -1570,6 +1578,94 @@ def _keep_baked_sizes() -> None:
             _PANEL_ERRORS["baked sizes"] = detail
             LOG.error("ui", f"baked sizes: {detail}")
             LOG.debug("ui", traceback.format_exc())
+
+
+GC_QUIET_S = 3.0
+"""
+How long the pointer, the wheel and every widget must have been still before the
+collector may be settled (``_keep_gc_settled``): long enough that a drag or a
+scroll has ended, as hello_imgui's own idling waits after the last event.
+"""
+
+GC_SETTLE_EVERY_S = 300.0
+"""
+The least time between two settlings after the one at start-up. A settling is a
+full collection over the whole heap, and costs what a gen-2 pause costs (about
+0.15 ms per thousand tracked objects here); every five minutes of a quiet pane
+keeps what a session has added since out of the next drag's way.
+"""
+
+
+@dataclass
+class _GcSettling:
+    """
+    When input was last seen, and when the collector was last settled: ``None``
+    until ``main``'s first settling, so nothing outside the application freezes.
+    """
+
+    input_at: float = 0.0
+    settled_at: float | None = None
+
+
+_GC = _GcSettling()
+
+
+def gc_settle_due(now: float, input_at: float, settled_at: float | None) -> bool:
+    """
+    Whether the collector should be settled now: never before the application has
+    settled it once, then when the input has been quiet ``GC_QUIET_S`` and the last
+    settling is ``GC_SETTLE_EVERY_S`` old.
+    """
+    if settled_at is None:
+        return False
+    return now - input_at >= GC_QUIET_S and now - settled_at >= GC_SETTLE_EVERY_S
+
+
+def _settle_gc() -> None:
+    """
+    Collect everything, then freeze what survives (``gc.freeze``), so the gen-2
+    collections the frame's allocations set off walk only what has been made since.
+
+    **Why.** A figure's build allocates tens of thousands of ``ImVec2``, which sets
+    off gen-2 collections during a drag, and each walks every tracked object in the
+    process: 106-127 ms each over a session's heap of 650,000 objects, the frame
+    stalled throughout; frozen, under 1 ms (2026-10-22,
+    ``shots/native-cost/gc_drag.py``). Raised thresholds only postpone that pause to
+    a later frame. Unfreezing first lets a frozen object that has since become
+    cyclic garbage be collected, so memory does not grow across settlings.
+    """
+    gc.unfreeze()
+    gc.collect()
+    gc.freeze()
+
+
+def _keep_gc_settled(now: float) -> None:
+    """
+    Note input, and settle the collector when it is due (``gc_settle_due``). Never
+    raises: a frame without it only risks a pause.
+    """
+    try:
+        if imgui.get_current_context() is not None:
+            io = imgui.get_io()
+            if (
+                io.mouse_delta.x
+                or io.mouse_delta.y
+                or io.mouse_wheel
+                or io.mouse_wheel_h
+                or imgui.is_any_mouse_down()
+                or imgui.is_any_item_active()
+            ):
+                _GC.input_at = now
+        if gc_settle_due(now, _GC.input_at, _GC.settled_at):
+            started = time.perf_counter()
+            _settle_gc()
+            _GC.settled_at = now
+            LOG.debug("app", f"collector settled in {(time.perf_counter() - started) * 1e3:.0f} ms")
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        if _PANEL_ERRORS.get("gc") != detail:
+            _PANEL_ERRORS["gc"] = detail
+            LOG.error("ui", f"collector settling: {detail}")
 
 
 # Opens the focused card's menu. A bare letter, like every other key that acts on
@@ -4447,6 +4543,18 @@ def _log_panel() -> None:
 _SHUTDOWN_MARGIN_S = 5.0
 
 
+def _before_exit() -> None:
+    """
+    The runner's last call with the GL and ImGui contexts still current.
+
+    The text library's context goes before the ImGui context its fonts are on.
+    Figures hold no GL object (``figures.host`` draws on the draw list), so
+    nothing of theirs is released here; their render child is ended in
+    ``_shut_down``.
+    """
+    typeset.unload()
+
+
 def _shut_down(state: AppState) -> None:
     """
     End the sessions, then the loop they run on.
@@ -4456,6 +4564,7 @@ def _shut_down(state: AppState) -> None:
     a shutdown that times out or raises is the case that needs it most.
     """
     try:
+        figure_render.shutdown()
         _close_board_log(state)
         _close_fleet(state)
         _close_commands(state)
@@ -5345,6 +5454,10 @@ def main(argv: list[str] | None = None) -> int:
         io.config_error_recovery_enable_debug_log = True
         io.config_error_recovery_enable_tooltip = False
         LOG.info("app", f"theme {state.settings.theme}")
+        # Once the modules, the fonts and the window are made: what start-up built
+        # stays, and the collector stops walking it (``_settle_gc``).
+        _settle_gc()
+        _GC.settled_at = _GC.input_at = time.monotonic()
 
     def pre_frame() -> None:
         begin_frame(state)
@@ -5365,8 +5478,8 @@ def main(argv: list[str] | None = None) -> int:
     runner.callbacks.post_render_dockable_windows = guarded(
         "overlays", lambda: _draw_overlays(state)
     )
-    # The text library's context goes before the ImGui context its fonts are on.
-    runner.callbacks.before_exit = typeset.unload
+
+    runner.callbacks.before_exit = _before_exit
 
     state.bridge.start()
     # On the loop, not on the frame loop: the frame loop is one of the things being
@@ -5402,6 +5515,10 @@ def main(argv: list[str] | None = None) -> int:
         state.bridge.submit(launch_initial())
         LOG.info("app", f"{len(args.task)} task(s), cap {state.settings.concurrency_cap}")
 
+    # A click on a link in any markdown view goes through the link policy, and a
+    # link it refuses says why under the mouse. Before the loop, where no view
+    # exists yet: a change of handler makes every view again (``follow_links``).
+    typeset.follow_links(links.follow, refusal=links.followable)
     the_loop_returned = exit_on_signals(_ask_window_to_close)
     try:
         immapp.run(runner)

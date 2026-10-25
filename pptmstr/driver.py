@@ -55,6 +55,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import SystemPromptCustom, SystemPromptPreset
 
+from . import plugins
 from .approval import (
     Disposition,
     Policy,
@@ -71,6 +72,7 @@ from .board import ROOT_NAMES, address_for
 from .bridge import Bridge
 from .bus import EDITED_KEY, FROM_KEY, SERVER_NAME, build_server, offered_tools
 from .cli_version import BelowFloor, MeetsFloor, Unreadable, VersionRead, check_floor
+from .figures import fences
 from .intents import (
     AgentFinished,
     AgentResumed,
@@ -2320,26 +2322,71 @@ class AgentSession:
         return {}
 
     def _team(self) -> dict[str, AgentDefinition] | None:
-        """The template's roles as SDK agent definitions, or None for a lone agent."""
+        """
+        The template's roles as SDK agent definitions, or None for a lone agent.
+
+        Each worker's prompt ends with what the reply pane draws
+        (``fences.session_prompt``), the same text the lead's append carries: a
+        worker's output is drawn in the same panes, and a sub-agent does not read
+        the lead's system prompt.
+
+        **A role with a tool list is not given ``Skill``, and its floor does not
+        name the figures skill.** A worker that inherits its tools calls the
+        shipped skill itself and the gate attributes the call (the skill probe's
+        L7); one with a list has no ``Skill`` unless the list names it (L6). The
+        lists here are the read-only reviewer roles, which review rather than
+        draw. Adding ``Skill`` would be safe at the gate, which admits only the
+        shipped names, but it would hand those roles a way to load a user's or a
+        project's skill, whose `` !`command` `` lines run as it loads, on one
+        approval. The SDK also calls a ``Skill`` entry in ``tools`` deprecated, and
+        it is unrun. ``AgentDefinition.skills`` was not chosen either: it preloads
+        the whole body into every such worker (L5), which is the always-on cost
+        the skill exists to avoid.
+        """
         if not self.template.roles:
             return None
-        return {
-            role.name: AgentDefinition(
+        drawn_by = {can: fences.session_prompt(skill=can) for can in (True, False)}
+        team: dict[str, AgentDefinition] = {}
+        for role in self.template.roles:
+            tools = role.tool_list(self.contained)
+            drawn = drawn_by[tools is None or "Skill" in tools]
+            team[role.name] = AgentDefinition(
                 description=role.description,
-                prompt=worker_prompt(role, self.brief, self.policy, self.contained),
-                tools=role.tool_list(self.contained),
+                prompt="\n\n".join(
+                    text
+                    for text in (
+                        worker_prompt(role, self.brief, self.policy, self.contained),
+                        drawn,
+                    )
+                    if text
+                ),
+                tools=tools,
                 # "inherit" rather than self.model: a role that does not ask for a
                 # model should run on whatever the session was launched with, not on
                 # the SDK's default, or the launcher's model choice would silently
                 # apply to the lead alone.
                 model=role.model or "inherit",
             )
-            for role in self.template.roles
-        }
+        return team
 
     def _system_prompt(self) -> SystemPromptPreset | SystemPromptCustom | None:
         """
-        The lead's briefing, appended to Claude Code's own system prompt.
+        The lead's briefing and what the reply pane draws, appended to Claude Code's
+        own system prompt.
+
+        **Every launch says which fences are drawn** (``fences.session_prompt``):
+        solo or team, fresh or resumed. Without it a session writes ``$...$`` that
+        shows as written and diagrams in fences nothing draws. It is read here, at
+        launch, from what is installed, so a session is not told about a renderer
+        this process lacks. It follows the briefing and is the whole append where
+        there is no briefing, so a solo launch carries an append too: 855
+        characters with every renderer installed (``fences.PROMPT_LIMIT`` bounds
+        it at 950). The rules for each fence are not in it: they are the
+        shipped skill the text names (``plugins``), which a session loads when it
+        draws. It says the fences are drawn "when pptmstr typesets replies",
+        because the operator can switch typeset text off after the launch and the
+        prompt is not rebuilt for that. Every worker is told the same, less the
+        skill where it cannot load one (``_team``).
 
         Appended rather than replacing it: the preset carries the tool conventions
         and the environment description this agent still needs, and a bare string
@@ -2361,7 +2408,8 @@ class AgentSession:
         request for the life of this process, which is the documented price; a fresh
         launch has nothing to correct and does not pay it.
 
-        A resume with no briefing asks too. Without it a session started with a
+        A resume with no append asks too (nothing installed draws a fence, and the
+        template has no briefing). Without it a session started with a
         team and resumed solo goes on answering to a briefing that names roles this
         launch configured no agents for. The empty custom prompt is the shape that
         can carry the key and still puts on argv exactly what None does
@@ -2370,17 +2418,24 @@ class AgentSession:
         A CLI below ``RESUME_BRIEFING_FLOOR`` ignores the key; ``run`` says so from
         the version in the ``init`` frame.
         """
-        briefing = lead_briefing(self.template, self.policy, self.contained)
+        append = "\n\n".join(
+            text
+            for text in (
+                lead_briefing(self.template, self.policy, self.contained),
+                fences.session_prompt(),
+            )
+            if text
+        )
         if self.resume is None:
-            if not briefing:
+            if not append:
                 return None
-            return {"type": "preset", "preset": "claude_code", "append": briefing}
-        if not briefing:
+            return {"type": "preset", "preset": "claude_code", "append": append}
+        if not append:
             return {"type": "custom", "prompt": "", "snapshot": False}
         return {
             "type": "preset",
             "preset": "claude_code",
-            "append": briefing,
+            "append": append,
             "snapshot": False,
         }
 
@@ -2455,6 +2510,11 @@ class AgentSession:
             session_id=None if self.resume is not None else self.session_id,
             agents=self._team(),
             system_prompt=self._system_prompt(),
+            # The skills pptmstr ships (``plugins``), on every launch, by the
+            # absolute path the CLI needs. ``skills`` and ``setting_sources`` stay
+            # unset: either one changes which of the user's and the project's
+            # settings load, and this only adds.
+            plugins=[plugins.config()],
             # §8's containment, or None. None is not a value the transport can see:
             # `_build_settings_value` branches on `settings is not None` and returns
             # early, so `--settings` is absent from argv and an uncontained launch is

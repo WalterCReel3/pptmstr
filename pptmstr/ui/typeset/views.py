@@ -47,6 +47,12 @@ copied as the library's.
 So ``document`` is one view only where every part is markdown.
 ``ViewCache.views(key)`` has every view of a key, in order.
 
+**A click on a link in a markdown view is followed** by the caller's
+``on_link`` or, where it passed none, the one the app installed
+(``follow_links``), in settled documents and streams alike; a link the app's
+policy refuses says why in a tooltip. A literal view and a view of rows have no
+handler, so nothing in them is clickable.
+
 **A part its caller draws** (``Hosted``) is drawn by the ``host`` handed to
 ``document``, where it falls among the others: the log's tool blocks, which are
 ImGui widgets, scroll in one window with the runs the library sets. A host that
@@ -66,6 +72,43 @@ stream does** (``Stream._ink``): its text has ended, so the session pane's last
 run, which stays a stream after its turn ends, draws a diff fence as DETAIL's
 settled document of the same text does.
 
+**A ```` ```mermaid ```` fence is a figure once it has settled**
+(``figures.host``): in a settled document, and in a stream once the stream has
+committed the fence or closed, open or not (``_Captioned``). Until then it is code.
+One where merman is not installed stays code, under a line in the warn ink saying
+why. A ```` ```svg ```` fence is code, as any language outside ``figures.fences``
+is. Both kinds of
+hosting go through one dispatcher (``_Hosts``), which the diff rule above still
+governs for diffs. A figure's pixels arrive frames after it is first drawn,
+from a render process (``figures.render``): the one thing here built over more
+than one frame, and its height does not wait for them.
+
+**A ```` ```math ```` fence is a display formula once it has settled**, by the same
+rule (``settles_rendered``): its body alone is read with mathematics on, in the
+theme of its part or stream, and spliced in where the fence was as a block of the
+document, selected and laid out with the prose (``_formula_block``). Nothing else
+is ever read with mathematics on, so ``$`` in prose is text. The library is asked
+first whether it will set the formula (``gate.formula``), and one it refuses stays
+code under a line in the warn ink saying why; one it refuses in a view all the
+same is caught after the draw and made code the same way (``_formulas_refused``),
+so one formula never takes its entry off the library. A copy gives the fence as
+written (``_formula_copy``).
+
+**A formula is set at twice its text's size, stepped down to fit**
+(``formula_scale``): no wider than the measure, no taller than
+``FORMULA_LINES`` lines of its theme, and never smaller than its text's size.
+The scale is a run's (``RunDescription.scale``), so the body text around it is
+untouched and it follows the operator's size setting. It is chosen when the
+blocks are handed to a view, at the measure of the draw (``_sized``), and asked
+of the library at that scale; one refused there is set at 1. A draw at another
+measure hands the blocks again only when a scale changes (``_draw``,
+``_Captioned.revision``), and nothing is read again. **A formula wider than the
+measure at 1 runs past it**: the library never breaks a display formula, so the
+window is told how far it reaches (``_reach``) and scrolls sideways to it, as
+to a long line of code. **A formula has space above and below it that grows with
+its scale** (``formula_style``), a field of its block's style, so its height is
+known before it is drawn; no other block's style is touched.
+
 ## When the library stops
 
 A view can raise ``imscribe.TypesetUnavailable`` from inside its draw, with the
@@ -78,8 +121,17 @@ renderer.
 
 **Whatever else a call into the library raises is the library stopping too**
 (``gate.into_library``): each such call is made inside one of the ``with`` blocks
-named at the top of this module, and nothing of pptmstr's own is inside one.
-What pptmstr's own code raises here is a defect and is not caught.
+named at the top of this module, and the stop holds for every pane in the process.
+**pptmstr's own code that runs inside one catches what it raises at its own edge**
+and lets nothing out but ``TypesetUnavailable``: the link handler the library calls
+back from its draw (``_Followed``), the captioned stream's blocks (``_Captioned``),
+the copy (``_formula_copy``), the guard after a draw (``_formulas_refused``) and
+the formula's pre-check (``gate.formula``). Each logs the exception as pptmstr's
+defect (``gate.own_defect``) and gives a lesser answer for its own text alone. The
+rule is whose code raised: a call into the library made from inside such a callback
+(the copy's reads of the view, the pre-check's native calls) is wrapped in its own
+``with`` block, and a failure there stops the library. What pptmstr's code raises
+outside every such block is a defect and is not caught.
 
 ## When the library sets less than it was handed
 
@@ -153,13 +205,18 @@ import unicodedata
 from collections.abc import Callable, Collection, Hashable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from ... import theme as ui_theme
+from ...figures import fences
+from ...log import LOG
 from ...theme import Color
 from . import gate, roles, syntax, themes
 from .parts import Kind, Part
 from .roles import Role, Slot, Weight
+
+if TYPE_CHECKING:
+    from ...figures.render import Fonts
 
 _MIN_WIDTH_PX = 80.0
 """
@@ -182,6 +239,86 @@ _NOT_ALL_SET = "could not set something in view as it was asked to"
 What is said of a draw that answered false with no note from the library: its
 own words for that answer.
 """
+
+_RAW_STREAM = "typeset: pptmstr could not read this reply's fences, so they are drawn as code"
+"""
+What is said under a stream whose captioning raised (``_Captioned.raw``).
+"""
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _Followed:
+    """
+    The app's link handler as a view is given it: what it raises is logged here,
+    and the view's draw goes on.
+
+    The library calls ``on_link`` inside its draw, which pptmstr makes inside
+    ``_DRAWING``, so an exception that left it would be read as the library
+    stopping and would take typeset text off every pane. The handler is
+    pptmstr's own code, and its failure is not the library's.
+    """
+
+    handler: Callable[[str], object]
+    refusal: Callable[[str], str | None] | None
+
+    def __call__(self, destination: str) -> None:
+        try:
+            self.handler(destination)
+        except Exception as exc:  # noqa: BLE001 -- see the class docstring
+            said = " ".join(f"{type(exc).__name__}: {exc}".split())
+            LOG.error("link", f"the link handler raised on {destination[:200]!r}: {said}")
+
+
+_FOLLOW: _Followed | None = None
+"""
+What a click on a link in a markdown view calls when its caller handed no
+``on_link``: the app's policy, installed once at start-up (``follow_links``).
+"""
+
+
+def follow_links(
+    handler: Callable[[str], object] | None,
+    *,
+    refusal: Callable[[str], str | None] | None = None,
+) -> None:
+    """
+    Make ``handler`` what every markdown view calls with a clicked link's
+    destination, wherever its caller passed no ``on_link`` of its own: settled
+    documents, ``markdown`` and streams alike. ``None`` makes links inert again.
+
+    One handler for the process and not an argument at each call site: whether a
+    click opens an address is the app's decision, and a pane that forgot to pass
+    one would be the one pane whose links did nothing. An explicit ``on_link``
+    still wins. A literal view never has one (``_literal_segment``, ``rows``).
+
+    ``refusal`` answers why a destination would not be followed, or None. A link
+    under the mouse that it refuses says why in a tooltip, since the library draws
+    every link alike once a view has a handler, followable or not.
+
+    **What the handler raises is logged and goes no further** (``_Followed``): it
+    runs inside the library's draw, where an exception is the library stopping.
+
+    A link is drawn in the palette's link ink only in a view that has a handler
+    when it is made: the library's view makes the converter that inks links in its
+    constructor, so a view is handed its handler there. So a change of handler
+    moves the epoch (``roles.moved``) and every view is made again at its next
+    draw, as at a change of face; installed before the loop, as the app does, that
+    is no view at all.
+    """
+    global _FOLLOW
+    if _FOLLOW is None and handler is None:
+        return
+    if _FOLLOW is not None and _FOLLOW.handler is handler and _FOLLOW.refusal is refusal:
+        return
+    _FOLLOW = None if handler is None else _Followed(handler, refusal)
+    roles.moved()
+
+
+def _handler_for(on_link: Callable[[str], None] | None) -> Callable[[str], None] | None:
+    """
+    The handler a markdown view is given: its caller's, else the process's.
+    """
+    return on_link if on_link is not None else _FOLLOW
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +426,12 @@ class _Entry:
     unset: str | None = None
     # The parts as ImGui draws them then: markdown as its source.
     written: tuple[Part, ...] = ()
+    # The measure the views' formulas were sized for, what each is sized by
+    # (``_fits``), and the scales that gave (``_scales``): a draw at another
+    # measure sizes them again only where a scale changes (``_refit``).
+    measure: float | None = None
+    fits: tuple[tuple[float, float, float], ...] = ()
+    scales: tuple[float, ...] = ()
     # For the kind ``stream``: the ``Stream`` a pane appends to.
     stream: Stream | None = None
     # For the kind ``diff``: the library's model of what was last handed over,
@@ -519,65 +662,149 @@ class _Captioned:
     from its block, as in a document, which has no source map), and
     ``revision`` changes with ``hosting`` as well, because the view reads the
     blocks again only when it changed.
+
+    **A ```` ```mermaid ```` fence is marked as a figure, and a
+    ```` ```math ```` fence set as a formula, once it has settled**
+    (``settles_rendered``): once the stream has committed it, or ``closed`` (the
+    stream sets it with ``hosting``), a formula read in the stream's own theme.
+    Until then it is code under its caption. The answer has to change the block's
+    value at commit: the view asks its host about a block only
+    when the block is a new value, and a committed fence is the same object as its
+    last open form (probe S1, the planning record's §3.6). So whether such a
+    fence has settled is part of what its answer is kept by, and ``revision``
+    changes with ``closed`` too. Any other fence is answered with the same block
+    across its commit, so the view does not describe it again.
+
+    **Only ``_FORWARDED`` is the stream's.** Python calls ``__getattr__`` for a name
+    the class lacks and also when one of its own properties raises
+    ``AttributeError`` inside, so forwarding every name would answer the stream's
+    raw blocks, uncaptioned and unmarked, for a defect in ``blocks``, with no error.
+
+    **A defect in ``blocks``, ``committed`` or ``sources`` is caught at their edge**
+    (``_own``): the library reads them from inside ``view.sync()``, under
+    ``_HANDING``, where an exception would be the library stopping in every pane.
+    It is logged as pptmstr's (``gate.own_defect``), and from then on this stream
+    answers its own blocks as the library read them (``raw``): its fences are
+    plain code, none a figure or a formula, and ``Stream.draw`` says so under it.
     """
 
     def __init__(self, stream: Any) -> None:
         self._stream = stream
-        self._made: dict[int, tuple[Any, bool, bool, tuple[Any, ...]]] = {}
+        self._made: dict[int, tuple[Any, bool, bool, bool, tuple[Any, ...]]] = {}
         # The blocks last answered, the index of the stream's block each stands
         # for, and whether each has that block's source.
         self._out: tuple[Any, ...] = ()
         self._from: list[int] = []
-        self._own: list[bool] = []
+        self._mine: list[bool] = []
         self.plain = False
         self.hosting = False
+        self.closed = False
+        # The measure the stream is drawn at, which its formulas are sized for
+        # (``_sized``), and what each formula last answered is sized by.
+        self.measure: float | None = None
+        self._fits: tuple[tuple[float, float, float], ...] = ()
+        # Whether a defect in this class's own reading has made it answer the
+        # stream's blocks as they are (``_own``).
+        self.raw = False
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._stream, name)
+        if name in _FORWARDED:
+            return getattr(self._stream, name)
+        raise AttributeError(f"_Captioned does not forward {name!r} to its stream")
+
+    def _own(self, name: str, read: Callable[[], _T]) -> _T:
+        """
+        ``read``, or, where pptmstr's code in it raised, the stream's own ``name``
+        from then on, the defect logged. The library stopping passes as it is.
+        """
+        from imscribe import TypesetUnavailable
+
+        if not self.raw:
+            try:
+                return read()
+            except TypesetUnavailable:
+                raise
+            except Exception as failure:
+                gate.own_defect(f"captioning a stream's {name}", failure)
+                self.raw = True
+        answer: _T = tuple(getattr(self._stream, name, ()))  # type: ignore[assignment]
+        return answer
 
     @property
     def revision(self) -> Any:
-        return (self._stream.revision, self.hosting)
+        sizes = _scales(self._fits, self.measure)
+        return (self._stream.revision, self.hosting, self.closed, self.raw, sizes)
 
     @property
     def blocks(self) -> tuple[Any, ...]:
-        made: dict[int, tuple[Any, bool, bool, tuple[Any, ...]]] = {}
+        return self._own("blocks", self._blocks)
+
+    def _blocks(self) -> tuple[Any, ...]:
+        made: dict[int, tuple[Any, bool, bool, bool, tuple[Any, ...]]] = {}
         out: list[Any] = []
         came: list[int] = []
         own: list[bool] = []
         plain, hosting = self.plain, self.hosting
+        done = len(self._stream.committed)
         for at, block in enumerate(self._stream.blocks):
             if not getattr(block, "language", ""):
                 out.append(block)
                 came.append(at)
                 own.append(True)
                 continue
+            settled = settles_rendered(block.language) and (self.closed or at < done)
             held = self._made.get(id(block))
-            if held is None or held[0] is not block or held[1:3] != (plain, hosting):
-                held = (block, plain, hosting, _captioned((block,), hosting, plain=plain))
+            if held is None or held[0] is not block or held[1:4] != (plain, hosting, settled):
+                # Only a formula is read again, and only it needs the theme.
+                math = settled and is_math_fence(block.language)
+                theme = self._stream.theme if math else None
+                answer = _captioned((block,), hosting, plain=plain, figures=settled, theme=theme)
+                held = (block, plain, hosting, settled, answer)
             made[id(block)] = held
-            answer = held[3]
+            answer = tuple(_sized(each, self.measure) for each in held[4])
             out += answer
             came += [at] * len(answer)
-            mine = len(answer) == 1 and answer[0].language != _HOSTED_INFO
+            # A formula stands for its fence one for one, and has no info string.
+            mine = len(answer) == 1 and (
+                _is_formula(answer[0]) or answer[0].language != _HOSTED_INFO
+            )
             own += [mine] * len(answer)
         self._made = made
-        self._out, self._from, self._own = tuple(out), came, own
+        self._out, self._from, self._mine = tuple(out), came, own
+        self._fits = _fits(self._out)
         return self._out
 
     @property
     def committed(self) -> tuple[Any, ...]:
+        return self._own("committed", self._committed)
+
+    def _committed(self) -> tuple[Any, ...]:
         done = len(self._stream.committed)
         count = sum(1 for at in self._from if at < done)
         return self._out[:count]
 
     @property
     def sources(self) -> tuple[Any, ...]:
+        return self._own("sources", self._sources)
+
+    def _sources(self) -> tuple[Any, ...]:
         theirs = tuple(getattr(self._stream, "sources", ()))
         return tuple(
             theirs[at] if mine and at < len(theirs) else None
-            for at, mine in zip(self._from, self._own, strict=True)
+            for at, mine in zip(self._from, self._mine, strict=True)
         )
+
+
+_T = TypeVar("_T")
+
+_FORWARDED = frozenset({"theme", "live_theme", "source"})
+"""
+What ``_Captioned`` answers with its stream's own attribute: the names the library's
+stream view reads that are not the captioned blocks' (``TypesetStreamView``:
+``theme`` when it is made, ``live_theme`` and ``source`` while it draws). Found by
+recording every name ``__getattr__`` was asked across the suite (2026-10-21): these
+three, and nothing else.
+"""
 
 
 class Stream:
@@ -700,9 +927,15 @@ class Stream:
             with _MAKING:
                 self._source = MarkdownStream(theme)
                 self._captioned = _Captioned(self._source)
+                # The handler in the constructor: the view makes the converter
+                # that takes the link ink there (``follow_links``).
                 self._view = TypesetStreamView(
-                    self._captioned, palette=palette, follow=self._follow
+                    self._captioned,
+                    palette=palette,
+                    follow=self._follow,
+                    on_link=_handler_for(None),
                 )
+                self._view.copy_as = _formula_copy
             self._entry.segments = [_Segment((), self._view)]
         if self._fed < len(self._text):
             arrived = self._text[self._fed :]
@@ -749,8 +982,9 @@ class Stream:
         if captioned is not None:
             captioned.plain = ink is not None
             captioned.hosting = self._closed and diffs.adopted()
+            captioned.closed = self._closed
             with _HANDING:
-                view.host_for = _fences() if captioned.hosting else None
+                view.host_for = _hosts(captioned.hosting)
         with _HANDING:
             view.sync()
             revision = view.revision
@@ -763,12 +997,15 @@ class Stream:
             blocks = tuple(view.blocks)
             texts = [str(text) for text in view.texts]
             hosted = set(view.hosts)
+        # A stream answered raw has no caption line over its fences (``_Captioned``).
+        raw = captioned is not None and captioned.raw
         captions = {
             at: _caption_length(block)
             for at, block in enumerate(blocks)
             if (said := getattr(block, "language", ""))
             and said != _HOSTED_INFO
             and at not in hosted
+            and not raw
         }
         self._entry.segments[0].captions = captions
         warned = self._entry.segments[0].warned = _warned_lengths(blocks)
@@ -804,14 +1041,26 @@ class Stream:
         top = im.get_cursor_pos().y
         try:
             noted = gate.noted()
+            wide = _width(im, width)
             self._catch_up()
+            if self._captioned is not None:
+                self._captioned.measure = wide
             self._ink(ink, frame)
-            _show_view(im, entry.segments[0], _width(im, width), themes.palette(ink), None)
-            self._unset = _short(entry, noted) or self._unset
+            _show_view(im, entry.segments[0], wide, themes.palette(ink), None)
+            short = _short(entry, noted)
             entry.missing = 0
+            if short == _NOT_ALL_SET and self._unset is None and _formulas_refused(entry):
+                # As ``_draw`` does: that fence is code from the next draw,
+                # which reads the text again.
+                entry.missing = self._text.count("\n") + 1
+                self._forget()
+                short = None
+            self._unset = short or self._unset
             if self._unset is not None:
                 entry.missing = self._text.count("\n") + 1
                 _said(im, f"typeset: the library {self._unset}", ui_theme.P.warn)
+            if self._captioned is not None and self._captioned.raw:
+                _said(im, _RAW_STREAM, ui_theme.P.warn)
         except TypesetUnavailable as stopped:
             gate.stopped(stopped)
             entry.missing = self._text.count("\n") + 1
@@ -894,6 +1143,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
     read: dict[tuple[str, int, bool, bool], tuple[Any, ...]] = {}
     segments: list[_Segment] = []
     run: list[int] = []
+    fits: list[tuple[float, float, float]] = []
 
     def close_run() -> None:
         if not run:
@@ -909,19 +1159,22 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
                 theme = themes.demoted(part.demote)
                 with _READING:
                     parsed = gate.read(part.text, theme).blocks
-                made = _captioned(parsed, hosting, plain=plain)
+                made = _captioned(parsed, hosting, plain=plain, figures=True, theme=theme)
             read[key] = made
-            blocks += made
+            blocks += (_sized(block, entry.measure) for block in made)
             owner += [index] * len(made)
         view: Any = kept.pop(0) if kept else None
         if view is None:
             theme, palette = themes.document_theme(), themes.palette()
             with _MAKING:
-                view = TypesetView(theme=theme, palette=palette)
-        fences = _fences() if hosting else None
+                # The handler in the constructor: the view makes the converter
+                # that takes the link ink there (``follow_links``).
+                view = TypesetView(theme=theme, palette=palette, on_link=_handler_for(on_link))
+        fences = _hosts(hosting)
         with _HANDING:
-            view.on_link = on_link
+            view.on_link = _handler_for(on_link)
             view.host_for = fences
+            view.copy_as = _formula_copy
             view.set_document(tuple(blocks))
         captions = {
             at: _caption_length(block)
@@ -931,6 +1184,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
         segment = _Segment(tuple(run), view, tuple(owner), captions)
         segment.warned = _warned_lengths(blocks)
         segments.append(segment)
+        fits.extend(_fits(blocks))
         run.clear()
 
     for index, part in enumerate(parts):
@@ -952,6 +1206,8 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
     entry.parts = parts
     entry.segments = segments
     entry.read = read
+    entry.fits = tuple(fits)
+    entry.scales = _scales(entry.fits, entry.measure)
     entry.inked = None
     entry.pending = []
     entry.natural = None
@@ -1092,6 +1348,61 @@ def _short(entry: _Entry, noted: object) -> str | None:
     return None
 
 
+def _formulas_refused(entry: _Entry) -> bool:
+    """
+    Whether a draw that set less than it was handed did so for a formula: each
+    formula block of a view whose draw answered false that the library says it
+    could not set (``Document.block_error``) is kept as refused
+    (``gate.refused``), and the answer is true when there was one.
+
+    The guard behind ``gate.formula``'s asking. A formula that was asked about
+    and set there, and refused in the view all the same, would otherwise take
+    every part of its entry off the library (``_as_written``); kept, the fence
+    reads as code under the reason from the next reading on, and only it does.
+    A block not yet laid out has no error to read, and is caught by the draw
+    that first lays it out.
+
+    What pptmstr's own part of this raises is logged as its defect
+    (``gate.own_defect``) and the answer is false: the entry then goes to ImGui
+    as written, as any draw that set less does.
+    """
+    from imscribe import TypesetUnavailable
+
+    try:
+        return _refused_formulas(entry)
+    except TypesetUnavailable:
+        raise
+    except Exception as failure:
+        gate.own_defect("reading which formulas a view refused", failure)
+        return False
+
+
+def _refused_formulas(entry: _Entry) -> bool:
+    found = False
+    for segment in entry.segments:
+        view = segment.view
+        if view is None or segment.whole:
+            continue
+        with _ASKING:
+            blocks = tuple(view.blocks)
+        held = [(at, block) for at, block in enumerate(blocks) if _is_formula(block)]
+        if not held:
+            continue
+        with _ASKING:
+            document = view.native_document
+        if document is None:
+            # No document to ask (not drawn yet, or closed): nothing it refused is
+            # known, and that is pptmstr's state, not the library failing.
+            continue
+        with _ASKING:
+            errors = [(block, document.block_error(at)) for at, block in held]
+        for block, error in errors:
+            if error.code:
+                gate.refused(block.body, block.theme, error.message or _NOT_ALL_SET)
+                found = True
+    return found
+
+
 def _as_written(entry: _Entry, why: str) -> None:
     """
     Hand the parts held to ImGui, each as written, from the next draw on (the
@@ -1124,10 +1435,329 @@ def _as_written(entry: _Entry, why: str) -> None:
     entry.pending = []
     entry.natural = None
     entry.shown = None
+    entry.fits = entry.scales = ()
+
+
+def is_math_fence(said: str) -> bool:
+    """
+    Whether a fence's info string asks for a formula: its first word is a formula
+    row of the table of drawn fences (``figures.fences.FORMULA_WORDS``: ``math``),
+    set by ``_formula_block``.
+    """
+    return fences.word(said) in fences.FORMULA_WORDS
+
+
+def settles_rendered(said: str) -> bool:
+    """
+    Whether a fence with this info string becomes something other than code once
+    it has settled: a figure (``figures.host.is_figure_fence``) or a formula
+    (``is_math_fence``), the two kinds of row in ``figures.fences.RENDERED``. The
+    rule ``_Captioned`` keeps such a fence's answer by, so that its answer changes
+    at commit (probe S1), and the rule under which ``_captioned(figures=True)``
+    turns one.
+    """
+    from ...figures import host as figures_host
+
+    return figures_host.is_figure_fence(said) or is_math_fence(said)
+
+
+_FORMULA_TYPE: list[Any] = []
+
+
+def _formula_type() -> Any:
+    """
+    The block a settled math fence is set as: the library's ``MarkdownText`` of
+    one display formula, carrying the fence's ``body`` and the ``fence`` as
+    written, which a copy gives (``_formula_copy``) and a refusal after the
+    fact is kept by (``_formulas_refused``).
+
+    A subclass and not a word on the block, as ``_Warned`` is for a fence:
+    ``MarkdownText`` has no info string. Made on first use, because this
+    module is imported where the library is not installed.
+    """
+    if not _FORMULA_TYPE:
+        from imscribe import MarkdownText
+
+        @dataclass(frozen=True, slots=True)
+        class _Formula(MarkdownText):  # type: ignore[misc]
+            body: str = ""
+            fence: str = ""
+            # What it was read in: what a refusal is kept by.
+            theme: Any = field(default=None, compare=False)
+            # The scale its runs are set at, and what ``formula_scale`` sizes
+            # it by: its width and height at 1 and its theme's line height.
+            scale: float = 1.0
+            size: tuple[float, float, float] = field(default=(0.0, 0.0, 0.0), compare=False)
+
+            @classmethod
+            def of(
+                cls,
+                made: Any,
+                body: str,
+                fence: str,
+                theme: Any,
+                scale: float = 1.0,
+                size: tuple[float, float, float] = (0.0, 0.0, 0.0),
+            ) -> Any:
+                kept = {name: getattr(made, name) for name in MarkdownText.__dataclass_fields__}
+                kept["style"] = formula_style(made.style, scale)
+                return cls(**kept, body=body, fence=fence, theme=theme, scale=scale, size=size)
+
+        _FORMULA_TYPE.append(_Formula)
+    return _FORMULA_TYPE[0]
+
+
+def _is_formula(block: Any) -> bool:
+    """
+    Whether a block is a settled math fence set as a formula (``_formula_type``).
+    """
+    return bool(_FORMULA_TYPE) and isinstance(block, _FORMULA_TYPE[0])
+
+
+FORMULA_SCALE = 2.0
+"""
+How many times its text's size a display formula is set at when nothing stops
+it. The operator's finding of 2026-10-22, from the running app: formulas set at
+the body's size are undersized for how legible math glyphs are on screen, and
+could be twice as large while taking the formula's own size into account.
+"""
+
+FORMULA_LINES = 5.0
+"""
+The tallest a display formula is set, in lines of its theme's paragraphs, unless
+that is less than its height at 1. Chosen from screenshots under Xvfb in both
+themes (2026-10-22, the planning record says what they showed): a ``\\sum`` with
+limits beside a ``\\frac`` is 2.2 lines at 1 and keeps its 2, and a ``\\sum`` with
+limits over a stacked fraction, 2.7 lines at 1, is set at 1.75 rather than 2,
+about five lines of the text around it, where at 2 it would be five and a half.
+"""
+
+FORMULA_AIR = 0.5
+"""
+The space a display formula at 1 has above and below it, in lines of the text it
+was read in (its style's ``leading``), on top of the gap that text already keeps
+after a paragraph.
+"""
+
+FORMULA_AIR_PER_SCALE = 0.25
+"""
+The lines of space a display formula gains above and below for each step of
+scale over 1: at 2, three quarters of a line. A formula set larger is set apart
+more, so the prose either side of it does not read as sitting on it.
+"""
+
+
+def formula_style(style: Any, scale: float) -> Any:
+    """
+    The style a display formula at ``scale`` is set in: ``style``, the paragraph
+    style its ``$$`` was read in, with ``FORMULA_AIR`` plus ``FORMULA_AIR_PER_SCALE``
+    a step of scale over 1 of its lines above it and below it.
+
+    The library stacks two blocks the lower's ``space_above`` plus the upper's
+    ``space_below`` apart, so the gap over a formula is the paragraph's own
+    ``space_below`` and this air. Under it the paragraph's ``space_below`` is kept
+    and the air added, so a formula between two paragraphs has the same gap on
+    either side. It is a field of the block's style, so the library knows the
+    block's height from the style before the block is drawn.
+    """
+    air = round(style.leading * (FORMULA_AIR + FORMULA_AIR_PER_SCALE * (scale - 1.0)))
+    return replace(style, space_above=air, space_below=style.space_below + air)
+
+
+_SCALE_STEPS = 8
+"""
+A scale is a whole number of eighths, rounded down: a window dragged wider sets
+a formula again at most eight times between 1 and 2, and a scale rounded down
+still fits what it was fitted to.
+"""
+
+
+def formula_scale(size: tuple[float, float, float], measure: float | None) -> float:
+    """
+    The scale a display formula is set at: ``FORMULA_SCALE``, stepped down until
+    it is no wider than ``measure`` and no taller than ``FORMULA_LINES`` of its
+    theme's lines, and never below 1, today's size. ``size`` is its width and
+    height at 1 and the line height (``gate.formula_size``), all in pixels. One
+    not measured is set at 1, and so is one already wider than the measure at 1:
+    it runs past it and the window scrolls to it (``_reach``), as far as before.
+    """
+    wide, tall, line = size
+    if not (wide > 0.0 and tall > 0.0):
+        return 1.0
+    scale = FORMULA_SCALE
+    if line > 0.0:
+        scale = min(scale, FORMULA_LINES * line / tall)
+    if measure is not None:
+        scale = min(scale, measure / wide)
+    return max(1.0, math.floor(scale * _SCALE_STEPS) / _SCALE_STEPS)
+
+
+def _fits(blocks: Sequence[Any]) -> tuple[tuple[float, float, float], ...]:
+    """
+    What ``formula_scale`` sizes each formula of ``blocks`` by, in order.
+    """
+    return tuple(block.size for block in blocks if _is_formula(block))
+
+
+def _scales(fits: Sequence[tuple[float, float, float]], measure: float | None) -> tuple[float, ...]:
+    return tuple(formula_scale(size, measure) for size in fits)
+
+
+_SIZED_KEPT = 256
+_SIZED: dict[tuple[str, str, int, float], Any] = {}
+"""
+A formula at another scale than 1, by its body, its fence, its theme and the
+scale: the same block each time it is asked for, so a view handed it again finds
+nothing changed. Held for the theme's identity, as ``gate``'s answers are.
+"""
+
+
+def _sized(block: Any, measure: float | None) -> Any:
+    """
+    A formula block (``_formula_type``, read at 1) at the scale ``formula_scale``
+    gives it at ``measure``, asked of the library at that scale
+    (``gate.formula``). One the library would not set at that scale is set at
+    1, the size it was asked at when it was read. Any other block as it is.
+    """
+    if not _is_formula(block):
+        return block
+    scale = formula_scale(block.size, measure)
+    if scale == block.scale:
+        return block
+    key = (block.body, block.fence, id(block.theme), scale)
+    held = _SIZED.get(key)
+    if held is not None and held.theme is block.theme:
+        return held
+    made, _ = gate.formula(block.body, block.theme, scale)
+    if made is None:
+        return block
+    sized = _formula_type().of(
+        made, block.body, block.fence, block.theme, scale=scale, size=block.size
+    )
+    _SIZED[key] = sized
+    while len(_SIZED) > _SIZED_KEPT:
+        del _SIZED[next(iter(_SIZED))]
+    return sized
+
+
+def _formula_copy(view: Any) -> str:
+    """
+    What Ctrl+C copies of a markdown view's selection: the library's copy, with
+    each formula the selection touches given whole as its fence as written
+    (``_formula_type``), as a figure's copy is its fence, wherever in it the
+    selection starts or ends. The library alone would give the selected part of
+    the formula's source, with its lines joined and no fence.
+
+    The pieces around a formula are the library's own copy of those ranges,
+    joined by the view's separator, so a selection with no formula in it copies
+    exactly as the library copies it.
+
+    The library calls this from inside its draw (Ctrl+C) and ``ViewCache.selected``
+    from inside ``_ASKING``. Each read of the view and its document is a call
+    into the library (``_COPYING``): what one raises stops the library, as a
+    call into it does anywhere, and passes here as ``TypesetUnavailable``. What
+    pptmstr's own code around those reads raises is caught here: logged as
+    pptmstr's defect (``gate.own_defect``), and the copy is the library's own.
+    """
+    from imscribe import TypesetUnavailable
+
+    try:
+        return _copy_with_fences(view)
+    except TypesetUnavailable:
+        raise
+    except Exception as failure:
+        gate.own_defect("copying a selection", failure)
+    with _COPYING:
+        return str(view.selected_text())
+
+
+_COPYING = gate.into_library("copying a selection")
+
+
+def _copy_with_fences(view: Any) -> str:
+    with _COPYING:
+        selection = view.selection
+        if selection is None:
+            return ""
+        blocks = view.blocks
+        texts = view.texts
+        separator = str(view.separator)
+        document = view.native_document
+    if document is None:
+        # A view with no document (not drawn yet, or closed) can still hold a
+        # selection. The library's own copy makes the document again; there is
+        # none here to take ranges of, which is pptmstr's state and not the
+        # library failing, so the copy is that one, without fences.
+        with _COPYING:
+            return str(view.selected_text())
+    (first, start), (last, end) = selection
+    held = [
+        at
+        for at in range(first, min(last, len(blocks) - 1) + 1)
+        if _is_formula(blocks[at])
+        and (first, start) < (at, len(texts[at]))
+        and (at, 0) < (last, end)
+    ]
+    if not held:
+        with _COPYING:
+            return str(view.selected_text())
+    pieces: list[str] = []
+    cursor = (first, start)
+    for at in held:
+        if cursor < (at, 0):
+            pieces.append(_range_text(document, cursor, (at, 0), separator))
+        pieces.append(blocks[at].fence)
+        cursor = (at, len(texts[at]))
+    if cursor < (last, end):
+        pieces.append(_range_text(document, cursor, (last, end), separator))
+    return separator.join(piece for piece in pieces if piece)
+
+
+def _range_text(document: Any, start: tuple[int, int], end: tuple[int, int], separator: str) -> str:
+    """
+    The library's own copy of a range of a view's document.
+    """
+    with _COPYING:
+        return str(document.range_text((start, end), separator))
+
+
+def _formula_block(block: Any, said: str, theme: Any) -> tuple[Any, ...]:
+    """
+    A settled ```` ```math ```` fence as the display formula it holds
+    (``_Formula``), or as captioned code under a line in the warn ink saying why
+    it is not one (``gate.formula``). It is set at the left margin of its
+    document, whatever list or quote the fence stood in: the formula is read
+    alone, and a code block carries no quote depth to give it.
+    """
+    from imscribe import TypesetUnavailable
+
+    from ...figures import host as figures_host
+
+    made, why = gate.formula(block.text, theme)
+    if made is not None:
+        try:
+            fence = figures_host.fence_text(said, block.text)
+            size = gate.formula_size(made, block.text, theme)
+            return (_formula_type().of(made, block.text, fence, theme, size=size),)
+        except TypesetUnavailable:
+            raise
+        except Exception as failure:
+            gate.own_defect("setting a math fence as a formula", failure)
+            why = gate.OWN_ERROR
+    line = f"math not set: {why}"
+    return (
+        replace(block, text=line, language=_Warned(len(line))),
+        replace(block, text=f"{said}\n{block.text}"),
+    )
 
 
 def _captioned(
-    blocks: Sequence[Any], hosting: bool = False, *, plain: bool = False
+    blocks: Sequence[Any],
+    hosting: bool = False,
+    *,
+    plain: bool = False,
+    figures: bool = False,
+    theme: Any = None,
 ) -> tuple[Any, ...]:
     """
     The blocks with each fence's info string set as the first line of its code.
@@ -1147,7 +1777,19 @@ def _captioned(
     would cut them at its edge, led by the fence's warnings
     (``diffs.fence_warnings``), which that block's info string marks for the
     warn ink (``_Warned``).
+
+    With ``figures``, a fence whose info string asks for a figure
+    (``figures.host.is_figure_fence``) and that ``figures.host.mark`` accepts keeps
+    the text it was written with and is marked for the figure host
+    (``figures.host.FigureMark``). One it refuses is captioned code as any other,
+    under a block of its own saying why in the warn ink.
+
+    With ``figures``, a ```` ```math ```` fence (``is_math_fence``) is the display
+    formula it holds, read alone in ``theme`` (the document theme when none is
+    given), or captioned code under a line in the warn ink saying why the
+    library would not set it (``_formula_block``).
     """
+    from ...figures import host as figures_host
     from . import diffs
 
     out: list[Any] = []
@@ -1155,6 +1797,16 @@ def _captioned(
         said = getattr(block, "language", "")
         if not said:
             out.append(block)
+        elif figures and is_math_fence(said):
+            out += _formula_block(block, said, themes.document_theme() if theme is None else theme)
+        elif figures and figures_host.is_figure_fence(said):
+            marked = figures_host.mark(said, block.text)
+            if isinstance(marked, figures_host.FigureMark):
+                out.append(replace(block, language=marked))
+                continue
+            why = figures_host.refusal_line(marked.reason, said)
+            out.append(replace(block, text=why, language=_Warned(len(why))))
+            out.append(replace(block, text=f"{said}\n{block.text}"))
         elif hosting and (model := diffs.fence_diff(said, block.text)) is not None:
             warnings = diffs.fence_warnings(block.text, model)
             headers = (*warnings, *diffs.fence_header_rows(block.text))
@@ -1300,6 +1952,44 @@ def _fences() -> _Fences:
     if not _FENCES:
         _FENCES.append(_Fences())
     return _FENCES[0]
+
+
+class _Hosts:
+    """
+    What a markdown view's ``host_for`` is, in a settled document and a stream
+    alike: a block ``_captioned`` marked as a figure goes to the figure host
+    (``figures.host.figure_for``), and where ``diffs`` a block it marked for a
+    diff view goes to ``_Fences``. Nothing else is hosted.
+
+    ``diffs`` is the diff rule as it was: a settled document's views where the
+    diff view is adopted, a stream's only once it is closed (``Stream._ink``).
+    A figure needs no such rule here, because no block is marked as one until it
+    has settled (``_Captioned``).
+    """
+
+    __slots__ = ("diffs",)
+
+    def __init__(self, diffs: bool) -> None:
+        self.diffs = diffs
+
+    def __call__(self, view: Any, number: int, block: Any) -> Any:
+        from ...figures import host as figures_host
+
+        if isinstance(getattr(block, "language", None), figures_host.FigureMark):
+            return figures_host.figure_for(view, number, block)
+        if self.diffs:
+            return _fences()(view, number, block)
+        return None
+
+
+_HOSTS = (_Hosts(False), _Hosts(True))
+
+
+def _hosts(diffs: bool) -> _Hosts:
+    """
+    The dispatcher a markdown view is given, with or without the diff view.
+    """
+    return _HOSTS[diffs]
 
 
 def _ink(entry: _Entry, frame: int) -> None:
@@ -1531,11 +2221,15 @@ def _show_view(
     """
     Draw one of the library's views at the cursor and tell the window how far
     right its text runs. Returns the view's foot, in pixels down the screen.
+
+    A markdown view follows a link through ``_handler_for(on_link)``; a literal one
+    is handed none, whatever its document's caller passed.
     """
     with _DRAWING:
-        segment.view.on_link = on_link
+        segment.view.on_link = None if segment.literal else _handler_for(on_link)
         segment.whole = bool(segment.view.draw(palette=palette, width_px=wide))
     foot = float(im.get_item_rect_max().y)
+    _say_a_refusal(im, segment.view)
     reach = _reach(segment, wide)
     if reach > wide + 0.5:
         # Glyphs on a draw list are not items: text past the measure adds
@@ -1545,6 +2239,28 @@ def _show_view(
         im.dummy(im.ImVec2(reach, 0.0))
         im.set_cursor_pos(at)
     return foot
+
+
+def _say_a_refusal(im: Any, view: Any) -> None:
+    """
+    A tooltip with why the link under the mouse would not be followed, where the
+    view's handler is the app's and its policy refuses it.
+
+    The library draws a link in the link ink, with the hand cursor, in any view
+    that has a handler; a click on one the policy refuses would otherwise do
+    nothing anyone sees. ``hovered_link`` is the library's hit test of the last
+    draw, which it answers with or without a handler.
+    """
+    followed = view.on_link
+    if not isinstance(followed, _Followed) or followed.refusal is None:
+        return
+    with _ASKING:
+        hovered = view.hovered_link
+    if hovered is None:
+        return
+    reason = followed.refusal(hovered)
+    if reason is not None:
+        im.set_tooltip(f"not opened: {reason}")
 
 
 _WIDEST_EM = 1.5
@@ -1589,19 +2305,23 @@ def _reach(segment: _Segment, wide: float) -> float:
     with _ASKING:
         hosted = set(view.hosts)
         texts = tuple(view.texts)
+        blocks = tuple(view.blocks)
         roles_of = [view.block_role(block) for block in range(len(texts))]
     for block, text in enumerate(texts):
         if block in hosted:
             # A diff view scrolls its own rows and is as wide as the measure.
             continue
         role = roles_of[block]
+        # A display formula is never broken, and its source's words say
+        # nothing of how wide it is set.
+        formula = block < len(blocks) and _is_formula(blocks[block])
         if role == "TABLE":
             with _ASKING:
                 geometry = view.table_geometry(block)
                 right = None if geometry is None else float(geometry.max[0])
             if right is not None:
                 reach = max(reach, right)
-        elif role == "CODE" or any(len(word) > longest for word in text.split()):
+        elif role == "CODE" or formula or any(len(word) > longest for word in text.split()):
             with _ASKING:
                 rights = [float(line.right) for line in view.set_lines(block, block + 1)]
             reach = max(reach, *rights) if rights else reach
@@ -1634,6 +2354,13 @@ def _estimate(im: Any, entry: _Entry, wide: float) -> float:
     return tall
 
 
+def _inner(im: Any, wide: float) -> float:
+    """
+    The measure inside a capped child ``wide`` across (``_capped``).
+    """
+    return max(_MIN_WIDTH_PX, wide - float(im.get_style().scrollbar_size))
+
+
 def _capped(
     im: Any,
     key: Hashable,
@@ -1651,7 +2378,7 @@ def _capped(
     showing, so the text is not broken again on the frame one appears.
     """
     style = im.get_style()
-    inner = max(_MIN_WIDTH_PX, wide - style.scrollbar_size)
+    inner = _inner(im, wide)
     if entry.natural is None or entry.natural[1] != inner:
         entry.natural = (_estimate(im, entry, inner), inner)
     tall = max(1.0, min(entry.natural[0], float(cap)))
@@ -1707,6 +2434,7 @@ def _draw(
             return float(entry.height or 0.0)
         noted = gate.noted()
         bare = ink is not None
+        entry.measure = wide if height_cap is None else _inner(im, wide)
         if not same or entry.bare is not bare:
             given = parts if isinstance(parts, tuple) else tuple(parts)
             if given != entry.parts or entry.bare is not bare:
@@ -1715,6 +2443,10 @@ def _draw(
                 entry.bare = bare
                 _open(entry, given, on_link)
             entry.token = given
+        if entry.fits and _scales(entry.fits, entry.measure) != entry.scales:
+            # A formula's scale changed with the measure: its views are handed
+            # their blocks again, read as they were, and lay out only what changed.
+            _open(entry, entry.parts, on_link)
         if entry.inked is not ui_theme.current() or entry.pending:
             _ink(entry, frame)
         if entry.unset is not None:
@@ -1725,7 +2457,14 @@ def _draw(
             _capped(im, key, entry, wide, height_cap, themes.palette(ink), on_link, host)
         entry.missing = 0
         short = None if entry.unset is not None else _short(entry, noted)
-        if short is not None:
+        if short == _NOT_ALL_SET and _formulas_refused(entry):
+            # A formula the library refused in the view: no line is answered
+            # for in this frame, and from the next that fence is code under its
+            # reason, the rest still the library's.
+            entry.missing = sum(part.text.count("\n") + 1 for part in parts)
+            entry.read = {}
+            _open(entry, entry.parts, on_link)
+        elif short is not None:
             # What is on screen is less than was handed over: no line of it
             # is answered for in this frame, and the next is ImGui's.
             entry.missing = sum(part.text.count("\n") + 1 for part in parts)
@@ -2216,3 +2955,39 @@ def label(
             im.text_unformatted(text)
         else:
             im.text_colored(colour.vec4, text)
+
+
+_LIBRARY_FACES = {
+    "PROSE": ("Roboto", "Roboto-Regular.ttf"),
+    "PROSE_BOLD": ("Roboto", "Roboto-Bold.ttf"),
+    "PROSE_ITALIC": ("Roboto", "Roboto-RegularItalic.ttf"),
+    "PROSE_BOLD_ITALIC": ("Roboto", "Roboto-BoldItalic.ttf"),
+    "CODE": ("Inconsolata-Medium.ttf",),
+}
+"""
+The files the library sets each face in when nothing is registered for it, under
+the imgui-bundle wheel's fonts directory. The library's own answer is behind its
+facade (``imscribe.fontfiles.font_file``), which the seam does not reach past
+for this; ``tests/test_figure_host.py`` holds the two to one answer.
+"""
+
+
+def figure_fonts() -> Fonts:
+    """
+    The faces a figure's text is set in (``figures.render.Fonts``): the prose faces
+    and the code face, as the library sets them now, a registered file before the
+    library's own. Reads only; safe off the GUI thread.
+    """
+    from imscribe import Face, registered_fonts
+
+    from ...figures.render import Fonts
+
+    held = registered_fonts()
+    bundle = roles._bundle_fonts()
+
+    def path(name: str) -> str:
+        registered = held.get(Face[name])
+        return str(registered if registered is not None else bundle.joinpath(*_LIBRARY_FACES[name]))
+
+    files = tuple(dict.fromkeys(path(name) for name in _LIBRARY_FACES))
+    return Fonts(files=files, sans=path("PROSE"), mono=path("CODE"))

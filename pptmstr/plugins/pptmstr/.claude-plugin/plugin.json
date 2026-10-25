@@ -1,0 +1,5 @@
+{
+  "name": "pptmstr",
+  "description": "Skills pptmstr ships with every session it launches. Skills only: no MCP servers, hooks, LSP servers, monitors, commands or agents.",
+  "author": {"name": "pptmstr"}
+}

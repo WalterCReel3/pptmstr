@@ -2306,3 +2306,63 @@ def test_the_queue_row_says_a_write_reaches_pptmstrs_own_records(tmp_path: Path)
     assert summarize("Write", {"file_path": str(tmp_path / "x")}, cwd=str(tmp_path)) == (
         f"Write {tmp_path / 'x'}"
     )
+
+
+# -- the skills pptmstr ships ----------------------------------------------------
+
+# Each is a Skill call no rung admits: another skill, a crafted name that starts with
+# the shipped plugin's prefix and is not one of its skills, and inputs whose name is
+# missing or is not a string.
+_FOREIGN_SKILL_INPUTS: list[dict[str, Any]] = [
+    {"skill": "dataviz"},
+    {"skill": "pptmstr-figures"},
+    {"skill": "anthropic-skills:pdf"},
+    {"skill": "rival:pptmstr-figures"},
+    {"skill": "pptmstr:../x"},
+    {"skill": "pptmstr: x"},
+    {"skill": "pptmstr:pptmstr-figures "},
+    {"skill": " pptmstr:pptmstr-figures"},
+    {"skill": "/pptmstr:pptmstr-figures"},
+    {"skill": "PPTMSTR:pptmstr-figures"},
+    {"skill": "pptmstr:"},
+    {"skill": "pptmstr:other"},
+    {"skill": "pptmstr:pptmstr-figures/../../x"},
+    {"skill": ["pptmstr:pptmstr-figures"]},
+    {"skill": None},
+    {"name": "pptmstr:pptmstr-figures"},
+    {},
+]
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_a_shipped_skill_is_admitted_on_every_rung(policy: Policy) -> None:
+    """
+    The operator's decision of 2026-10-21: a skill pptmstr ships is its own text
+    from its own package, so loading it waits for nobody on any rung. The name is
+    where the CLI puts it, ``tool_input["skill"]``, as the probe's live runs recorded.
+    """
+    from pptmstr.plugins import SKILLS
+
+    assert SKILLS
+    for name in SKILLS:
+        call = {"skill": name, "args": "a dependency graph of three packages"}
+        assert classify("Skill", call, policy) is Disposition.AUTO_APPROVE, name
+        assert classify("Skill", {"skill": name}, policy) is Disposition.AUTO_APPROVE, name
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("tool_input", _FOREIGN_SKILL_INPUTS, ids=repr)
+def test_every_other_skill_call_still_parks(policy: Policy, tool_input: dict[str, Any]) -> None:
+    """
+    Compared whole against the shipped names, so the prefix alone widens nothing.
+    """
+    assert classify("Skill", tool_input, policy) is Disposition.REQUIRE_APPROVAL
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_a_shipped_skills_name_admits_no_other_tool(policy: Policy) -> None:
+    from pptmstr.plugins import SKILLS
+
+    for name in SKILLS:
+        for tool in ("SomeFutureTool", "mcp__server__skill", "Skills"):
+            assert classify(tool, {"skill": name}, policy) is Disposition.REQUIRE_APPROVAL

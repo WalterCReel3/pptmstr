@@ -494,16 +494,23 @@ def test_fonts_the_library_reports_unloaded_are_said_with_what_it_noted(
 # -- the wiring ------------------------------------------------------------------
 
 
-def test_the_application_unloads_the_library_before_its_context_goes() -> None:
+def test_the_application_unloads_the_library_before_its_context_goes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """
-    ``unload`` is worth what its caller is. Read off the source, as the idling
-    wiring is: the runner's ``before_exit`` is the seam's ``unload``.
+    ``unload`` is worth what its caller is. The runner's ``before_exit`` is read
+    off the source, as the idling wiring is, and what it calls is run: the library,
+    while the ImGui context is current.
     """
     import inspect
 
     from pptmstr import app
 
-    assert "runner.callbacks.before_exit = typeset.unload" in inspect.getsource(app.main)
+    assert "runner.callbacks.before_exit = _before_exit" in inspect.getsource(app.main)
+    called: list[str] = []
+    monkeypatch.setattr(app.typeset, "unload", lambda: called.append("library"))
+    app._before_exit()
+    assert called == ["library"]
 
 
 # -- with the library ------------------------------------------------------------
