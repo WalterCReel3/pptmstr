@@ -9,7 +9,33 @@
   passed and 23 `[imgui-error]` lines, and `typecheck-all` at 1936. Round three is wakes, the
   backstop, decision wakes, and the unanswered-question and held-mail rows. None of it has been
   seen on a display or run between two live sessions.
-- Round four hasn't started.
+- Round four's first part comes from [the first three-lead run](2026-10-24-first-three-lead-run.md).
+  It's on the board as P1–P5 (2026-10-24):
+  - peer identity on every link surface;
+  - owed answers named at resume;
+  - sender-only withdrawal;
+  - whose move, with an action on every peer row in NEEDS YOU;
+  - the link's thread in DETAIL.
+
+  The thread lives in DETAIL, reached from the card's channel line (lead's ruling; the operator
+  didn't choose). It's cheaper than a pane of its own, and it's where the operator already looks.
+  The rest of round four is proposed, not boarded.
+- **A withdrawal after delivery is a new record kind, `peer-retracted`** (lead, 2026-10-24, P3).
+  - **Why a new kind.** Replay applies `concern-withdrawn` only to a waiting concern. Measured on
+    a scratch copy, a withdrawal after delivery replays as contested, and the question comes back
+    owed.
+  - **What the kind says.** It carries `at` and `concern_id`, and applies only to a delivered,
+    uncontested concern. An older build reads it as Unrecognised (the board is short, which is
+    not a misread).
+  - **Rejected:**
+    - a field on `concern-withdrawn`, because an older build would ignore it and misread the
+      record as contested;
+    - relaxing the restore arm, for the same misread, and because it weakens the two-writer
+      check;
+    - logging nothing, because the question would come back owed after every restart.
+  - **Not logged:** the reason.
+  - **The recipient is told once per run** (the told flag is run-scoped) because a resumed
+    recipient still holds the question in its own conversation.
 
 **Merged origin/main (graph tooling, 940da8e) on 2026-10-19.**
 - 14 conflicted files, resolved keeping both sides.
@@ -17,9 +43,10 @@
 - `typecheck-all` is 1952, the new baseline. It was 1918 on this branch and 2045 on main.
 - `model.withdrawal_notice`, main's, is a fourth team-concern constructor, now passing
   `channel=None`.
-- Untested: a dry-run `declare_task` carrying provenance, or edited by the operator. Its reply
-  omits the charter-unkept sentence, as main's dry run omits "basis not kept", and the combined
-  "DRY RUN" + provenance queue row is unpinned. That's for round three.
+- A dry-run `declare_task` carrying provenance is tested: its reply and the combined "DRY RUN" +
+  provenance queue row are pinned in test_bus. That row test calls `approval.summarize` directly,
+  not through a parked gate (R4-leftovers, 2026-10-24). The reply omits the charter-unkept
+  sentence, as main's dry run omits "basis not kept".
 
 `make shot-xvfb` can't keep an image outside the tree: its namespace tmpfs hides `$TMPDIR`. So
 a gate's shot step proves only that a frame rendered under Xvfb. **Builds:**
@@ -364,6 +391,20 @@ in sequence. The order puts the format decisions first.
   unanswered question doesn't stay on the fleet until its link closes.
 - **Measured cost:** deriving both rows takes about 0.36 ms of a 0.49 ms `_apply` at 2000 concerns
   (scratch script, W3b). Cache the peer subset if this ever shows in profiles.
+  - **It showed (2026-10-25, P4-fix, run).** The rail's `whose_move` for every card's links costs
+    5.7–7.3 ms a frame at 2000 messages and 10 links. Most of it is a full scan of the concern
+    table per member per call.
+  - **The fix is a pure per-snapshot index,** computed once per frame and passed in, not a memo on
+    Snapshot. "Derive, don't store" holds, and a property test keeps it equal to the scanning
+    version (P4-perf). It brought the frame from 7.4–9.6 ms to about 0.7 ms. Building the index
+    is linear in the table, so the frame passes 1 ms again at about 3000 messages.
+  - **The reducer pays the same kind of scans, and that predates this round.**
+    - The cost: at 2000 peer messages and 10 links, one `_apply` step costs 2.7–5.2 ms at HEAD
+      and the same after this round, on every intent, peer-related or not.
+    - Where it goes: mostly `_still_owed`, `_owing_peer_mail` and `peer_held`.
+    - W3b's 0.49 ms was measured on a mostly-team table (P-reducer-perf, run).
+    - **Not fixed,** because it's not a regression. The candidate fix is the same per-step index
+      for the reducer. Revisit if real boards approach that size.
 
 **Found in round three, for later:**
 - The store's `ConcernEdited`/`ConcernWithdrawn` arms apply an agent's edit or withdrawal of a
@@ -374,12 +415,14 @@ in sequence. The order puts the format decisions first.
 - A recalled card that owes something draws its badges on the one-line "ended" height,
   right-aligned, with the file's account to their left. With two badges at the rail's width the
   title may ellipsize to almost nothing. Only the stub-imgui strings and height are tested (W3d).
-- The held-mail row's new inbox text has no test of its own (W3d).
-- **The sweep's unlisted case is still shaped as a `LinkClosed` reported against the new link.**
-  It's tagged `Outcome.swept`, and `app._read_channel_reports` tells it apart. A reader of
-  `Outcome` that ignored `swept` would misreport it, so it should become a report type of its own
-  in `drain()`'s union. B7-notices kept it small because that change touches every consumer of
-  `drain` and `close`.
+- ~~The held-mail row's new inbox text has no test of its own (W3d).~~ Pinned in R4-leftovers.
+- ~~**The sweep's unlisted case is still shaped as a `LinkClosed` reported against the new
+  link.**~~ Done in R4-sweep-report (2026-10-24).
+  - `drain()` now yields a `Swept(made, closes | Unlisted)` report of its own: one per relink that
+    tried a close or couldn't list. A sweep that owed nothing yields no report.
+  - A landed sweep close is logged at info level, and the operator is told only of failures and
+    unlisted names.
+  - The log format is unchanged.
 - Nothing from B7 has been seen by eye:
   - whether `↔` renders in the body face (Inconsolata Medium wasn't checked);
   - the form's wrapping;
@@ -403,8 +446,9 @@ in sequence. The order puts the format decisions first.
   reformats the JSON is sent, but the board treats it as unedited. The provenance warning
   follows the dict rule, so the two lines can imply different things. This predates round one
   (B3-fix2).
-- A `bus.declare_task` test with an undrawable channel. The refusal is tested in
-  `stated_provenance`, but not end to end, because `test_bus.py` was outside B3-fix2's touches.
+- ~~A `bus.declare_task` test with an undrawable channel.~~ Already in test_bus; R4-leftovers
+  confirmed it fails when its code is mutated. In the same task, "edited" moved to one rule,
+  `inbox.draft_is_edit`, held to the driver's dict comparison by an end-to-end gate test.
 - The field-column cap (about 112 px plus spacing) still pushes values off a pane narrower than
   that. RV3b's R6, measuring the narrowest layout, needs a display.
 - The parked row has a second cut, by pixels, after the 90-character clip: `ellipsis(…, width -

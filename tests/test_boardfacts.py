@@ -64,6 +64,7 @@ from pptmstr.intents import (
     Intent,
     PeerInboxRead,
     PeerQuestionAged,
+    PeerQuestionDismissed,
     PeerSent,
     PeerWakeSent,
     SessionDetached,
@@ -98,6 +99,7 @@ from pptmstr.model import (
     Decision,
     Dismissed,
     NodeId,
+    PeerQuestionUnanswered,
     PendingApproval,
     Recalled,
     Snapshot,
@@ -520,6 +522,18 @@ def _concern_id(r: random.Random, snap: Snapshot) -> str:
     return r.choice(known) if known and r.random() < _AIMED else "c-missing"
 
 
+def _concern_withdrawn(r: random.Random, snap: Snapshot) -> ConcernWithdrawn:
+    """
+    The operator's withdrawal, or its sender's of a peer message already handed
+    over: the one withdrawal that reaches it. Chosen by the concern's state and
+    with no draw of its own, so every seed draws what it was measured with.
+    """
+    cid = _concern_id(r, snap)
+    held = snap.concerns.get(cid)
+    handed = held is not None and held.is_peer and held.state is ConcernState.DELIVERED
+    return ConcernWithdrawn(cid, node_id=held.sender if handed and held else None)
+
+
 _MAKERS: dict[type, Maker] = {
     AgentSpawned: lambda r, s, now: _spawned(r, now),
     FailureAcknowledged: lambda r, s, now: FailureAcknowledged(_who(r)),
@@ -551,7 +565,7 @@ _MAKERS: dict[type, Maker] = {
         _who(r), "rq", now, r.choice((EVERY_CHANNEL, "brand", "ops"))
     ),
     ConcernEdited: lambda r, s, now: _edited(r, s),
-    ConcernWithdrawn: lambda r, s, now: ConcernWithdrawn(_concern_id(r, s)),
+    ConcernWithdrawn: lambda r, s, now: _concern_withdrawn(r, s),
     TaskAmended: _amended,
     TaskVersionHanded: lambda r, s, now: _handed(r, s),
     TaskDeclared: lambda r, s, now: TaskDeclared(
@@ -639,6 +653,19 @@ _MAKERS: dict[type, Maker] = {
     HeldMailDismissed: lambda r, s, now: HeldMailDismissed(
         frozenset(c.id for c in s.peer_held() if r.random() < 0.5)
     ),
+    PeerQuestionDismissed: lambda r, s, now: PeerQuestionDismissed(
+        *(
+            r.choice(rows)
+            if (
+                rows := [
+                    (o.question, o.running)
+                    for o in s.needs_you
+                    if isinstance(o, PeerQuestionUnanswered)
+                ]
+            )
+            else (r.choice(sorted(s.concerns) or ["c-0"]), False)
+        )
+    ),
 }
 
 # The intents a board fact can come from. Drawn more often than the rest, and the
@@ -706,7 +733,12 @@ _LIFECYCLE_EVERY = 7
 # ``_SURFACING_EVERY`` steps, from a generator of their own as ``_PEERS`` are.
 # None moves a task or a concern, so the rest of a run is drawn as it would be
 # without them.
-_SURFACING: tuple[type, ...] = (PeerQuestionAged, HeldMailDismissed, DecisionWakeSent)
+_SURFACING: tuple[type, ...] = (
+    PeerQuestionAged,
+    HeldMailDismissed,
+    PeerQuestionDismissed,
+    DecisionWakeSent,
+)
 _SURFACING_EVERY = 11
 # Prunes a record, after which the node is one the board has no name for. Rare,
 # or every run ends with nobody on it.
@@ -1790,10 +1822,14 @@ def moved(task: Task) -> Task:
 
 
 def moved_concern(concern: Concern) -> Concern:
+    # The withdrawal's reason and whether it was told are run-only: a restore
+    # holds neither, and its None reason is how a reader says it was not kept.
     return dataclasses.replace(
         concern,
         posted_at=concern.posted_at + _SHIFT,
         delivered_at=_later(concern.delivered_at),
+        withdrawn_reason=None,
+        withdrawal_told=False,
     )
 
 

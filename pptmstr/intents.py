@@ -424,11 +424,33 @@ class ConcernEdited:
 
 @dataclass(frozen=True, slots=True)
 class ConcernWithdrawn:
-    """The operator stopped a concern from being delivered."""
+    """
+    A concern was withdrawn: by the operator, or by the agent that sent it.
+
+    ``node_id`` None is the operator's, which stops a concern still waiting
+    and does nothing to one already delivered. With a node it is that agent's,
+    and only the concern's sender may (``store._message_withdrawal_refusal``): a
+    concern inside a team while it waits, and a peer message while it waits
+    and after its lead read it, until it is answered -- the case
+    ``withdraw_peer_message`` exists for. ``reason`` is the withdrawer's
+    words, kept on the concern and quoted to a lead that had read it.
+
+    ``request_id`` is set by a caller that waits for the store's answer
+    (``effects.PeerWithdrawSettled``), and None by one that does not.
+
+    ``peer_only`` is set by ``withdraw_peer_message``, which withdraws a
+    message between teams and nothing else: the store then refuses a concern
+    inside a team (``model.PeerWithdrawRefusal.TEAM_MAIL``) after the sender
+    check, and the agent form without it may still withdraw its own team
+    concern while it waits. Run-only, like the reason: no log record carries
+    it (``boardfacts`` reads only the concern's state).
+    """
 
     concern_id: ConcernId
     reason: str | None = None
     node_id: NodeId | None = None
+    request_id: str | None = None
+    peer_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1427,6 +1449,24 @@ class HeldMailDismissed:
     node_id: NodeId | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PeerQuestionDismissed:
+    """
+    The operator dismissed a ``model.PeerQuestionUnanswered`` row: the
+    question ``concern_id`` raises no row for the same reason again in this
+    run. ``running`` is the row's own (``PeerQuestionUnanswered.running``), so
+    a row raised for the lead's session not running is dismissed apart from
+    one raised for the age passing: dismissing the first does not hide the
+    second after a resume. Nothing is logged and the question is untouched:
+    it is still owed, and its lead still reads and answers it.
+    """
+
+    concern_id: ConcernId
+    running: bool
+    # No node: an operator's act.
+    node_id: NodeId | None = None
+
+
 Intent = (
     AgentSpawned
     | FailureAcknowledged
@@ -1484,4 +1524,5 @@ Intent = (
     | DecisionWakeSent
     | PeerQuestionAged
     | HeldMailDismissed
+    | PeerQuestionDismissed
 )

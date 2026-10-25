@@ -392,6 +392,23 @@ _TODAY: tuple[tuple[str, Mapping[str, Any], Disposition], ...] = (
     ("mcp__pptmstr__read_inbox", {}, Disposition.AUTO_APPROVE),
     # Another team's lead's messages, reviewed at their send on the sender's rung.
     ("mcp__pptmstr__read_peer_messages", {}, Disposition.AUTO_APPROVE),
+    # A withdrawal with no reason hands the other lead no words; one with a
+    # reason is a send (Decided 1), parked where ``send_to_peer`` is.
+    (
+        "mcp__pptmstr__withdraw_peer_message",
+        {"message_id": "c-0123456789ab"},
+        Disposition.AUTO_APPROVE,
+    ),
+    (
+        "mcp__pptmstr__withdraw_peer_message",
+        {"message_id": "c-0123456789ab", "reason": "   "},
+        Disposition.AUTO_APPROVE,
+    ),
+    (
+        "mcp__pptmstr__withdraw_peer_message",
+        {"message_id": "c-0123456789ab", "reason": "asked the wrong lead"},
+        Disposition.REQUIRE_APPROVAL,
+    ),
     ("mcp__pptmstr__read_board", {}, Disposition.AUTO_APPROVE),
     # One row of that board with nothing cut: the same reviewed text, the same scope.
     ("mcp__pptmstr__read_task", {"task_id": "t-1"}, Disposition.AUTO_APPROVE),
@@ -1164,6 +1181,66 @@ def test_a_whole_file_write_produces_a_large_diff(tmp_path: Path) -> None:
     assert len(diff.splitlines()) > 1000
 
 
+_PEER_FORMS = (
+    'session s2,  card "ship\n the  brand", project "web"',
+    'session s2, card "ship the brand"',
+    "session s2",
+)
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "across"),
+    [
+        ("send_to_peer", {"channel": "a (b)", "subject": "S"}, None),
+        ("raise_decision", {"channel": "brand", "question": "Q"}, None),
+        ("withdraw_peer_message", {"message_id": "c-1", "reason": "R"}, "brand"),
+    ],
+    ids=["send", "decision", "withdrawal"],
+)
+@pytest.mark.parametrize("subject", [1, 70, 400], ids=["short", "middling", "long"])
+def test_a_rows_peer_span_is_the_description_it_took_through_the_clip(
+    tool: str, args: dict[str, Any], across: str | None, subject: int
+) -> None:
+    """
+    ``Summary.peer`` is where the description of the lead stands on the row as
+    the row is finally cut, with its spaces run together, for each form the
+    row can take -- the longest that fits, a shorter one, or the shortest with
+    the subject clipped after it -- and not a match of its text found anywhere
+    else on the row, such as a channel named like one.
+    """
+    text = {"send_to_peer": "subject", "raise_decision": "question"}.get(tool, "reason")
+    called = {**args, text: "x" * subject}
+
+    row = approval.summary_of(
+        approval.PEER_MESSAGE_TOOL if tool == "send_to_peer" else f"mcp__pptmstr__{tool}",
+        called,
+        reaches=_PEER_FORMS,
+        across=across,
+    )
+
+    assert row.peer is not None
+    start, end = row.peer
+    taken = row.text[start:end]
+    assert taken in [" ".join(f.split()) for f in _PEER_FORMS]
+    assert row.text[start - 1] == "(" and row.text[end] == ")"
+    assert row.text == summarize(
+        f"mcp__pptmstr__{tool}", called, reaches=_PEER_FORMS, across=across
+    )
+    if subject == 400:
+        assert row.text.endswith("...") and taken == "session s2"
+    if subject == 1:
+        assert taken == " ".join(_PEER_FORMS[0].split())
+
+
+def test_a_row_that_reaches_nobody_has_no_peer_span() -> None:
+    for reaches in ("it reaches no lead now", None, ()):
+        row = approval.summary_of(
+            approval.PEER_MESSAGE_TOOL, {"channel": "brand", "subject": "s"}, reaches=reaches
+        )
+        assert row.peer is None
+    assert approval.summary_of("Bash", {"command": "ls"}).peer is None
+
+
 def test_the_reducers_writing_tool_set_matches_summarizes_own_branch() -> None:
     """
     ``model.WRITING_TOOLS`` is a deliberate copy of the tuple ``summarize`` branches
@@ -1176,7 +1253,10 @@ def test_the_reducers_writing_tool_set_matches_summarizes_own_branch() -> None:
     agent look compliant.
     """
     tree = ast.parse(Path(approval.__file__).read_text(), filename=approval.__file__)
-    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "summarize")
+    # ``summarize`` is ``summary_of``'s text, and the branches are summary_of's.
+    fn = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "summary_of"
+    )
     branches = [
         {e.value for e in cmp.comparators[0].elts if isinstance(e, ast.Constant)}
         for cmp in ast.walk(fn)
@@ -1560,10 +1640,9 @@ def test_what_an_edit_is_said_to_keep_is_what_the_bus_keeps() -> None:
 
 def test_a_draft_the_gate_would_not_call_an_edit_says_nothing() -> None:
     """
-    The gate stamps an edit when the draft differs from the call as a mapping,
-    so a draft that only reorders or reformats keeps the mark, and so does the
-    line. Nothing is said where the board keeps what is drawn, nor for another
-    tool.
+    The gate stamps an edit by ``approval.is_edit``, so a draft that only
+    reorders or reformats keeps the mark, and so does the line. Nothing is said
+    where the board keeps what is drawn, nor for another tool.
     """
     reordered = dict(reversed(list(_STATED.items())))
 
@@ -1577,6 +1656,62 @@ def test_a_draft_the_gate_would_not_call_an_edit_says_nothing() -> None:
         is None
     )
     assert edited_provenance(_POST, {"to": "lead"}, {"to": "x", **_STATED}) is None
+
+
+@pytest.mark.parametrize(
+    ("parked", "sent", "edited"),
+    [
+        ({"n": 1}, {"n": True}, True),
+        ({"n": 1}, {"n": 1.0}, True),
+        ({"n": True}, {"n": 1}, True),
+        ({"n": 0}, {"n": False}, True),
+        ({"n": None}, {}, True),
+        ({"a": "x y"}, {"a": "x  y"}, True),
+        ({"a": [1, 2]}, {"a": [2, 1]}, True),
+        ({"a": 1, "b": {"c": 1, "d": 2}}, {"b": {"d": 2, "c": 1}, "a": 1}, False),
+        ({"a": [1, {"b": 1.5}]}, {"a": [1, {"b": 1.5}]}, False),
+        ({"a": [1, 2]}, {"a": (1, 2)}, False),
+        ({}, {}, False),
+    ],
+    ids=[
+        "1-to-true",
+        "1-to-1.0",
+        "true-to-1",
+        "0-to-false",
+        "null-dropped",
+        "whitespace-inside-a-value",
+        "list-reordered",
+        "keys-reordered-at-every-depth",
+        "same",
+        "tuple-sent-as-the-list-it-is-in-json",
+        "empty",
+    ],
+)
+def test_an_edit_is_any_change_in_what_is_sent_as_json(
+    parked: dict[str, Any], sent: dict[str, Any], edited: bool
+) -> None:
+    """
+    ``is_edit`` compares what the CLI is handed, JSON: the order of keys is not
+    an edit, and a change of type is, where Python's equality calls ``1``,
+    ``1.0`` and ``True`` one value.
+    """
+    assert approval.is_edit(sent, parked) is edited
+    assert approval.is_edit(parked, sent) is edited
+
+
+def test_a_change_of_type_alone_is_said_to_change_a_declarations_provenance() -> None:
+    """
+    The gate stamps a draft that only turns ``1`` into ``true`` as edited, and
+    the bus then drops the charter mark; the line says so, as it does for any
+    edit.
+    """
+    parked = {**_STATED, "dry_run": 0}
+    retyped = {**_STATED, "dry_run": False}
+
+    assert parked == retyped
+    said = edited_provenance(_DECLARE, parked, retyped)
+    assert said is not None and said.startswith("approving your edit drops the charter mark")
+    assert said.endswith(_KEPT)
 
 
 def test_only_a_declaration_has_a_provenance_line() -> None:
@@ -2667,3 +2802,169 @@ def test_a_parked_message_to_a_peer_reads_as_a_message_on_its_channel() -> None:
     assert summarize(
         "mcp__pptmstr__send_to_peer", {"channel": "brand", "subject": "s", "incident": False}
     ) == ("message the lead on #brand, carries an incident, which is refused: s")
+
+
+# -- withdraw_peer_message: a reason is a send (Decided 1) --------------------------
+
+_WITHDRAW_PEER = "mcp__pptmstr__withdraw_peer_message"
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize(
+    ("reason", "reviewed"),
+    [
+        (None, False),
+        ("", False),
+        ("  \n", False),
+        ("I asked the wrong lead", True),
+    ],
+    ids=["absent", "empty", "blank", "given"],
+)
+def test_a_withdrawal_with_a_reason_is_gated_as_a_message_to_the_peer_is(
+    policy: Policy, reason: str | None, reviewed: bool
+) -> None:
+    """
+    The reason is text the other lead reads, so a withdrawal that gives one
+    parks exactly where ``send_to_peer`` parks and is released where the send
+    is, on ``AUTONOMOUS``. Without one -- absent, empty or blank, as the handler
+    reads it -- it carries no words and is auto on every rung.
+    """
+    args: dict[str, object] = {"message_id": "c-0123456789ab"}
+    if reason is not None:
+        args["reason"] = reason
+    withdrawn = classify(_WITHDRAW_PEER, args, policy)
+    if reviewed:
+        assert withdrawn is classify("mcp__pptmstr__send_to_peer", {"channel": "brand"}, policy)
+        expected = (
+            Disposition.AUTO_APPROVE
+            if policy is Policy.AUTONOMOUS
+            else Disposition.REQUIRE_APPROVAL
+        )
+        assert withdrawn is expected
+    else:
+        assert withdrawn is Disposition.AUTO_APPROVE
+
+
+def test_a_withdrawal_names_no_channel_so_the_gate_never_makes_one_up() -> None:
+    """
+    It reaches another team's lead over the withdrawn message's link, which
+    only the store can find (``model.Snapshot.parked_link``): ``peer_channel``
+    says none rather than "?".
+    """
+    from pptmstr.approval import peer_channel
+
+    reasoned = {"message_id": "c-0123456789ab", "reason": "wrong lead", "channel": "brand"}
+    assert peer_channel(_WITHDRAW_PEER, reasoned) is None
+    assert peer_channel(_WITHDRAW_PEER, {"message_id": "c-0123456789ab"}) is None
+
+
+def test_a_parked_withdrawal_reads_as_its_message_its_link_and_the_reason_it_sends() -> None:
+    from pptmstr.approval import summarize
+
+    args = {"message_id": "c-0123456789ab", "reason": "I asked the wrong lead"}
+    assert summarize(_WITHDRAW_PEER, args, reaches="session z", across="brand") == (
+        "withdraw c-0123456789ab on #brand (session z), saying: I asked the wrong lead"
+    )
+    # Before the store has finished the row, nothing names a link.
+    assert summarize(_WITHDRAW_PEER, args) == (
+        "withdraw c-0123456789ab, saying: I asked the wrong lead"
+    )
+    assert summarize(_WITHDRAW_PEER, {"message_id": "c-0123456789ab"}, across="brand") == (
+        "withdraw c-0123456789ab on #brand, giving no reason"
+    )
+    assert "?" not in summarize(_WITHDRAW_PEER, args, reaches="session z", across="brand")
+
+
+_LONG_CARD_TITLE = "Rework the onboarding flow so that a new operator can link two leads " * 2
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "subject"),
+    [
+        (
+            "mcp__pptmstr__send_to_peer",
+            {"channel": "brand", "subject": "which palette for the hero image?"},
+            "which palette for the hero image?",
+        ),
+        (
+            "mcp__pptmstr__raise_decision",
+            {"channel": "brand", "question": "ship the pages this week?"},
+            "ship the pages this week?",
+        ),
+        (
+            _WITHDRAW_PEER,
+            {"message_id": "c-0123456789ab", "reason": "asked the wrong lead"},
+            "asked the wrong lead",
+        ),
+    ],
+    ids=["send", "decision", "withdrawal"],
+)
+def test_a_row_to_a_peer_with_a_long_card_title_keeps_its_subject_whole(
+    tool: str, args: dict[str, object], subject: str
+) -> None:
+    """
+    The subject is what is being sent, so the description of whom gives way
+    first: the longest of ``peer_forms`` that leaves the subject whole.
+    """
+    from pptmstr.approval import summarize
+    from pptmstr.effects import PeerIdentity, peer_forms, peer_text
+
+    peer = PeerIdentity(
+        session="0123456789abcdef", title=_LONG_CARD_TITLE, project="brand", held=True
+    )
+    forms = peer_forms(peer)
+    assert forms == (
+        peer_text(peer),
+        f'session 01234567, card "{_LONG_CARD_TITLE[:16]}" (title cut)',
+        "session 01234567",
+    )
+    row = summarize(tool, args, reaches=forms, across="brand")
+    assert row.endswith(subject) and len(row) <= 90
+    assert peer_text(peer) not in row
+
+    # For any subject that fits beside the head, the row takes the longest form
+    # that keeps it whole: each longer one would have cut it.
+    key = next(k for k in ("subject", "question", "reason") if k in args)
+    chosen: set[str] = set()
+    for length in range(1, 26):
+        said = "x" * length
+        row = summarize(tool, {**args, key: said}, reaches=forms, across="brand")
+        assert row.endswith(said) and len(row) <= 90, row
+        (form,) = [f for f in forms if f"({f})" in row]
+        chosen.add(form)
+        for longer in forms[: forms.index(form)]:
+            alone = summarize(tool, {**args, key: said}, reaches=longer, across="brand")
+            assert not alone.endswith(said) or len(alone) > 90
+    # The send's head is short enough that a short subject keeps the cut title
+    # too; the other two rows lead with more, and give it up for any subject.
+    assert chosen == (set(forms[1:]) if tool == "mcp__pptmstr__send_to_peer" else {forms[2]})
+
+    # A short title is kept, and with it the project where the row has room.
+    short = PeerIdentity(session="0123456789abcdef", title="brand", project="w", held=True)
+    whole = summarize(tool, {**args, key: "ok"}, reaches=peer_forms(short), across="brand")
+    assert 'card "brand"' in whole and whole.endswith("ok") and len(whole) <= 90
+    if tool == "mcp__pptmstr__send_to_peer":
+        assert f"({peer_text(short)})" in whole
+
+
+def test_a_row_whose_subject_cannot_fit_beside_any_description_still_keeps_some_of_it() -> None:
+    """
+    Past every shortening, the head alone, and the subject keeps
+    ``_SUBJECT_KEPT`` characters even where that takes the row past its width.
+    """
+    from pptmstr.approval import _SUBJECT_KEPT, summarize
+    from pptmstr.effects import PeerIdentity, peer_forms
+
+    channel = "a" * 30
+    subject = "s" * 200
+    peer = PeerIdentity(
+        session="0123456789abcdef", title=_LONG_CARD_TITLE, project="brand", held=True
+    )
+    row = summarize(
+        "mcp__pptmstr__send_to_peer",
+        {"channel": channel, "subject": subject, "needs_answer": True},
+        reaches=peer_forms(peer),
+    )
+    head = f"message the lead on #{channel} (session 01234567), needs an answer: "
+    assert row.startswith(head)
+    assert row == head + subject[: _SUBJECT_KEPT - 3] + "..."

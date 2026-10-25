@@ -19,7 +19,7 @@ import pytest
 from pptmstr import boardlog
 from pptmstr.boardfacts import outcomes
 from pptmstr.boardlog import Clock
-from pptmstr.effects import DecisionSettled, SessionWoken, WakeReason
+from pptmstr.effects import DecisionSettled, PeerIdentity, SessionWoken, WakeReason
 from pptmstr.intents import (
     AgentSpawned,
     BoardRestored,
@@ -124,6 +124,11 @@ def raised(
     return after, settled.refusal
 
 
+def lead_of(session: str) -> PeerIdentity:
+    """How a lead ``started`` made is described where a link names it."""
+    return PeerIdentity(session=session, title="t", project="w", held=True)
+
+
 def readers(snap: Snapshot, did: str = "d-1") -> set[NodeId]:
     return {node for node, _ in _NODES if did in {d.id for d in snap.decisions_readable_by(node)}}
 
@@ -143,7 +148,7 @@ def test_a_channel_decision_is_filed_with_the_link_its_name_resolved_to() -> Non
 
     # The peer's wake is test_peer_wakes'.
     assert effects == (
-        DecisionSettled(request_id="rq", refusal=None),
+        DecisionSettled(request_id="rq", refusal=None, peer=lead_of(Z)),
         SessionWoken(session_id=Z, reason=WakeReason.PEER_MESSAGE, subject_id="k1"),
     )
     filed = snap.decisions["d-1"]
@@ -209,6 +214,30 @@ def test_the_peer_reads_the_answer_and_its_read_does_not_mark_it_delivered() -> 
     assert [d.answer for d in delivered.decisions] == ["yes"]
     # Only the asker's own read hands it the answer.
     assert snap.decisions["d-1"].first_delivered_at is None
+
+
+def test_a_read_describes_the_lead_that_raised_another_sessions_decision() -> None:
+    """
+    RV-P1 1: the reply names which lead raised it, so the store hands the
+    shell that lead's description; the asker's own read names nobody.
+    """
+    snap, _ = raised(linked())
+
+    _, (theirs,) = run(snap, DecisionsRead(node_id=Z_LEAD, request_id="u", at=5.0))
+    _, (own,) = run(snap, DecisionsRead(node_id=LEAD, request_id="u", at=5.0))
+
+    assert theirs.peers == (lead_of(S),)
+    assert own.peers == ()
+
+
+def test_a_decision_refused_for_its_links_age_names_the_lead_on_it_now() -> None:
+    from pptmstr.bus import _PEER_LEGEND, _decision_refusal_text
+
+    text = _decision_refusal_text(DecisionRefusal.LINKED_AFTER, "d-1", True, now_on=lead_of(C))
+
+    assert (
+        f'it links you now to the lead of session c, card "t", project "w". {_PEER_LEGEND}'
+    ) in text
 
 
 def test_closing_the_link_takes_it_from_the_peer_and_leaves_the_askers_sessions_rule() -> None:
@@ -361,9 +390,12 @@ def test_a_channel_decision_called_before_the_name_was_linked_again_is_refused()
     early, refused = _apply(snap, dataclasses.replace(asked, called_at=5.0), 11.0)
     late, filed = _apply(snap, dataclasses.replace(asked, called_at=10.5), 11.0)
 
-    assert refused == (DecisionSettled(request_id="rq", refusal=DecisionRefusal.LINKED_AFTER),)
+    # The refusal names the lead on the link now, which the asker may not have meant.
+    assert refused == (
+        DecisionSettled(request_id="rq", refusal=DecisionRefusal.LINKED_AFTER, peer=lead_of(C)),
+    )
     assert early.decisions == {}
-    assert filed[0] == DecisionSettled(request_id="rq", refusal=None)
+    assert filed[0] == DecisionSettled(request_id="rq", refusal=None, peer=lead_of(C))
     assert late.decisions["d-1"].link == "k3"
     # The refused raise woke nobody, and the filed one woke C's lead over k3.
     assert filed[1:] == (
@@ -411,7 +443,10 @@ def test_the_peer_lead_lists_its_own_sessions_work_before_the_other_leads() -> N
 
 
 def test_a_withdrawal_by_the_other_lead_is_said_as_a_sentence() -> None:
-    """RV6 6: "The lead on #brand withdrew it.", capitalised as a sentence."""
+    """
+    RV6 6: "The lead on #brand (...) withdrew it.", capitalised as a sentence,
+    and naming which lead that is.
+    """
     store = _linked_store()
     with _live_bus() as bus:
         bus.call(store, "raise_decision", {**_RAISE, "channel": "brand"}, sender=LEAD)
@@ -420,8 +455,9 @@ def test_a_withdrawal_by_the_other_lead_is_said_as_a_sentence() -> None:
         whole = bus.call(store, "read_decisions", {"decision_id": filed.id}, sender=Z_LEAD)
         listed = bus.call(store, "read_decisions", {}, sender=Z_LEAD)
 
-    assert "The lead on #brand withdrew it." in whole
-    assert "The lead on #brand withdrew it." in listed
+    said = 'The lead on #brand (session s, card "t", project "w") withdrew it.'
+    assert said in whole
+    assert said in listed
 
 
 # -- through the tools ----------------------------------------------------------------
@@ -448,9 +484,12 @@ def test_a_lead_raises_on_a_channel_and_the_peer_reads_it_through_the_tools() ->
         stranger = bus.call(store, "read_decisions", {"decision_id": filed.id}, sender=C_LEAD)
 
     assert (filed.channel, filed.link) == ("brand", "k1")
-    assert "raised on #brand" in said
+    assert (
+        'It is raised on #brand: the lead of session z, card "t", project "w" can read it'
+    ) in said
+    assert "not this tool speaking" in said
     assert "1 the lead on the other end of a channel raised" in listed
-    assert "raised by the lead on #brand, not by you" in whole
+    assert 'raised by the lead on #brand (session s, card "t", project "w"), not by you' in whole
     assert "yours is not" not in whole
     assert (
         "When they do, pptmstr sends your session a message naming it, as it does the "

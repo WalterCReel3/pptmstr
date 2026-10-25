@@ -25,12 +25,13 @@ starts with an empty board and can't read this one.
 
 - Commits: 1513a23 (research), a6b0f51 (round one), 944c207 (graph evidence), 720b406 (round
   two), 88af369 (merge of origin/main 713af05), 83f31b0 and 769c898 (this note), 91d4426 (round
-  three), 982e20d (coordinator concept), then the merge of origin/main 7d3a21f.
-- `make check` green at G-r3: 14569 passed, 14 skipped, 23 xfailed (14606 collected; every test
-  file collects at least as many as before the round).
+  three), 982e20d (coordinator concept), then the merge of origin/main 7d3a21f (d305c0b), the
+  first three-lead case study, and round four's case-study items.
+- `make check` green at G-r4a: 14866 passed, 14 skipped, 23 xfailed (14903 collected; no test
+  file lost tests against d305c0b).
 - Baselines for the next gate:
   - **23** `[imgui-error]` lines, from tests that exercise error recovery;
-  - **1936** for `make typecheck-all` (red before this branch; don't let it rise). Only the
+  - **1914** for `make typecheck-all` (red before this branch; don't let it rise). Only the
     total was compared, not per file.
 - Built:
   - peer messages (H+, `peer-posted`, keyed on link id);
@@ -42,9 +43,23 @@ starts with an empty board and can't read this one.
   - round three: delivery-first wakes with the K = 6 backstop (Decided 10), the unanswered-question
     row (Decided 11), decision wakes, and held-mail rows. See "Decided during round three" in the
     build plan.
+  - round four, from the first three-lead run: peer identity on every link surface, owed
+    answers named at resume, sender-only withdrawal (`peer-retracted`), whose move with an action
+    on every peer row, the link's thread in DETAIL, the sweep's own report type, the channel on
+    decision rows, and one "edited" rule.
 - Not built:
-  - **round four:** the DIGEST thread, channel in NEEDS YOU/DETAIL, and the display check.
-- Never seen on a display, never run between two live sessions.
+  - **left from round four:**
+    - the display check (the operator's);
+    - provenance in the board pane on AUTONOMOUS;
+    - who closed a link (held until the cross-window case shows up);
+    - cutting redundant relay of decision answers;
+    - an operator control to withdraw a message;
+    - the digest summary naming a decision's channel;
+    - ConcernEdited's missing node check;
+    - the reducer's per-member peer scans (2.7–5.2 ms a step at 2000 peer messages; this
+      predates the branch's round four).
+- Rounds two to four were never seen on a display. The first three-lead run (2026-10-24) used
+  round three; nothing since has run between live sessions.
 
 ## Process lessons (not recorded elsewhere)
 
@@ -59,6 +74,10 @@ starts with an empty board and can't read this one.
   - Use main's new `declare_task` dry run before declaring.
 - **Builders mutate only scratch copies** (`cp -a` under `$TMPDIR`), never the tree. Two
   incidents in round one came from mutation checks run in the shared tree. Every spec says so.
+  - In an unattended session, the Write/Edit tools are bounded to the worktree, so a scratch
+    copy and its scripts are made with Bash only (`cat > … <<EOF`, `python -c`).
+  - `$TMPDIR` can be empty. `/tmp/claude-1000/…` is the sandbox-writable fallback.
+  - Never write a file into the worktree to carry scratch work (2026-10-25, P-reducer-perf).
 - **Extras.** When a builder asks to write outside its touches, check the board for an
   unfinished task on that file before approving, and have it list the file as an approved extra.
   Gates check changed files against touches plus extras.

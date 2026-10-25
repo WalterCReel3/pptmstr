@@ -62,9 +62,11 @@ from ..model import (
     ChannelId,
     DetachRefusal,
     LaunchSpec,
+    MoveOwner,
     NodeId,
     Snapshot,
     TranscriptPresence,
+    WhoseMove,
 )
 from ..theme import STATE_LABEL, P
 from . import gate_menu, session_details
@@ -1161,6 +1163,33 @@ def peer_label(snap: Snapshot, session_id: str) -> str:
     """
     rec = snap.get((session_id, None))
     return drawable.text(session_id if rec is None else card_title(rec))
+
+
+def whose_move_text(snap: Snapshot, move: WhoseMove, me: str) -> str:
+    """
+    Whose move it is on a link, as the card of ``me``, one of its members,
+    says it: "waiting on you" for the operator, "waiting on this lead" or
+    "waiting on <peer>" for a member's lead, the same with ", not running"
+    when that session cannot be woken, and "idle". Derived each frame from
+    ``Snapshot.whose_move``; a lead is named by ``peer_label``, as a card's
+    channel line names it.
+
+    Here and not in either pane that says it -- the rail's channel line and
+    DETAIL's thread -- because a pane's module is no other pane's to import.
+    DETAIL reads a link from no member's side, and passes ``""``, which names
+    no session, so every lead is named by its card.
+    """
+    match move.owner:
+        case MoveOwner.OPERATOR:
+            return "waiting on you"
+        case MoveOwner.IDLE:
+            return "idle"
+        case MoveOwner.MEMBER | MoveOwner.UNREACHABLE:
+            assert move.session is not None
+            who = "this lead" if move.session == me else peer_label(snap, move.session)
+            down = ", not running" if move.owner is MoveOwner.UNREACHABLE else ""
+            return f"waiting on {who}{down}"
+    assert_never(move.owner)
 
 
 def draw_confirm(state: MenuState, snap: Snapshot, actions: Actions) -> None:

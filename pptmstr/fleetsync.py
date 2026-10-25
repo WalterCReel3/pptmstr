@@ -138,6 +138,7 @@ from .intents import (
     Intent,
     PeerInboxRead,
     PeerQuestionAged,
+    PeerQuestionDismissed,
     PeerSent,
     PeerWakeSent,
     SessionDetached,
@@ -313,6 +314,7 @@ def changes(
             | DecisionWakeSent()
             | PeerQuestionAged()
             | HeldMailDismissed()
+            | PeerQuestionDismissed()
         ):
             # Nothing about a run. A removal, and a decision, an approval or a
             # command that brings a session back, are read off the snapshots

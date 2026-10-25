@@ -61,6 +61,7 @@ from .approval import (
     classify,
     diff_texts,
     inherits_to_subagents,
+    is_edit,
     records_read,
     records_written,
     render_texts,
@@ -2306,10 +2307,9 @@ class AgentSession:
             # applied. After it, every approved bus call differs from what the
             # model sent -- the stamp itself is a rewrite -- so the comparison
             # would report every concern as edited. Opening the editor and
-            # changing nothing is likewise not an edit.
-            edited = decision.edited_args is not None and dict(decision.edited_args) != dict(
-                tool_input
-            )
+            # changing nothing is likewise not an edit. ``is_edit`` is the rule
+            # every pane says "edited" by.
+            edited = decision.edited_args is not None and is_edit(decision.edited_args, tool_input)
             return _allow_with(
                 self._stamp_bus_call(
                     tool_name, approved_args, node, edited=edited, called_at=parked_at

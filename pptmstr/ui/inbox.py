@@ -57,7 +57,8 @@ from ..command import (
     Withdrawn,
 )
 from ..commandrun import environment_changes, kill_line, look_line
-from ..intents import HeldMailDismissed, WakeChainReleased
+from ..effects import peer_identity, peer_text
+from ..intents import HeldMailDismissed, PeerQuestionDismissed, WakeChainReleased
 from ..model import (
     AgentRecord,
     AgentState,
@@ -73,6 +74,7 @@ from ..model import (
     QuestionPending,
     SessionFailed,
     Snapshot,
+    TranscriptPresence,
     WakeChainHeld,
 )
 from ..theme import OBLIGATION_GLYPH, STATE_GLYPH, P, hint_colour
@@ -84,6 +86,7 @@ from .widgets import (
     CTRL_ENTER_SUBMITS,
     author_text,
     ellipsis,
+    ellipsis_by,
     flat_line,
     format_elapsed,
     help_mark,
@@ -172,6 +175,10 @@ _WHOLE: set[Hashable] = set()
 
 _NO_DIFF = "no diff for this call - arguments:"
 _WITHHELD = "shown as the agent sent it - approve sends YOUR EDIT, which differs"
+_WITHHELD_UNPARSED = (
+    "shown as the agent sent it - YOUR EDIT is not a JSON object, so approve sends"
+    " nothing until it parses"
+)
 _NOT_ON_SCREEN = "the body above is not on screen - approve is held until it is"
 
 # The bus tools' names as the CLI spells them. ``approval.py`` owns the spelling and
@@ -252,6 +259,12 @@ class InboxActions:
     # dropping it turns a retry of a team session into a solo one, and nothing on
     # screen would say so.
     relaunch: Callable[[LaunchSpec], None]
+    # Bring a session to the front: the cursor on it and its conversation in
+    # view. None, for a caller with no layout to bring, draws the button dead.
+    go_to: Callable[[NodeId], None] | None = None
+    # Open the resume form for a session that is not running, as its card's
+    # "Resume…" does. None draws the button dead.
+    resume: Callable[[NodeId], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +362,30 @@ def row_summary(obligation: Obligation) -> str:
     if isinstance(obligation, CommandOwed):
         return command_summary(obligation.command)
     return obligation.summary
+
+
+def summary_shown(obligation: Obligation, width_px: float) -> str:
+    """
+    The summary column as drawn in ``width_px``: ``row_summary`` clipped from
+    the right, except on a parked call across a link, whose row says the lead
+    it reaches ahead of its subject (``PendingApproval.summary_peer``). There
+    the description is cut first, in place, so the subject after it is whole
+    while the row has room for it beside the description's ellipsis; only past
+    that is the row clipped from the right, and the subject with it.
+    """
+    text = row_summary(obligation)
+    span = obligation.approval.summary_peer if isinstance(obligation, ApprovalNeeded) else None
+    if span is None or _text_w(text) <= width_px:
+        return ellipsis(text, width_px)
+    before, peer, after = text[: span[0]], text[span[0] : span[1]], text[span[1] :]
+    room = width_px - _text_w(before) - _text_w(after)
+    if room >= _text_w("…"):
+        return before + ellipsis_by(peer, room, _text_w) + after
+    return ellipsis(text, width_px)
+
+
+def _text_w(text: str) -> float:
+    return float(imgui.calc_text_size(text).x)
 
 
 def command_role(snap: Snapshot, command: Command) -> str:
@@ -774,8 +811,8 @@ def departure_line(snap: Snapshot, left: Obligation, now: float = 0.0) -> str:
         case PeerQuestionUnanswered():
             return (
                 f"the unanswered question you were on - #{one_line(left.channel)} for {role}"
-                " - is no longer shown: it was answered, or its link closed, or its session"
-                " was resumed before the age"
+                " - is no longer shown: it was answered, or its asker withdrew it, or its"
+                " link closed, or its session was resumed before the age, or you dismissed it"
             )
         case PeerMailHeld():
             return (
@@ -1044,14 +1081,14 @@ def keys_hint(current: Obligation | None) -> str:
         case CommandOwed():
             return COMMAND_KEYS
         case WakeChainHeld():
-            return "j/k move · wake them with the button: no key acts here"
+            return "j/k move · go to the lead or wake them with the buttons: no key acts here"
         case PeerQuestionUnanswered():
             return (
-                "j/k move · nothing to press: an answer, the link closing, or a resume"
-                " before the age ends it"
+                "j/k move · go to or resume the lead, or dismiss, with the buttons: no key"
+                " acts here"
             )
         case PeerMailHeld():
-            return "j/k move · dismiss with the button: no key acts here"
+            return "j/k move · go to the lead or dismiss with the buttons: no key acts here"
         case _:
             assert_never(current)
 
@@ -1124,6 +1161,20 @@ def identity(snap: Snapshot, obligation: Obligation) -> tuple[str, str]:
         return title, project
     sub = (node.agent_type if node else None) or "sub-agent"
     return title, f"{project} / {sub}"
+
+
+def channel_marker(snap: Snapshot, obligation: Obligation) -> str | None:
+    """
+    For a decision raised on a channel between leads, the channel and whether
+    its answer crosses the link (``decision_view.channel_marker``). None for
+    every other obligation, and for a decision with no channel.
+
+    Public for the reason ``identity`` is: DETAIL's header carries the same
+    string, so the row and the pane cannot disagree about who reads an answer.
+    """
+    if not isinstance(obligation, DecisionOwed):
+        return None
+    return decision_view.channel_marker(snap, obligation.decision)
 
 
 def spawn_marker(snap: Snapshot, obligation: Obligation) -> str | None:
@@ -1249,11 +1300,16 @@ def _row(
         imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + summary_x, origin.y + 3.0))
         imgui.text_colored(P.accent.vec4, marker)
         summary_x += imgui.calc_text_size(marker).x + 10.0
+    # Warn and not accent: who reads the answer is a fact the summary does not
+    # carry, and a decision with no channel draws nothing here.
+    channel = channel_marker(snap, obligation)
+    if channel is not None:
+        imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + summary_x, origin.y + 3.0))
+        imgui.text_colored(P.warn.vec4, channel)
+        summary_x += imgui.calc_text_size(channel).x + 10.0
 
     imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + summary_x, origin.y + 3.0))
-    imgui.text_colored(
-        P.text.vec4, ellipsis(row_summary(obligation), max(width - summary_x - 12.0, 40.0))
-    )
+    imgui.text_colored(P.text.vec4, summary_shown(obligation, max(width - summary_x - 12.0, 40.0)))
 
     imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x, hi.y))
 
@@ -1271,11 +1327,11 @@ def _row(
             case CommandOwed():
                 draw_command(snap, commands, obligation.command, wrap=wrap)
             case WakeChainHeld():
-                _expand_wake_chain(bridge, obligation)
+                _expand_wake_chain(snap, bridge, actions, obligation)
             case PeerQuestionUnanswered():
-                _expand_peer_question(obligation)
+                _expand_peer_question(snap, bridge, actions, obligation)
             case PeerMailHeld():
-                _expand_peer_held(bridge, obligation)
+                _expand_peer_held(snap, bridge, actions, obligation)
             case _:
                 assert_never(obligation)
         imgui.unindent(10.0)
@@ -1310,7 +1366,7 @@ def _expand_approval(
         # Both above the body under either renderer: the native one is also what is
         # drawn when the faces did not load.
         if edit_withheld(state, pending):
-            _warning(_WITHHELD)
+            _warning(withheld_notice(state.edits[pending.id]))
             # The row above shows the provenance as the agent stated it, and the
             # board keeps what the draft states, less any charter mark.
             dropped = edit_provenance(state, pending)
@@ -1739,13 +1795,54 @@ def edit_withheld(state: review.ReviewState, pending: PendingApproval) -> bool:
     its editor -- ``e`` on another row moves the editor and keeps this one's text --
     and then ``a`` approves something other than the diff above it.
 
-    Serialises the arguments to compare, which for a whole-file Write is the file;
-    only reached while a draft exists.
+    Whether the draft differs is ``draft_is_edit``'s: ``approval.is_edit``, the
+    rule the gate stamps by.
     """
     draft = state.edits.get(pending.id)
     if draft is None or state.editing == pending.id:
         return False
-    return draft != review.pretty_args(pending)
+    return draft_is_edit(draft, pending)
+
+
+def draft_parses(draft: str) -> bool:
+    """
+    Whether ``review.resolve`` would send ``draft`` at all: it sends a draft
+    that parses as a JSON object, and refuses any other ("not valid JSON - not
+    sent"). A draft that does not is an edit (``draft_is_edit``) that approve
+    does not send, and the panes say that rather than "approve sends YOUR EDIT".
+    """
+    return review.parse_edit(draft) is not None
+
+
+def withheld_notice(draft: str) -> str:
+    """What the row says above the call it draws while ``draft`` is withheld."""
+    return _WITHHELD if draft_parses(draft) else _WITHHELD_UNPARSED
+
+
+def draft_is_edit(draft: str, pending: PendingApproval) -> bool:
+    """
+    Whether approving ``draft`` sends something other than the call as the agent
+    made it: ``approval.is_edit`` of the draft as ``review.resolve`` parses it
+    and the arguments the gate parked, the rule the gate stamps
+    ``bus.EDITED_KEY`` by. A draft that only reflows or reorders the JSON is not
+    an edit; one that changes a value's type is.
+
+    The parked side is read as ``edit_provenance`` reads it, through the text the
+    editor opens on (``review.pretty_args``): ``raw_args`` by a JSON round trip,
+    which gives back what came from JSON, without a pane reading ``raw_args``
+    itself.
+
+    A draft that does not parse is one: ``review.resolve`` sends nothing for it,
+    and the call drawn is still not what ``a`` acts on.
+
+    Serialises the arguments, which for a whole-file Write is the file; asked only
+    while a draft exists.
+    """
+    parsed = review.parse_edit(draft)
+    if parsed is None:
+        return True
+    parked = review.parse_edit(review.pretty_args(pending))
+    return parked is None or approval.is_edit(parsed, parked)
 
 
 def refusals(pending: PendingApproval) -> tuple[str, ...]:
@@ -2295,11 +2392,69 @@ def _expand_failure(snap: Snapshot, actions: InboxActions, obligation: SessionFa
     _normal()
 
 
-def _expand_wake_chain(bridge: Bridge, obligation: WakeChainHeld) -> None:
+def lead_named(snap: Snapshot, session_id: str) -> str:
     """
-    A held wake: what was held and why, and the one act it asks for. Releasing
+    A lead on a link as the operator's rows name it: the description every
+    lead is told it by (``effects.peer_text``), drawable.
+    """
+    return one_line(peer_text(peer_identity(snap, session_id)))
+
+
+def go_to_label(node: NodeId) -> str:
+    """
+    The button that brings ``node``'s session to the front.
+    """
+    return f"go to session {one_line(node[0][:8])}"
+
+
+def resume_label(node: NodeId) -> str:
+    """
+    The button that opens the resume form for ``node``'s session.
+    """
+    return f"resume session {one_line(node[0][:8])}"
+
+
+def resumable(snap: Snapshot, node: NodeId) -> bool:
+    """
+    Whether ``node``'s session has a card to resume from: a root the store
+    holds whose conversation is not known to be gone, the rule its card's
+    menu offers "Resume…" under (``session_menu._ended_root``).
+    """
+    rec = snap.get((node[0], None))
+    return rec is not None and not (
+        rec.recalled is not None and rec.recalled.transcript is TranscriptPresence.GONE
+    )
+
+
+def _press(label: str, act: Callable[[NodeId], None] | None, node: NodeId, live: bool) -> None:
+    """
+    A button that calls ``act`` with ``node``, drawn dead when it cannot.
+    """
+    dead = act is None or not live
+    if dead:
+        imgui.begin_disabled()
+    pressed = imgui.button(label)
+    if dead:
+        imgui.end_disabled()
+    elif pressed and act is not None:
+        act(node)
+
+
+def _go_to(snap: Snapshot, actions: InboxActions, node: NodeId) -> None:
+    """
+    "go to session <head>", live while the store holds a card for the session.
+    """
+    _press(go_to_label(node), actions.go_to, node, snap.get((node[0], None)) is not None)
+
+
+def _expand_wake_chain(
+    snap: Snapshot, bridge: Bridge, actions: InboxActions, obligation: WakeChainHeld
+) -> None:
+    """
+    A held wake: what was held and why, and the act it asks for. Releasing
     is safe to do in one press -- it wakes leads to read mail that is already
-    theirs -- so it is not armed as a decision's send is.
+    theirs -- so it is not armed as a decision's send is. "go to" beside it
+    brings the held lead's session to the front.
     """
     imgui.push_text_wrap_pos(imgui.get_content_region_avail().x)
     imgui.text_colored(
@@ -2308,8 +2463,13 @@ def _expand_wake_chain(bridge: Bridge, obligation: WakeChainHeld) -> None:
         " a row with no act of yours on this link, so pptmstr stopped waking them. Their"
         " messages are kept and wait to be read; only the wake is held.",
     )
+    imgui.text_colored(
+        P.text_dim.vec4, f"Held for the lead of {lead_named(snap, obligation.node[0])}."
+    )
     imgui.pop_text_wrap_pos()
     imgui.spacing()
+    _go_to(snap, actions, obligation.node)
+    imgui.same_line()
     if imgui.button("wake them"):
         bridge.emit(WakeChainReleased(link_id=obligation.link))
     imgui.same_line()
@@ -2321,16 +2481,57 @@ def _expand_wake_chain(bridge: Bridge, obligation: WakeChainHeld) -> None:
     _normal()
 
 
-def _expand_peer_question(obligation: PeerQuestionUnanswered) -> None:
+def peer_question_leads(snap: Snapshot, obligation: PeerQuestionUnanswered) -> str:
+    """
+    Which two leads a question row is about, each named as every lead is told
+    it (``lead_named``): the one it waits on, and the one that asked.
+    """
+    asked = snap.concerns.get(obligation.question)
+    waits = f"It waits on the lead of {lead_named(snap, obligation.node[0])}"
+    if asked is None:
+        return f"{waits}."
+    return f"{waits}; the lead of {lead_named(snap, asked.sender[0])} asked it."
+
+
+def _expand_peer_question(
+    snap: Snapshot, bridge: Bridge, actions: InboxActions, obligation: PeerQuestionUnanswered
+) -> None:
     """
     An unanswered question between leads: what it says about the two teams,
-    and that nothing here acts on it. The lead that asked is not told of
-    this row (Decided 11); the lead asked sees it only by pulling its
-    digest. What to do about it is the operator's, in either session.
+    who they are, and the acts it takes. The lead that asked is not told of
+    this row (Decided 11); the lead asked sees it only by pulling its digest.
+
+    "go to" the lead it waits on while its session is running, and "resume"
+    it, through the card's resume form, while it is not. "dismiss" drops the
+    row for this run and touches nothing else: the question is still owed.
     """
     imgui.push_text_wrap_pos(imgui.get_content_region_avail().x)
     imgui.text_colored(P.text.vec4, _peer_question_body(obligation))
+    imgui.text_colored(P.text_dim.vec4, peer_question_leads(snap, obligation))
     imgui.pop_text_wrap_pos()
+    imgui.spacing()
+    if obligation.running:
+        _go_to(snap, actions, obligation.node)
+    else:
+        _press(
+            resume_label(obligation.node),
+            actions.resume,
+            obligation.node,
+            resumable(snap, obligation.node),
+        )
+    imgui.same_line()
+    if imgui.button("dismiss"):
+        bridge.emit(
+            PeerQuestionDismissed(concern_id=obligation.question, running=obligation.running)
+        )
+    imgui.same_line()
+    _small()
+    imgui.text_colored(
+        P.text_dim.vec4,
+        "dismiss drops the row for this run; the question is still owed and the lead"
+        " still answers it",
+    )
+    _normal()
 
 
 def _peer_question_body(obligation: PeerQuestionUnanswered) -> str:
@@ -2339,6 +2540,10 @@ def _peer_question_body(obligation: PeerQuestionUnanswered) -> str:
     or the lead's session is not running, which does not wait for the age,
     whether or not it read the question first -- who can see the row, and
     what ends it.
+
+    A question the lead read before its session stopped is not said to be
+    unanswered: an answer it sent is in its own log, which is not read until
+    the session is resumed (``Snapshot.awaiting_answer``).
     """
     asked = (
         f"The lead across #{one_line(obligation.channel)} asked this lead a question that"
@@ -2362,12 +2567,15 @@ def _peer_question_body(obligation: PeerQuestionUnanswered) -> str:
         ends = "It ends when the lead answers it or the link is closed."
     else:
         why = (
-            ", and its session is not running, so it cannot answer; this row does not"
-            " wait for the age set in settings."
+            ". Its lead read it, and its session is not running. No answer is in this"
+            " run, but it may already have answered in an earlier one: that answer would"
+            " be in its own log, which is not read until the session is resumed. This"
+            " row does not wait for the age set in settings."
         )
         ends = (
-            "It ends when the lead answers it or the link is closed; if the session is"
-            " resumed first, the question is held to the age from its delivery again."
+            "It ends when the session is resumed with an answer in its log, when the"
+            " lead answers it, or when the link is closed; resumed without one, the"
+            " question is held to the age from its delivery again."
         )
     # The row is in the digest of the recipient's session alone
     # (``digest._waiting``), and only a running session can call read_digest. A
@@ -2383,11 +2591,14 @@ def _peer_question_body(obligation: PeerQuestionUnanswered) -> str:
     return f"{asked}{why} {told} {ends}"
 
 
-def _expand_peer_held(bridge: Bridge, obligation: PeerMailHeld) -> None:
+def _expand_peer_held(
+    snap: Snapshot, bridge: Bridge, actions: InboxActions, obligation: PeerMailHeld
+) -> None:
     """
     Peer mail no link will hand over in this run: what is held and why, and
-    the one act the row takes. Dismissing keeps the mail and drops only the
-    row, so it is safe in one press, as releasing a held wake is.
+    the acts the row takes. Dismissing keeps the mail and drops only the
+    row, so it is safe in one press, as releasing a held wake is. "go to"
+    beside it brings the lead the mail is for to the front.
     """
     imgui.push_text_wrap_pos(imgui.get_content_region_avail().x)
     imgui.text_colored(
@@ -2396,8 +2607,13 @@ def _expand_peer_held(bridge: Bridge, obligation: PeerMailHeld) -> None:
         f" #{one_line(obligation.channel)} wait for this lead, and the link they were sent"
         f" over {obligation.why}. They are kept in the store and in their sender's log.",
     )
+    imgui.text_colored(
+        P.text_dim.vec4, f"They are for the lead of {lead_named(snap, obligation.node[0])}."
+    )
     imgui.pop_text_wrap_pos()
     imgui.spacing()
+    _go_to(snap, actions, obligation.node)
+    imgui.same_line()
     if imgui.button("dismiss"):
         bridge.emit(HeldMailDismissed(concerns=frozenset(obligation.messages)))
     imgui.same_line()

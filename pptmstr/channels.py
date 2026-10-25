@@ -73,7 +73,7 @@ import threading
 import time
 from collections import Counter, deque
 from collections.abc import Iterable
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, get_args, get_type_hints
 
@@ -149,7 +149,7 @@ class LinkClosed:
     Written for the operator's close (``intents.ChannelClosed``) and by the
     writer's sweep, which closes every earlier link under a name when the
     operator links that name again (``ChannelWriter._sweep``). The fact does
-    not say which: only the writer's ``Outcome`` report carries ``Swept``.
+    not say which: only the writer's report does, a sweep's being a ``Swept``.
     """
 
     KIND: ClassVar[str] = "link-closed"
@@ -730,35 +730,59 @@ def outcomes(
 
 
 @dataclass(frozen=True, slots=True)
-class Swept:
-    """
-    A close the sweep for ``made``'s creation made or could not make, as
-    distinct from one the operator submitted (``ChannelWriter._sweep``).
-
-    On an ``Outcome`` whose link is ``made`` itself, the name's links could not
-    be listed and nothing was closed. On one whose link is an earlier link,
-    that link's close; ``created_at`` is its creation as its log read, or None
-    when the read showed none.
-    """
-
-    made: LinkKey
-    created_at: float | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class Outcome:
     """
-    What became of one submitted fact. ``marker`` is set on the fact whose
-    failure stopped the link's recording: what became of the stop marker tried
-    after it. ``swept`` is set on a close the sweep made, and None on every
-    fact the writer was submitted.
+    What became of one fact the writer was submitted. ``marker`` is set on the
+    fact whose failure stopped the link's recording: what became of the stop
+    marker tried after it. A close the sweep made is never one: it is a
+    ``SweptClose``, inside the ``Swept`` report of the link that owed it.
     """
 
     link: LinkKey
     fact: Fact
     result: Appended | NotAppended
     marker: Appended | NotAppended | None = None
-    swept: Swept | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SweptClose:
+    """
+    What became of the close the sweep appended to ``link``, an earlier link
+    under the name just linked. ``created_at`` is ``link``'s creation as its
+    log read, or None when the read showed none; ``result`` and ``marker`` are
+    as an ``Outcome``'s. The fact appended is a ``LinkClosed`` of ``link``,
+    the same record an operator's close writes.
+    """
+
+    link: LinkKey
+    created_at: float | None
+    result: Appended | NotAppended
+    marker: Appended | NotAppended | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Swept:
+    """
+    What the sweep for ``made``'s creation did (``ChannelWriter._sweep``),
+    reported apart from every submitted fact so it is never read as a close
+    of ``made`` or as the operator's close.
+
+    ``closes`` is each earlier link it closed or tried to, in the order tried,
+    or ``Unlisted`` when the name's links could not be listed and nothing was
+    tried. Reported only when one of those is so: a sweep that found nothing
+    owed has nothing to say.
+
+    **One report per creation, not per close**: a consumer counting closes
+    counts inside ``closes``, never the ``Swept`` reports drained.
+    """
+
+    made: LinkKey
+    closes: tuple[SweptClose, ...] | Unlisted
+
+
+# What the writer reports: a submitted fact's ``Outcome``, or a creation's
+# ``Swept``, drained before that creation's ``Outcome``.
+Report = Outcome | Swept
 
 
 @dataclass(frozen=True, slots=True)
@@ -860,7 +884,7 @@ class ChannelWriter:
         # Read and written only with ``_changed`` held.
         self._queue: queue.SimpleQueue[tuple[LinkKey, Fact] | None] = queue.SimpleQueue()
         self._pending: deque[tuple[LinkKey, Fact]] = deque()
-        self._reports: list[Outcome] = []
+        self._reports: list[Report] = []
         self._worker: threading.Thread | None = None
         self._closed = False
         self._abandoned = False
@@ -895,14 +919,14 @@ class ChannelWriter:
                 self._worker = threading.Thread(target=self._run, name="channels", daemon=True)
                 self._worker.start()
 
-    def drain(self) -> tuple[Outcome, ...]:
+    def drain(self) -> tuple[Report, ...]:
         """Everything settled since the last call, oldest first. Never waits."""
         with self._changed:
             settled = tuple(self._reports)
             self._reports.clear()
         return settled
 
-    def close(self, timeout: float = CLOSE_TIMEOUT) -> tuple[Outcome, ...]:
+    def close(self, timeout: float = CLOSE_TIMEOUT) -> tuple[Report, ...]:
         """
         Stop taking facts, wait at most ``timeout`` seconds for the queued ones,
         and return everything not yet drained.
@@ -944,7 +968,7 @@ class ChannelWriter:
                 self._reports.extend(settled)
                 self._changed.notify_all()
 
-    def _settle(self, link: LinkKey, fact: Fact) -> tuple[Outcome, ...]:
+    def _settle(self, link: LinkKey, fact: Fact) -> tuple[Report, ...]:
         """
         What became of ``fact``, after the closes a creation owes the earlier
         links under its name.
@@ -952,32 +976,23 @@ class ChannelWriter:
         refused = self.refusal(link)
         if refused is not None:
             return (Outcome(link, fact, NotAppended(refused)),)
-        swept = self._sweep(link) if isinstance(fact, LinkCreated) else ()
-        return (*swept, self._record(link, fact))
+        swept = self._sweep(link) if isinstance(fact, LinkCreated) else None
+        recorded = self._record(link, fact)
+        return (recorded,) if swept is None else (swept, recorded)
 
-    def _sweep(self, made: LinkKey) -> tuple[Outcome, ...]:
+    def _sweep(self, made: LinkKey) -> Swept | None:
         """
         Close every link under ``made``'s name, other than ``made``, that is
-        owed a close (``owes_close``), and say what became of each close.
+        owed a close (``owes_close``), and say what became of each close; or
+        None when none was owed.
 
-        When the name's links cannot be listed nothing is closed, and that is
-        reported against ``made`` as the close it could not make. Every
-        report carries ``Swept``, so it is never read as the operator's close.
+        When the name's links cannot be listed nothing is closed, and the
+        report says so rather than naming any close.
         """
         listed = self._links(made.name)
         if isinstance(listed, Unlisted):
-            return (
-                Outcome(
-                    made,
-                    LinkClosed(at=time.time(), channel_id=made.link_id),
-                    NotAppended(
-                        f"not tried: the links under #{made.name} could not be listed"
-                        f" ({listed.reason})"
-                    ),
-                    swept=Swept(made),
-                ),
-            )
-        swept: list[Outcome] = []
+            return Swept(made, listed)
+        swept: list[SweptClose] = []
         for earlier in listed:
             if earlier.name != made.name or earlier == made or earlier in self._settled:
                 continue
@@ -994,8 +1009,8 @@ class ChannelWriter:
             if isinstance(closing.result, Appended):
                 self._settled.add(earlier)
             made_at = None if created is None else created.created_at
-            swept.append(replace(closing, swept=Swept(made, made_at)))
-        return tuple(swept)
+            swept.append(SweptClose(earlier, made_at, closing.result, closing.marker))
+        return Swept(made, tuple(swept)) if swept else None
 
     def _record(self, link: LinkKey, fact: Fact) -> Outcome:
         """Append ``fact``, and stop ``link``'s recording if it does not land."""

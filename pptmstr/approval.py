@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import difflib
 import enum
+import json
 import os
 import shlex
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, assert_never
@@ -131,6 +132,13 @@ _BUS_AMEND = f"mcp__{_BUS_SERVER}__amend_task"
 _BUS_PEER = f"mcp__{_BUS_SERVER}__send_to_peer"
 _BUS_DECIDE = f"mcp__{_BUS_SERVER}__raise_decision"
 _BUS_WITHDRAW = f"mcp__{_BUS_SERVER}__withdraw_task"
+_BUS_WITHDRAW_PEER = f"mcp__{_BUS_SERVER}__withdraw_peer_message"
+
+# The two calls across a link that name their channel (``peer_channel``), by
+# the names the gate is handed, for a reader that says which a parked call is.
+# The third, a withdrawal, names none: ``model.WITHDRAW_PEER_TOOL``.
+PEER_MESSAGE_TOOL = _BUS_PEER
+PEER_DECISION_TOOL = _BUS_DECIDE
 
 # Reads, searches and listings. Cheap, reversible, and they do not leave the box.
 # The four that name a path are admitted by name and then measured by
@@ -393,6 +401,22 @@ _AUTONOMOUS_AUTO = _REVIEW
 # of a session with no containment does not have the three (`bus.build_server`),
 # so on it these names admit a call that reaches no tool.
 #
+# **`withdraw_peer_message` is here on `withdraw_decision`'s grounds, without a
+# reason.** It takes back a message the caller's own lead sent, which only that
+# sender may (`store._message_withdrawal_refusal`), so like `withdraw_decision`
+# it removes the asker's own act. Parking it would leave a question the sender
+# has disowned open for the other lead while the operator gets to the row,
+# which is the case-study failure the tool exists to end.
+#
+# **Except a withdrawal that gives a reason, which this set does not admit.**
+# The reason is quoted to the recipient when it had read the message
+# (`bus._withdrawn_message_lines`): it is text from one team's lead to
+# another's, and so a send, gated by the sender's rung as `send_to_peer` is
+# (Decided 1) -- parked on the rungs that park `_BUS_PEER`, released where it
+# is released (`_reviewed_by_arguments`). It is not moved to ``_REVIEW``,
+# which would park the bare withdrawal too: that one carries no words, so it
+# stays auto on every rung and ends the question at once.
+#
 # `why_blocked` and `ready` are `read_board` asked a narrower question, and change
 # nothing. About the caller's own board they hand back ids, titles, states and
 # holders a board read already shows. **They also say one thing a board read does
@@ -410,6 +434,7 @@ _BUS_AUTO = frozenset(
     {
         f"mcp__{_BUS_SERVER}__read_inbox",
         f"mcp__{_BUS_SERVER}__read_peer_messages",
+        _BUS_WITHDRAW_PEER,
         f"mcp__{_BUS_SERVER}__read_board",
         f"mcp__{_BUS_SERVER}__read_task",
         f"mcp__{_BUS_SERVER}__read_digest",
@@ -939,28 +964,39 @@ def _permissive_admits(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
 def _reviewed_by_arguments(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
     """
     Whether a call whose name is in ``_BUS_AUTO`` is reviewed anyway, for what its
-    arguments make it: a ``raise_decision`` that names a channel, which another
-    team's lead reads (see ``_BUS_AUTO``'s comment). Such a call is classified
+    arguments make it: a ``raise_decision`` that names a channel, or a
+    ``withdraw_peer_message`` that gives a reason, either of which hands text to
+    another team's lead (see ``_BUS_AUTO``'s comment). Such a call is classified
     as ``_BUS_PEER`` is, on every rung.
 
-    "Names a channel" is the handler's own reading of the argument
-    (``bus.raise_decision``): anything but absent, None or blank. A value the
-    handler then refuses as a name parks too, which costs a review of a call
-    that files nothing; reading it any narrower here would let a value the two
-    read differently through unparked.
+    "Names a channel" and "gives a reason" are the handlers' own readings of
+    the argument (``bus.raise_decision``, ``bus.withdraw_peer_message``):
+    anything but absent, None or blank. A value the handler then refuses parks
+    too, which costs a review of a call that does nothing; reading it any
+    narrower here would let a value the two read differently through unparked.
     """
-    return tool_name == _BUS_DECIDE and bool(str(tool_input.get("channel") or "").strip())
+    if tool_name == _BUS_DECIDE:
+        return bool(str(tool_input.get("channel") or "").strip())
+    if tool_name == _BUS_WITHDRAW_PEER:
+        return bool(str(tool_input.get("reason") or "").strip())
+    return False
 
 
 def peer_channel(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
     """
-    The channel a call reaches another team's lead on, or None for a call that
-    reaches none: ``send_to_peer``'s, and a ``raise_decision`` that names one
-    (``_reviewed_by_arguments``). Read as the handler reads it, stripped. The
-    store asks it of a parked call to name, on its row, the session the call
-    would reach (``summarize``'s ``reaches``).
+    The channel a call names to reach another team's lead on, or None for a
+    call that names none: ``send_to_peer``'s, and a ``raise_decision`` that
+    names one (``_reviewed_by_arguments``). Read as the handler reads it,
+    stripped. The store asks it of a parked call to name, on its row, the
+    session the call would reach (``summarize``'s ``reaches``).
+
+    None for a ``withdraw_peer_message``, which reaches another team's lead
+    too but names no channel: it acts on the link of the message it names,
+    which only the store holds (``model.Snapshot.parked_link``).
     """
-    if tool_name == _BUS_PEER or _reviewed_by_arguments(tool_name, tool_input):
+    if tool_name == _BUS_PEER or (
+        tool_name == _BUS_DECIDE and _reviewed_by_arguments(tool_name, tool_input)
+    ):
         return str(tool_input.get("channel") or "?").strip() or "?"
     return None
 
@@ -1207,6 +1243,24 @@ def command_shown(tool_name: str, key: str, value: object) -> str | None:
     return visible(value)
 
 
+# How much of the subject a row that reaches another team's lead keeps when
+# even the shortest description of that lead leaves it less (``summarize``).
+_SUBJECT_KEPT = 40
+
+
+@dataclass(frozen=True, slots=True)
+class Summary:
+    """
+    A queue row (``summary_of``), and where in it the description of the lead
+    a call reaches stands: ``peer`` is that span of ``text``, or None on a row
+    that names no lead -- every row but a call across a link, and one that
+    says why it reaches nobody.
+    """
+
+    text: str
+    peer: tuple[int, int] | None = None
+
+
 def summarize(
     tool_name: str,
     tool_input: Mapping[str, Any],
@@ -1214,8 +1268,31 @@ def summarize(
     *,
     session_id: str | None = None,
     cwd: str | None = None,
-    reaches: str | None = None,
+    reaches: str | Sequence[str] | None = None,
+    across: str | None = None,
 ) -> str:
+    """The queue row ``summary_of`` composes, as text alone."""
+    return summary_of(
+        tool_name,
+        tool_input,
+        width,
+        session_id=session_id,
+        cwd=cwd,
+        reaches=reaches,
+        across=across,
+    ).text
+
+
+def summary_of(
+    tool_name: str,
+    tool_input: Mapping[str, Any],
+    width: int = 90,
+    *,
+    session_id: str | None = None,
+    cwd: str | None = None,
+    reaches: str | Sequence[str] | None = None,
+    across: str | None = None,
+) -> Summary:
     """
     One line naming what the call would do. This is the queue row.
 
@@ -1261,6 +1338,19 @@ def summarize(
     it now, which only the store can say. The store writes it onto the row when
     the call parks and again whenever a link changes, so a name closed and
     linked again under the operator's eye shows the session it would go to.
+    A ``withdraw_peer_message`` names no channel, so ``across`` is the name of
+    the link the store found the withdrawn message on, or None where it found
+    none.
+
+    **On such a row the subject is what is being sent, so it outlasts the
+    description of whom.** ``reaches`` may be several descriptions of one
+    session, longest first (``effects.peer_text``'s shorter forms): the row
+    takes the longest that leaves the subject whole within ``width``, else the
+    shortest, and the shortest still leaves ``_SUBJECT_KEPT`` characters of the
+    subject on the row, past ``width`` if it must. ``Summary.peer`` is where the
+    description taken stands on the row, with its spaces run together as the
+    row runs them, whole, since the row is cut only past the head; None when
+    ``reaches`` is a sentence saying why nobody is reached.
     """
     # Imported here because ``model`` imports ``Policy`` from this module, so a
     # top-level import closes a cycle. Neither pulls in the SDK.
@@ -1281,9 +1371,36 @@ def summarize(
     elif records_written(tool_name, tool_input, cwd=cwd) is not None:
         mark = "pptmstr's own records · "
 
-    def clip(text: str, limit: int = width) -> str:
-        text = mark + " ".join(text.split())
-        return text if len(text) <= limit else text[: limit - 3] + "..."
+    def flat(text: str) -> str:
+        return mark + " ".join(text.split())
+
+    def clip(text: str, limit: int = width) -> Summary:
+        text = flat(text)
+        return Summary(text if len(text) <= limit else text[: limit - 3] + "...")
+
+    def reaching(before: str, after: str, subject: str) -> Summary:
+        # The row is ``before``, whom the call reaches in parentheses, ``after``
+        # and the subject. A description is said flattened, so its span on the
+        # flattened row starts right after the flattened "(" ahead of it.
+        forms: list[str | None]
+        if reaches is None or isinstance(reaches, str):
+            named, forms = False, [reaches]
+        else:
+            named, forms = True, [" ".join(f.split()) for f in reaches]
+        heads = [(f, before + ("" if f is None else f" ({f})") + after) for f in forms or [None]]
+        form, head = heads[-1]
+        limit = max(width, len(flat(head)) + 1 + _SUBJECT_KEPT)
+        for candidate in heads:
+            if len(flat(candidate[1] + subject)) <= width:
+                (form, head), limit = candidate, width
+                break
+        row = clip(head + subject, limit)
+        if not named or not form:
+            return row
+        # ``limit`` leaves the whole head on the row, so the clip never cuts
+        # the description.
+        start = len(flat(before + " ("))
+        return Summary(row.text, (start, start + len(form)))
 
     if tool_name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         declared = "notebook_path" if tool_name == "NotebookEdit" else "file_path"
@@ -1320,23 +1437,34 @@ def summarize(
         # it is not mistaken for sending it.
         channel = str(tool_input.get("channel") or "?").strip()
         subject = str(tool_input.get("subject") or "").strip()
-        asks = "" if reaches is None else f" ({reaches})"
+        asks = ""
         if stated_flag(tool_input.get("needs_answer")):
             asks += ", needs an answer"
         if "incident" in tool_input:
             asks += ", carries an incident, which is refused"
-        return clip(
-            f"message the lead on #{channel}{asks}: {subject or tool_input.get('body') or ''}"
+        return reaching(
+            f"message the lead on #{channel}",
+            f"{asks}: ",
+            str(subject or tool_input.get("body") or ""),
+        )
+    if tool_name == _BUS_WITHDRAW_PEER:
+        # A withdrawal parks only for its reason, which the other lead reads,
+        # so the reason is the subject. The channel is the store's (``across``):
+        # the call names a message, not a link.
+        message = " ".join(str(tool_input.get("message_id") or "").split())
+        what = f"withdraw {message}" if message else "withdraw a message it does not name"
+        on = "" if across is None else f" on #{across}"
+        reason = str(tool_input.get("reason") or "").strip()
+        return reaching(
+            f"{what}{on}", ", " + ("saying: " if reason else ""), reason or "giving no reason"
         )
     if _reviewed_by_arguments(tool_name, tool_input):
         # A decision the other link's lead reads. It parks only for that
         # reader, so the row leads with the channel and whom it reaches, then
         # the question.
         channel = str(tool_input.get("channel") or "").strip()
-        reader = "" if reaches is None else f" ({reaches})"
-        return clip(
-            f"decision read by the lead on #{channel}{reader}: "
-            f"{tool_input.get('question') or ''}"
+        return reaching(
+            f"decision read by the lead on #{channel}", ": ", str(tool_input.get("question") or "")
         )
     if tool_name == _BUS_DECLARE:
         # The question at this row is "should this work exist", so it leads with the
@@ -1479,6 +1607,27 @@ def _provenance_read(tool_input: Mapping[str, Any]) -> Provenance | None | _Refu
         return _Refused(str(bad))
 
 
+def _canonical(args: Mapping[str, Any]) -> str:
+    """``args`` as JSON with its keys sorted and no whitespace (``is_edit``)."""
+    return json.dumps(dict(args), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def is_edit(sent: Mapping[str, Any], parked: Mapping[str, Any]) -> bool:
+    """
+    Whether arguments ``sent`` for a parked call are other than the arguments
+    it ``parked`` with: the one rule for "the operator edited this call". The
+    gate stamps ``bus.EDITED_KEY`` by it (``driver.AgentSession._park``), and
+    every pane and warning that says a draft is an edit asks it
+    (``edited_provenance``, ``ui.inbox.draft_is_edit``).
+
+    Compared as canonical JSON, keys sorted and no whitespace, since JSON is
+    what the CLI is handed as ``updatedInput``: key order and layout are not
+    an edit, and a change of type is -- ``1`` to ``true`` or to ``1.0`` is
+    sent changed, where Python's equality would call each the same value.
+    """
+    return _canonical(sent) != _canonical(parked)
+
+
 def edited_provenance(
     tool_name: str, original: Mapping[str, Any], draft: Mapping[str, Any]
 ) -> str | None:
@@ -1488,9 +1637,9 @@ def edited_provenance(
     when the board will keep what the original states, and for every other call.
 
     Computed as the gate and the bus will compute it, so the line cannot say
-    something the board then contradicts. The draft is an edit when it differs
-    from the original **as a mapping** (``driver.AgentSession._park``): a draft only
-    reformatted is not stamped as edited, and nothing is dropped. What an edit
+    something the board then contradicts. The draft is an edit by ``is_edit``,
+    the rule the gate stamps by: a draft only reformatted is not stamped as
+    edited, and nothing is dropped. What an edit
     keeps is ``model.kept_provenance`` of what the draft states -- the bus's own
     rule -- which drops a charter mark the draft states whoever wrote it, the
     agent or the operator. A draft with no channel keeps no provenance at all,
@@ -1502,7 +1651,7 @@ def edited_provenance(
     ``original`` is the call as the agent made it (``PendingApproval.raw_args``,
     or its JSON round trip), which is what the gate compares a draft with.
     """
-    if not states_provenance(tool_name) or dict(draft) == dict(original):
+    if not states_provenance(tool_name) or not is_edit(draft, original):
         return None
     # Imported here for the reason ``summarize`` gives.
     from .model import Charter, Provenance, kept_provenance

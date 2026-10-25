@@ -14,6 +14,9 @@ derived from it:
     the cursor names an obligation, or -- when there is nothing to answer -- a node.
     Whichever it names, the other is computed, never stored.
 
+It can also name a link between leads, whose thread DETAIL draws (``OnLink``). That
+names no obligation, so no approve key answers for anything under it.
+
 Identity is a key, never an index. ``needs_you`` is sorted by age and reorders
 whenever anything arrives or is answered, so a positional cursor would quietly
 retarget itself between frames (I6) -- and this is the cursor that decides which
@@ -25,7 +28,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 
-from ..model import CommandOwed, NodeId, Obligation, Snapshot
+from ..model import Channel, ChannelId, CommandOwed, NodeId, Obligation, Snapshot
 
 
 class Scope(enum.Enum):
@@ -149,7 +152,33 @@ class OnDeparted:
         )
 
 
-Target = OnObligation | OnNode | OnDeparted
+@dataclass(frozen=True, slots=True)
+class OnLink:
+    """
+    Pointed at a link between leads: its thread, which DETAIL draws. Reached by
+    a click on one of a card's channel lines.
+
+    ``node`` is the card the line was on. It is what the panes that follow a
+    session keep following, and what lights that card, so reading a link does
+    not take the operator off the session it was reached from.
+
+    **It is a pin**, as a pinned ``OnNode`` is: the operator asked to read this,
+    so nothing that arrives in the queue takes the cursor off it. It is left only
+    by an act of the operator's -- ``move``, ``to_obligation``, ``to_node``, or
+    another line.
+
+    ``name`` is the link's name when it was pointed at, so that a link the store
+    no longer holds can still be said by name (``FocusState.link_gone``). Read
+    for nothing else: while the store holds the link, its own record is what is
+    drawn.
+    """
+
+    link: ChannelId
+    node: NodeId
+    name: str
+
+
+Target = OnObligation | OnNode | OnDeparted | OnLink
 
 
 @dataclass
@@ -203,6 +232,26 @@ class FocusState:
             # The session just dealt with, so the panes that follow the cursor
             # stay where the operator was looking.
             return self.target.left.node
+        if isinstance(self.target, OnLink) and _on_fleet(snap, self.target.node):
+            return self.target.node
+        return None
+
+    def link(self, snap: Snapshot) -> Channel | None:
+        """The link under the cursor, if it is on one and the store still holds it."""
+        if not isinstance(self.target, OnLink):
+            return None
+        return snap.channels.get(self.target.link)
+
+    def link_gone(self, snap: Snapshot) -> OnLink | None:
+        """
+        The cursor's link target when the store no longer holds that link, and
+        None otherwise. The target stays where it was, as ``OnDeparted`` does:
+        what was being read went, and nothing else is put in front of the
+        operator in its place.
+        """
+        target = self.target
+        if isinstance(target, OnLink) and target.link not in snap.channels:
+            return target
         return None
 
     @property
@@ -253,6 +302,9 @@ class FocusState:
         said "show me this" about a card that is no longer drawn. That check
         follows the return to ``_last_node`` below, so it is also what keeps
         the cursor from going back to one.
+
+        A link target (``OnLink``) is left as it is, whatever arrives and
+        whether or not the store still holds its link (``link_gone``).
         """
         if isinstance(self.target, OnObligation):
             at = self.index(snap)
@@ -351,6 +403,10 @@ class FocusState:
     def to_obligation(self, obligation: Obligation) -> None:
         self.target = OnObligation(obligation.key)
         self._seen = obligation
+
+    def to_link(self, link: Channel, node: NodeId) -> None:
+        """Point at ``link``'s thread, from the card of ``node`` (``OnLink``)."""
+        self.target = OnLink(link.id, node, link.name)
 
     def to_node(self, snap: Snapshot, node: NodeId, *, scope: Scope) -> None:
         """

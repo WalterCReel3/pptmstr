@@ -67,6 +67,7 @@ from pptmstr.intents import (
     Intent,
     PeerInboxRead,
     PeerQuestionAged,
+    PeerQuestionDismissed,
     PeerSent,
     PeerWakeSent,
     SessionDetached,
@@ -96,6 +97,7 @@ from pptmstr.model import (
     EndedHow,
     LaunchSpec,
     NodeId,
+    PeerQuestionUnanswered,
     PendingApproval,
     Recalled,
     Snapshot,
@@ -335,6 +337,19 @@ _MAKERS: dict[type, Maker] = {
     ),
     HeldMailDismissed: lambda r, s, now: HeldMailDismissed(
         frozenset(c.id for c in s.peer_held() if r.random() < 0.5)
+    ),
+    PeerQuestionDismissed: lambda r, s, now: PeerQuestionDismissed(
+        *(
+            r.choice(rows)
+            if (
+                rows := [
+                    (o.question, o.running)
+                    for o in s.needs_you
+                    if isinstance(o, PeerQuestionUnanswered)
+                ]
+            )
+            else (r.choice(sorted(s.concerns) or ["c-0"]), False)
+        )
     ),
 }
 

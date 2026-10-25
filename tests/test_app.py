@@ -2464,6 +2464,201 @@ def test_an_await_between_the_pools_answer_and_the_restore_would_let_the_session
     assert kinds.index(TaskDeclared) < kinds.index(BoardRestored)
 
 
+_QUESTION = "c-00000000000a"
+
+
+def _state(process: _Process) -> Any:
+    """``process.state``, which ``_Process`` types as its parameter's default."""
+    return cast(Any, process.state)
+
+
+def _asked_and_read(root: Path, *, answered: bool) -> tuple[str, str]:
+    """
+    A first run of two linked leads, each recording its board: ``s`` asks ``z``
+    a question that needs an answer, ``z`` reads it and answers it or does not,
+    and the process ends. The question and its delivery are in ``s``'s log, an
+    answer in ``z``'s. ``s`` and ``z``, in that order.
+    """
+    from pptmstr.intents import ChannelLinked, PeerInboxRead, PeerSent
+    from pptmstr.model import EVERY_CHANNEL
+
+    with _Process(root) as first:
+        first.launch()
+        first.launch()
+        s, z = (node[0] for node in first.sessions)
+        first.frame()
+        assert first.log(s).recording and first.log(z).recording
+        emit = first.bridge.emit
+        members = frozenset({s, z})
+        emit(ChannelLinked("k1", "brand", members, "c", 1.0, members))
+        emit(PeerSent((s, None), "rq-1", _QUESTION, "brand", "q", "b", 2.0, needs_answer=True))
+        emit(PeerInboxRead((z, None), "rq-2", 3.0, EVERY_CHANNEL))
+        if answered:
+            emit(
+                PeerSent((z, None), "rq-3", "c-00000000000b", "brand", "a", "b", 4.0, re=_QUESTION)
+            )
+        first.frame()
+        owed = _state(first).store.snapshot().owed_answers(z, EVERY_CHANNEL)
+        assert [c.id for c in owed] == ([] if answered else [_QUESTION])
+    return s, z
+
+
+def _second_start(process: _Process, s: str, z: str) -> None:
+    """The link back, as a start restores it from its log before any launch."""
+    from pptmstr.intents import ChannelsRestored
+    from pptmstr.model import Channel
+
+    members = frozenset({s, z})
+    process.bridge.emit(ChannelsRestored((Channel("k1", "brand", members, "c", 1.0),)))
+    process.frame()
+
+
+def _resume_together(process: _Process, *sessions: str) -> None:
+    """Each of ``sessions`` resumed, all launched before any has started."""
+    for sid in sessions:
+        spec = LaunchSpec(task="build the thing", model="claude-sonnet-5", cwd="/tmp", resume=sid)
+        process.app._launch(process.state, spec)
+    for entry in _state(process).launches:
+        entry.future.exception(timeout=5.0)
+    process.bridge.submit(_nothing()).result(timeout=5.0)
+
+
+def _peer_wakes_held(process: _Process, session_id: str) -> list[object]:
+    from pptmstr.effects import WakeReason
+
+    return [
+        w
+        for w in _state(process).wakes.get(session_id, [])
+        if w.reason is WakeReason.PEER_MESSAGE and w.subject_id == "k1"
+    ]
+
+
+@pytest.mark.parametrize("answered", [True, False], ids=["answered", "unanswered"])
+@pytest.mark.parametrize("asker_launched_first", [True, False], ids=["asker", "recipient"])
+def test_two_resumed_leads_are_each_restored_between_their_announce_and_anyone_elses_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answered: bool, asker_launched_first: bool
+) -> None:
+    """
+    What keeps a lead that answered in an earlier run from being told it owes
+    (``store._peer_waking``'s ``BoardRestored`` arm): with both leads resumed at
+    once, no other session's restore is applied between a session's announce
+    and its own restore, so the asker's restore never meets the recipient
+    wakeable without its answer. The two launches race on the log reads they
+    await (``app._launch``'s ``start``); the order that matters is the queue's.
+
+    Unanswered, the recipient is woken for the question once, whichever order
+    the launches took: the test sees an owed wake when there is one.
+    """
+    from pptmstr import app
+    from pptmstr.intents import AgentSpawned, BoardRestored, SessionSettled
+
+    monkeypatch.setattr(app, "WAKE_WINDOW_S", 3600.0)
+    s, z = _asked_and_read(tmp_path, answered=answered)
+
+    with _Process(tmp_path) as second:
+        _second_start(second, s, z)
+        _resume_together(second, *((s, z) if asker_launched_first else (z, s)))
+        second.frame()
+        applied: list[Any] = list(second.applied)
+        snap = _state(second).store.snapshot()
+        woken = _peer_wakes_held(second, z)
+
+    def at(kind: type[Any], sid: str) -> list[int]:
+        return [
+            n
+            for n, i in enumerate(applied)
+            if isinstance(i, kind)
+            and (i.node_id == (sid, None) if kind is AgentSpawned else i.session_id == sid)
+        ]
+
+    # ``z`` read the question and wrote nothing else, so unanswered it has no
+    # log to restore; ``s`` always has the question's.
+    restoring = (s, z) if answered else (s,)
+    for sid in (s, z):
+        [announce], [settle] = at(AgentSpawned, sid), at(SessionSettled, sid)
+        [restore] = at(BoardRestored, sid) if sid in restoring else [announce]
+        assert announce <= restore < settle
+        between = applied[announce + 1 : restore]
+        assert not any(isinstance(i, BoardRestored) for i in between), (sid, between)
+    assert _QUESTION in snap.concerns
+    k1 = snap.channels["k1"]
+    if answered:
+        assert snap.owed_answers(z, k1) == ()
+        assert woken == [] and snap.peer_owing(z, k1) == ()
+    else:
+        assert len(woken) == 1 and snap.peer_owing(z, k1) == (_QUESTION,)
+
+
+def test_were_the_askers_restore_applied_inside_the_recipients_it_would_wake_it_once_for_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Why the order above matters, and how far a break in it reaches. The
+    recipient's restore is held back until the asker's is in, so the asker's
+    restore meets the recipient announced and wakeable but without its
+    answer: it is woken for a question it answered. Its own restore then lets
+    the wake go (``store._still_owed``), and the shell, which waits while the
+    session is still starting, drops it unsent (``app._still_to_read``).
+    """
+    import asyncio
+
+    from pptmstr import app
+    from pptmstr.effects import SessionWoken, WakeReason
+    from pptmstr.intents import AgentSpawned, BoardRestored
+
+    monkeypatch.setattr(app, "WAKE_WINDOW_S", 3600.0)
+    s, z = _asked_and_read(tmp_path, answered=True)
+    real = app._open_board_log
+    done = threading.Event()
+    gates: dict[str, asyncio.Event] = {}
+
+    def gate(sid: str) -> asyncio.Event:
+        return gates.setdefault(sid, asyncio.Event())
+
+    def reordered(state: Any, sid: str, logged: Any) -> None:
+        # ``z`` is announced; ``s`` restores only after that, and ``z`` only
+        # after ``s``. Each launch reaches here straight after its announce.
+        async def later() -> None:
+            if sid == s:
+                await gate("z announced").wait()
+                real(state, sid, logged)
+                gate("s restored").set()
+            else:
+                gate("z announced").set()
+                await gate("s restored").wait()
+                real(state, sid, logged)
+                done.set()
+
+        asyncio.get_running_loop().create_task(later())
+
+    monkeypatch.setattr(app, "_open_board_log", reordered)
+    with _Process(tmp_path) as second:
+        _second_start(second, s, z)
+        _resume_together(second, s, z)
+        assert done.wait(timeout=5.0)
+        second.bridge.submit(_nothing()).result(timeout=5.0)
+        # Applied as far as the asker's restore, and no further.
+        queued = second.bridge.drain()
+        cut = next(
+            n + 1
+            for n, i in enumerate(queued)
+            if isinstance(i, BoardRestored) and i.session_id == s
+        )
+        _state(second).store.apply_all(queued[:cut], now=time.monotonic())
+        snap = _state(second).store.snapshot()
+        k1 = snap.channels["k1"]
+        announced = any(
+            isinstance(i, AgentSpawned) and i.node_id == (z, None) for i in queued[:cut]
+        )
+        false_owe = snap.peer_owing(z, k1)
+        _state(second).store.apply_all(queued[cut:], now=time.monotonic())
+        after = _state(second).store.snapshot()
+
+    assert announced and false_owe == (_QUESTION,)
+    assert after.owed_answers(z, k1) == () and after.peer_owing(z, k1) == ()
+    assert not app._still_to_read(after, SessionWoken(z, WakeReason.PEER_MESSAGE, "k1"))
+
+
 def test_what_a_resumed_session_does_next_is_appended_behind_the_log_it_restored(
     tmp_path: Path,
 ) -> None:
@@ -6180,7 +6375,12 @@ def test_new_task_is_handed_no_way_to_open_the_resume_form(
         for name, member in inspect.getmembers(run.app, inspect.isfunction)
         if "_open_resume(" in inspect.getsource(member) and name != "_open_resume"
     )
-    assert callers and all("card" in name or "gate" in name for name in callers), callers
+    # A card's menu, its gate rows, and NEEDS YOU's "resume session" on a
+    # question whose lead is not running, which resumes that session's card.
+    assert callers and all(
+        "card" in name or "gate" in name or name == "_resume_session" for name in callers
+    ), callers
+    assert "_resume_session" in callers
 
 
 def test_a_resume_pressed_in_new_task_reaches_launch_with_the_typed_message(
@@ -9649,68 +9849,81 @@ def test_the_menu_bar_closes_the_link_chosen_and_not_the_first_one(
     assert held[by_name["alpha"]].live
 
 
-def _close_not_written(
-    link_id: str,
-    name: str = "brand",
-    *,
-    swept: Any = None,
-    marker: Any = None,
-    reason: str = "no space left on device",
-) -> Any:
-    from pptmstr import channels
+# What a sweep's notices say of the earlier links it left, whatever became of
+# the link just made: closed by the operator, or never written.
+UNLISTED_EIO = (
+    "#brand was linked, but the earlier links under #brand could not be listed (EIO), so"
+    " none was checked or closed; until #brand is linked again, any of them left live may"
+    " read live at the next start, and if the link just made reads live then too, the next"
+    " start withholds every live link under #brand"
+)
 
-    return channels.Outcome(
-        channels.LinkKey(name, link_id),
-        channels.LinkClosed(at=1.0, channel_id=link_id),
-        channels.NotAppended(reason),
-        marker,
-        swept,
+
+def _unmarked(when: str) -> str:
+    return (
+        f"an earlier link under #brand (made {when}, not the one just linked) could not be"
+        " closed: no space left on device; nor could it be marked as stopped, so until #brand"
+        " is linked again, it may read live at the next start, and if the link just made"
+        " reads live then too, the next start withholds every live link under #brand"
     )
 
 
 def test_a_close_not_written_is_worded_by_whose_close_it_was() -> None:
     """
     The writer's report says whether a close it could not write was the
-    sweep's (``Outcome.swept``), and the notice is classified on that alone,
-    whatever the store holds when it drains. Each notice is about the link it
-    names:
+    sweep's (a ``Swept``) or the operator's (an ``Outcome``), and the notice is
+    classified on that alone, whatever the store holds when it drains. Each
+    notice is about the link it names:
 
     - the operator's close keeps its own sentence -- even of a link that is
       live in the store, which it never is at drain but is here to show the
       store is not asked;
-    - a sweep that could not list the name's links, reported against the link
-      just made, says the new link holds for this run and that the earlier
-      links could not be checked -- not that any exist;
+    - a sweep that could not list the name's links says the new link was
+      linked and that the earlier links could not be listed -- not that any
+      exist, not that the new link is still linked, and not that its close
+      failed;
     - a sweep close of an earlier link names it by when it was made and as not
-      the one just linked, and says the next start may withhold the name when
-      its stop marker did not land either, and not when it did.
+      the one just linked, and says it may read live at the next start when
+      its stop marker did not land either, and not when it did. One that
+      landed is not put in front of the operator.
     """
     from pptmstr import app, channels
 
     made = channels.LinkKey("brand", "new")
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000.0))
+    full = channels.NotAppended("no space left on device")
     state = _linking_state()
     try:
         _submit(state, name="brand")
         app.apply_intents(state)
         (live,) = state.store.snapshot().channels
-        reports = (
-            _close_not_written(live),
-            _close_not_written(
-                "new",
-                swept=channels.Swept(made),
-                reason="not tried: the links under #brand could not be listed (EIO)",
+        reports: tuple[channels.Report, ...] = (
+            channels.Outcome(
+                channels.LinkKey("brand", live), channels.LinkClosed(at=1.0, channel_id=live), full
             ),
-            _close_not_written(
-                "e1",
-                swept=channels.Swept(made, 1_700_000_000.0),
-                marker=channels.NotAppended("disk full"),
-            ),
-            _close_not_written(
-                "e2", swept=channels.Swept(made, 1_700_000_000.0), marker=channels.Appended()
-            ),
-            _close_not_written(
-                "e3", swept=channels.Swept(made), marker=channels.NotAppended("disk full")
+            channels.Swept(made, channels.Unlisted("EIO")),
+            channels.Swept(
+                made,
+                (
+                    channels.SweptClose(
+                        channels.LinkKey("brand", "e1"),
+                        1_700_000_000.0,
+                        full,
+                        channels.NotAppended("disk full"),
+                    ),
+                    channels.SweptClose(
+                        channels.LinkKey("brand", "e2"), 1_700_000_000.0, full, channels.Appended()
+                    ),
+                    channels.SweptClose(
+                        channels.LinkKey("brand", "e4"), 1_700_000_000.0, channels.Appended()
+                    ),
+                    channels.SweptClose(
+                        channels.LinkKey("brand", "e3"),
+                        None,
+                        full,
+                        channels.NotAppended("disk full"),
+                    ),
+                ),
             ),
         )
         app._read_channel_reports(reports, state)
@@ -9721,16 +9934,8 @@ def test_a_close_not_written_is_worded_by_whose_close_it_was() -> None:
 
     own, unlisted, unmarked, marked, uncreated = notices
     assert own.startswith("#brand: closed for this run only") and "no space left" in own
-    assert unlisted == (
-        "#brand is linked for this run; any earlier links under #brand could not be checked,"
-        " so none was closed (not tried: the links under #brand could not be listed (EIO));"
-        " until #brand is linked again, the next start may withhold it"
-    )
-    assert unmarked == (
-        f"an earlier link under #brand (made {when}, not the one just linked) could not be"
-        " closed: no space left on device; nor could it be marked as stopped, so until"
-        " #brand is linked again, the next start may withhold #brand"
-    )
+    assert unlisted == UNLISTED_EIO
+    assert unmarked == _unmarked(when)
     assert marked == (
         f"an earlier link under #brand (made {when}, not the one just linked) could not be"
         " closed: no space left on device"
@@ -9739,6 +9944,49 @@ def test_a_close_not_written_is_worded_by_whose_close_it_was() -> None:
         "an earlier link under #brand (its creation unreadable, not the one just linked)"
     )
     assert "could not be closed" not in unlisted
+    assert all("closed for this run only" not in n for n in notices[1:])
+
+
+def test_a_sweep_is_logged_as_the_sweeps_and_never_as_the_new_links_close() -> None:
+    """
+    What LOG is told of each sweep: the earlier links it closed, by name and
+    id, in one line; each it could not close, as that link's; and that it
+    could list none, as the new link linked with nothing checked. No line
+    names a ``LinkClosed`` of the new link, which nothing closed.
+    """
+    from pptmstr import app, channels
+    from pptmstr.log import LOG
+
+    made = channels.LinkKey("brand", "new")
+    full = channels.NotAppended("no space left on device")
+    mark = LOG.snapshot()[1]
+    app._read_channel_reports(
+        (
+            channels.Swept(
+                made,
+                (
+                    channels.SweptClose(channels.LinkKey("brand", "e1"), 1.0, channels.Appended()),
+                    channels.SweptClose(
+                        channels.LinkKey("brand", "e2"), 1.0, full, channels.Appended()
+                    ),
+                    channels.SweptClose(channels.LinkKey("brand", "e3"), None, channels.Appended()),
+                ),
+            ),
+            channels.Swept(made, channels.Unlisted("EIO")),
+        )
+    )
+    entries, revision = LOG.snapshot()
+    said = [e.text for e in entries[len(entries) - (revision - mark) :]]
+
+    assert said == [
+        "#brand (new): was linked, and closed the earlier links under #brand that could read"
+        " live again: #brand (e1), #brand (e3)",
+        "#brand (e2): the close owed it when #brand (new) was linked did not reach its log:"
+        " no space left on device; its log says recording stopped",
+        "#brand (new): was linked, and no earlier link under #brand was checked or closed:"
+        " the links under #brand could not be listed (EIO)",
+    ]
+    assert not any("LinkClosed" in line for line in said)
 
 
 class _Unlistable(_FailingCloses):
@@ -9788,9 +10036,47 @@ def test_a_sweep_report_drained_after_the_operator_closed_its_link_is_still_the_
         app._close_board_log(state)
 
     assert [type(f) for f in facts] == [channels.LinkCreated, channels.LinkClosed]
-    assert len(notices) == 1
-    assert notices[0].startswith("#brand is linked for this run; any earlier links under #brand")
-    assert "closed for this run only" not in notices[0]
+    # Nothing in it says #brand is linked now, which it is not.
+    assert notices == [UNLISTED_EIO.replace("(EIO)", "(OSError: permission denied)")]
+
+
+class _Unwritable(_Unlistable):
+    """A log that can list no name's links and takes no link's creation."""
+
+    def append(self, link: Any, fact: Any) -> Any:
+        from pptmstr import channels
+
+        if isinstance(fact, channels.LinkCreated):
+            return channels.NotAppended("read-only file system")
+        return self.inner.append(link, fact)
+
+
+def test_a_link_never_written_and_a_sweep_that_listed_nothing_are_told_alike() -> None:
+    """
+    #brand's sweep cannot list the name's links, and #brand's own creation
+    does not reach its log. The operator is told both, and neither says the
+    next start may withhold #brand, which it does not restore: what the
+    sweep's notice says of the new link is conditional on its reading live.
+    """
+    from pptmstr import app
+
+    state = _linking_state(_Unwritable())
+    try:
+        assert _submit(state)[0]
+        app.apply_intents(state)
+        _settle_channel_writer(state)
+        notices = list(state.not_done)
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+    unlisted, unwritten = notices
+    assert unlisted == UNLISTED_EIO.replace("(EIO)", "(OSError: permission denied)")
+    assert unwritten == (
+        "#brand: linked for this run only; the link did not reach its log (read-only file"
+        " system), and the next start does not restore it"
+    )
+    assert not any("may withhold" in n or "is linked for" in n for n in notices)
 
 
 def test_an_earlier_link_the_sweep_cannot_close_is_named_apart_from_the_new_one() -> None:
@@ -9798,7 +10084,7 @@ def test_an_earlier_link_the_sweep_cannot_close_is_named_apart_from_the_new_one(
     #brand is linked as E, and E's close and its stop marker both fail, so
     E's log still reads live. #brand is linked again as N; its sweep owes E a
     close and that fails too. The notice is about E, says so by when E was
-    made, and says the next start may withhold #brand -- N included.
+    made, and says it may read live at the next start.
     """
     from pptmstr import app, boardlog, channels
 
@@ -9830,18 +10116,14 @@ def test_an_earlier_link_the_sweep_cannot_close_is_named_apart_from_the_new_one(
 
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(earlier.created_at))
     assert [c.name for c in live] == ["brand"] and live[0].id != earlier.id
-    assert notices == [
-        f"an earlier link under #brand (made {when}, not the one just linked) could not be"
-        " closed: no space left on device; nor could it be marked as stopped, so until"
-        " #brand is linked again, the next start may withhold #brand"
-    ]
+    assert notices == [_unmarked(when)]
 
 
 def test_a_link_whose_earlier_links_cannot_be_listed_does_not_read_as_closed() -> None:
     """
     Through the writer: a log that cannot list a name's links makes the sweep
-    report a close against the link just made, and the operator is told the
-    link holds and the earlier ones were not closed.
+    report that it could list none, and the operator is told the link holds
+    and the earlier ones were not checked or closed.
     """
     from pptmstr import app
 
@@ -9860,7 +10142,129 @@ def test_a_link_whose_earlier_links_cannot_be_listed_does_not_read_as_closed() -
     assert held.live
     assert len(notices) == 1
     assert notices[0].startswith(
-        "#brand is linked for this run; any earlier links under #brand could not be checked"
+        "#brand was linked, but the earlier links under #brand could not be listed"
     )
     assert "permission denied" in notices[0]
     assert "closed for this run only" not in notices[0]
+
+
+# -- NEEDS YOU's peer rows: go to and resume -------------------------------------------
+
+
+def test_go_to_from_a_peer_row_puts_the_cursor_on_the_session_and_its_conversation_in_front(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pptmstr import app
+    from pptmstr.intents import AgentSpawned
+
+    monkeypatch.setattr(
+        app,
+        "hello_imgui",
+        types.SimpleNamespace(current_layout_name=lambda: app.TRIAGE),
+    )
+    store = Store()
+    store.apply(
+        AgentSpawned(node_id=("s-z", None), parent=None, task="t", model="m", started_at=1.0)
+    )
+    state = app.AppState(store=store, bridge=Bridge(), settings=Settings())
+    state.frame_snap = store.snapshot()
+
+    app._go_to_session(state, ("s-z", None))
+
+    assert state.focus.node(state.frame_snap) == ("s-z", None)
+    assert (state.pending_layout, state.pending_pane) == (app.FOCUS, "SESSION")
+
+
+def test_a_channel_line_click_puts_the_thread_in_front_and_leaves_the_layout() -> None:
+    from pptmstr import app
+
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+
+    app._show_thread(state)
+
+    assert (state.pending_layout, state.pending_pane) == (None, "DETAIL")
+
+
+def test_the_rail_is_handed_the_thread_pane_as_what_a_channel_line_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pptmstr import app
+
+    store = Store()
+    state = app.AppState(store=store, bridge=Bridge(), settings=Settings())
+    state.frame_snap = store.snapshot()
+    handed: dict[str, Any] = {}
+    monkeypatch.setattr("pptmstr.app.rail.draw", lambda *_a, **kw: handed.update(kw))
+
+    app._panels(state)["FLEET"]()
+    handed["link_opened"]()
+
+    assert state.pending_pane == "DETAIL"
+
+
+def test_focus_docks_the_conversation_alone_in_its_main_space() -> None:
+    """
+    In FOCUS the conversation is the one window docked in the main space;
+    go to still names SESSION, in case the operator has docked another there.
+    """
+    from pptmstr import app
+
+    names = ("FLEET", "NEEDS YOU", "CONTEXT", "DETAIL", "BOARD", "DIGEST", "BRIEF")
+    panels = {name: (lambda: None) for name in (*names, "SESSION", "HEALTH", "LOG")}
+    main = [
+        w.label
+        for w in app._focus_layout(panels).dockable_windows
+        if w.dock_space_name == "MainDockSpace"
+    ]
+    assert main == ["SESSION"]
+
+
+def test_resume_from_a_peer_row_opens_the_cards_resume_form_and_nothing_without_a_card() -> None:
+    from pptmstr import app
+    from pptmstr.intents import AgentFinished, AgentSpawned
+    from pptmstr.model import AgentState
+
+    store = Store()
+    store.apply(
+        AgentSpawned(
+            node_id=("s-z", None), parent=None, task="t", model="m", started_at=1.0, cwd="/w"
+        )
+    )
+    store.apply(AgentFinished(("s-z", None), AgentState.FAILED, 2.0))
+    state = app.AppState(store=store, bridge=Bridge(), settings=Settings())
+    state.frame_snap = store.snapshot()
+
+    app._resume_session(state, ("s-nobody", None))
+    assert state.resume.form is None
+
+    app._resume_session(state, ("s-z", None))
+    form = state.resume.form
+    assert form is not None and form.facts.session_id == "s-z"
+
+
+def test_the_inbox_is_handed_go_to_and_resume_that_reach_the_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from pptmstr import app
+    from pptmstr.ui import inbox
+
+    handed: list[Any] = []
+    monkeypatch.setattr(inbox, "draw", lambda *a, **kw: handed.append(a[5]))
+    monkeypatch.setattr("pptmstr.app.imgui.get_frame_count", lambda: 1)
+    reached: list[tuple[str, object]] = []
+    monkeypatch.setattr(app, "_go_to_session", lambda s, node: reached.append(("go_to", node)))
+    monkeypatch.setattr(app, "_resume_session", lambda s, node: reached.append(("resume", node)))
+
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    state.pool = MagicMock()
+    state.frame_snap = state.store.snapshot()
+    app._panels(state)["NEEDS YOU"]()
+
+    (actions,) = handed
+    assert isinstance(actions, inbox.InboxActions)
+    assert actions.go_to is not None and actions.resume is not None
+    actions.go_to(("s-z", None))
+    actions.resume(("s-z", None))
+    assert reached == [("go_to", ("s-z", None)), ("resume", ("s-z", None))]

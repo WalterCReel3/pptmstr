@@ -466,9 +466,10 @@ class Frame:
         cursor: NodeId | None = None,
         clicked: int | None = None,
         hovered: int | None = None,
+        mouse: tuple[float, float] = (0.0, 0.0),
         **kw: Any,
     ) -> None:
-        fake, ring = _stub_imgui(monkeypatch, hovered=hovered, clicked=clicked, mouse=(0.0, 0.0))
+        fake, ring = _stub_imgui(monkeypatch, hovered=hovered, clicked=clicked, mouse=mouse)
         # The New Task line draws a link, which needs a real context; it is drawn
         # in one in tests/test_fleet_empty.py. Here, that it was drawn, and with what.
         self.new_task: list[object] = []
@@ -1082,11 +1083,13 @@ def test_a_lead_draws_one_line_per_live_link_by_name_and_its_peer_by_title() -> 
     snap = store.snapshot()
 
     assert rail.channel_lines(snap, snap.nodes[LEAD]) == (
-        "#brand ↔ brand pages",
-        "#zeta ↔ ops runbook",
+        "#brand ↔ brand pages · idle",
+        "#zeta ↔ ops runbook · idle",
     )
     # And each peer the one link it is in, naming this lead.
-    assert rail.channel_lines(snap, snap.nodes[P1]) == ("#brand ↔ reconcile disagreeing TLE sets",)
+    assert rail.channel_lines(snap, snap.nodes[P1]) == (
+        "#brand ↔ reconcile disagreeing TLE sets · idle",
+    )
 
 
 def test_a_closed_link_draws_no_line() -> None:
@@ -1098,7 +1101,7 @@ def test_a_closed_link_draws_no_line() -> None:
     store.apply(ChannelClosed("k1", 4.0))
     snap = store.snapshot()
 
-    assert rail.channel_lines(snap, snap.nodes[LEAD]) == ("#ops ↔ ops runbook",)
+    assert rail.channel_lines(snap, snap.nodes[LEAD]) == ("#ops ↔ ops runbook · idle",)
     assert rail.channel_lines(snap, snap.nodes[P1]) == ()
 
 
@@ -1109,11 +1112,14 @@ def test_a_link_line_counts_the_peer_messages_waiting_on_it() -> None:
     snap = _peer_message(store.snapshot(), LEAD, P1, "k1", 2)
 
     assert rail.channel_lines(snap, snap.nodes[LEAD]) == (
-        "#brand ↔ brand pages · 2 unread",
-        "#ops ↔ ops runbook",
+        "#brand ↔ brand pages · 2 unread · waiting on this lead",
+        "#ops ↔ ops runbook · idle",
     )
-    # Waiting for LEAD, and not for the peer that sent them.
-    assert rail.channel_lines(snap, snap.nodes[P1]) == ("#brand ↔ reconcile disagreeing TLE sets",)
+    # Waiting for LEAD, and not for the peer that sent them: P1's card names
+    # LEAD as the one whose move it is.
+    assert rail.channel_lines(snap, snap.nodes[P1]) == (
+        "#brand ↔ reconcile disagreeing TLE sets · waiting on reconcile disagreeing TLE sets",
+    )
 
 
 def test_mail_waiting_on_a_closed_link_is_not_counted_on_the_live_one_of_its_name() -> None:
@@ -1133,7 +1139,9 @@ def test_mail_waiting_on_a_closed_link_is_not_counted_on_the_live_one_of_its_nam
     # Both links are named "brand"; the two from k1 still wait, and only the
     # one sent over k3 is the live line's.
     assert len(snap.peer_inbox_of(LEAD, EVERY_CHANNEL)) == 3
-    assert rail.channel_lines(snap, snap.nodes[LEAD]) == ("#brand ↔ brand pages · 1 unread",)
+    assert rail.channel_lines(snap, snap.nodes[LEAD]) == (
+        "#brand ↔ brand pages · 1 unread · waiting on this lead",
+    )
 
 
 def test_a_sub_agent_draws_no_channel_line() -> None:
@@ -1161,6 +1169,172 @@ def test_a_cards_height_grows_one_line_per_live_link_and_draws_it(
     assert lead_h == bare.out.cards[0][1] + 18.0 * links
     drawn = [t for t in frame.text if t.startswith("#")]
     # The lead's lines on its card, then each peer's one line on its own.
-    assert drawn == [f"#{name} ↔ {snap.nodes[peer].task}" for _, name, peer in peers] + [
-        f"#{name} ↔ reconcile disagreeing TLE sets" for _, name, _ in peers
+    assert drawn == [f"#{name} ↔ {snap.nodes[peer].task} · idle" for _, name, peer in peers] + [
+        f"#{name} ↔ reconcile disagreeing TLE sets · idle" for _, name, _ in peers
     ]
+
+
+# -- whose move it is on each link ---------------------------------------------------
+
+
+def test_a_link_line_says_whose_move_it_is_on_each_link_of_a_hub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The case study's hub: two links, and the card says which peer owes what.
+    P1 has mail from LEAD to read; on #ops a decision P2 raised is the
+    operator's. Each card reads it from its own side, and the drawn line is
+    the same string.
+    """
+    from pptmstr.intents import DecisionRaised
+    from pptmstr.model import Decision, Standing
+
+    store = _leads()
+    _link(store, "k1", "brand", P1)
+    _link(store, "k2", "ops", P2)
+    decision = Decision(
+        id="d-1",
+        asker=P2,
+        question="ship?",
+        blocks=(),
+        if_unanswered="",
+        evidence="",
+        recommendation="",
+        standing=Standing.OPERATORS,
+        reversible=None,
+        raised_at=2.5,
+    )
+    store.apply(DecisionRaised(P2, decision, request_id="rq", at=2.5, channel="ops"))
+    snap = _peer_message(store.snapshot(), P1, LEAD, "k1", 1)
+
+    lines = rail.channel_lines(snap, snap.nodes[LEAD])
+    assert lines == (
+        "#brand ↔ brand pages · waiting on brand pages",
+        "#ops ↔ ops runbook · waiting on you",
+    )
+    assert rail.channel_lines(snap, snap.nodes[P1]) == (
+        "#brand ↔ reconcile disagreeing TLE sets · 1 unread · waiting on this lead",
+    )
+    assert rail.channel_lines(snap, snap.nodes[P2]) == (
+        "#ops ↔ reconcile disagreeing TLE sets · waiting on you",
+    )
+    drawn = [t for t in Frame(monkeypatch, snap).text if t.startswith("#")]
+    assert drawn[:2] == list(lines)
+
+
+def test_a_link_line_says_when_the_lead_to_act_is_not_running() -> None:
+    from pptmstr.intents import AgentFinished
+
+    store = _leads()
+    _link(store, "k1", "brand", P1)
+    store.apply(AgentFinished(P1, AgentState.FAILED, 4.0))
+    snap = _peer_message(store.snapshot(), P1, LEAD, "k1", 1)
+
+    assert rail.channel_lines(snap, snap.nodes[LEAD]) == (
+        "#brand ↔ brand pages · waiting on brand pages, not running",
+    )
+
+
+def test_quiet_mail_is_counted_unread_and_asks_nobody_to_move() -> None:
+    import dataclasses
+
+    store = _leads()
+    _link(store, "k1", "brand", P1)
+    snap = _peer_message(store.snapshot(), LEAD, P1, "k1", 1)
+    quiet = {cid: dataclasses.replace(c, quiet=True) for cid, c in snap.concerns.items()}
+    snap = dataclasses.replace(snap, concerns=quiet)
+
+    assert rail.channel_lines(snap, snap.nodes[LEAD]) == ("#brand ↔ brand pages · 1 unread · idle",)
+
+
+# -- a channel line opens its link's thread ---------------------------------------
+
+
+def _hub() -> Snapshot:
+    store = _leads()
+    _link(store, "k1", "brand", P1)
+    _link(store, "k2", "ops", P2)
+    return store.snapshot()
+
+
+def _line_y(frame: Frame, row: int, links: int) -> float:
+    """The middle of channel line ``row`` of the first card, of ``links`` lines."""
+    (_, y), (_, h) = frame.out.origins[0], frame.out.cards[0]
+    return y + h - 6.0 - 18.0 * links + 18.0 * row + 9.0
+
+
+@pytest.mark.parametrize(("row", "link"), [(0, "k1"), (1, "k2")])
+def test_a_click_on_a_channel_line_points_the_cursor_at_that_link(
+    monkeypatch: pytest.MonkeyPatch, row: int, link: str
+) -> None:
+    from pptmstr.ui.focus import OnLink
+
+    snap = _hub()
+    at = _line_y(Frame(monkeypatch, snap), row, 2)
+
+    frame = Frame(monkeypatch, snap, clicked=0, mouse=(40.0, at))
+
+    assert frame.focus.target == OnLink(link, LEAD, snap.channels[link].name)
+    assert frame.focus.link(snap) is snap.channels[link]
+    # The card it was read from stays the one the panes follow.
+    assert frame.focus.node(snap) == LEAD
+    assert frame.fake.set_mouse_cursor.call_count == 1
+
+
+def test_a_click_on_the_card_above_its_channel_lines_still_selects_the_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pptmstr.ui.focus import OnNode
+
+    snap = _hub()
+    at = _line_y(Frame(monkeypatch, snap), 0, 2) - 18.0
+
+    frame = Frame(monkeypatch, snap, clicked=0, mouse=(40.0, at))
+
+    assert frame.focus.target == OnNode(LEAD, pinned=True)
+    assert frame.fake.set_mouse_cursor.call_count == 0
+
+
+def test_only_a_click_on_a_channel_line_tells_the_shell_a_thread_was_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``link_opened`` is how the shell brings DETAIL in front; a click on the card
+    itself selects the card and brings nothing forward.
+    """
+    snap = _hub()
+    line = _line_y(Frame(monkeypatch, snap), 1, 2)
+    opened: list[None] = []
+
+    Frame(monkeypatch, snap, clicked=0, mouse=(40.0, line), link_opened=lambda: opened.append(None))
+    assert len(opened) == 1
+
+    Frame(
+        monkeypatch,
+        snap,
+        clicked=0,
+        mouse=(40.0, line - 36.0),
+        link_opened=lambda: opened.append(None),
+    )
+    Frame(monkeypatch, snap, mouse=(40.0, line), link_opened=lambda: opened.append(None))
+    assert len(opened) == 1
+
+
+def test_a_card_with_no_link_has_no_line_to_click(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pptmstr.ui.focus import OnNode
+
+    snap = _leads().snapshot()
+    first = Frame(monkeypatch, snap)
+    (_, y), (_, h) = first.out.origins[0], first.out.cards[0]
+
+    frame = Frame(monkeypatch, snap, clicked=0, mouse=(40.0, y + h - 9.0))
+
+    assert frame.focus.target == OnNode(LEAD, pinned=True)
+
+
+def test_the_link_lines_drawn_are_the_links_clicked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``channel_lines`` is ``channel_rows``' text, in its order."""
+    snap = _hub()
+    rows = rail.channel_rows(snap, snap.nodes[LEAD])
+    assert [link.id for link, _ in rows] == ["k1", "k2"]
+    assert tuple(line for _, line in rows) == rail.channel_lines(snap, snap.nodes[LEAD])

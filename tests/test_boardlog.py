@@ -43,6 +43,7 @@ from pptmstr.boardlog import (
     Handed,
     Malformed,
     PeerPosted,
+    PeerRetracted,
     Posted,
     Raised,
     Reclaimed,
@@ -231,6 +232,7 @@ _GENERATORS: dict[type, Callable[[random.Random], Record]] = {
     ),
     Edited: lambda r: Edited(at=r.choice(_TIMES), concern_id=r.choice(_CONCERN_IDS), body=_text(r)),
     Withdrawn: lambda r: Withdrawn(at=r.choice(_TIMES), concern_id=r.choice(_CONCERN_IDS)),
+    PeerRetracted: lambda r: PeerRetracted(at=r.choice(_TIMES), concern_id=r.choice(_CONCERN_IDS)),
     Delivered: lambda r: Delivered(at=r.choice(_TIMES), concern_ids=_some(r, _CONCERN_IDS)),
     Raised: lambda r: Raised(
         at=r.choice(_TIMES),
@@ -1595,7 +1597,7 @@ def test_nothing_can_be_done_to_a_task_once_it_is_closed_but_amend_it() -> None:
 
 @pytest.mark.parametrize("before", [(), (_W1_CLAIM,)], ids=["pending", "claimed"])
 def test_a_withdrawal_finishes_a_task_for_nobody_with_the_declarers_reason(
-    before: tuple[Record, ...],
+    before: tuple[Claimed, ...],
 ) -> None:
     """
     ``store._apply``'s withdrawal arm, restated: taken from the declarer in any
@@ -2886,7 +2888,16 @@ _DECISION_FACTS: dict[str, tuple[str, object]] = {
 # then false.
 _NOT_PERSISTED: dict[type, dict[str, str]] = {
     Task: {},
-    Concern: {},
+    Concern: {
+        "withdrawn_reason": (
+            "the withdrawer's words to a lead that read the message, kept in the "
+            "run only (P3-withdraw's ruling): a restored withdrawal says so"
+        ),
+        "withdrawal_told": (
+            "whether this run has listed the withdrawal to its lead: a restore lists "
+            "it once more, since the resumed lead still holds the question"
+        ),
+    },
     Decision: {},
 }
 
@@ -3065,6 +3076,7 @@ def test_the_fold_is_total_and_a_record_it_did_not_apply_never_changes_the_board
             | PeerPosted
             | Edited
             | Withdrawn
+            | PeerRetracted
             | Delivered
             | RecordingStopped
             | Unrecognised
@@ -3114,9 +3126,11 @@ def test_no_sequence_restores_a_task_or_concern_one_reducer_could_not_hold(seed:
         if not finished:
             assert (task.result, task.result_basis, task.not_run) == ("", None, None), task
     for concern in board.concerns:
-        assert (concern.delivered_at is not None) == (
-            concern.state is ConcernState.DELIVERED
-        ), concern
+        # Or withdrawn by its sender after delivery, which only a peer message is.
+        if concern.state is ConcernState.DELIVERED:
+            assert concern.delivered_at is not None, concern
+        elif concern.delivered_at is not None:
+            assert concern.state is ConcernState.WITHDRAWN and concern.channel is not None, concern
     for decision in board.decisions:
         # Handed over only once the operator has said something to hand over.
         assert decision.first_delivered_at is None or isinstance(

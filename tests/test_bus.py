@@ -1130,9 +1130,14 @@ def test_the_gate_and_the_bus_agree_on_tool_names() -> None:
     # all of them.
     assert approval._BUS_AUTO | reviewed == set(offered_tools(True))
     assert approval._BUS_AUTO - set(BUS_TOOLS) == set(COMMAND_TOOLS) | {
-        qualified("read_peer_messages")
+        qualified("read_peer_messages"),
+        qualified("withdraw_peer_message"),
     }
-    assert PEER_TOOLS == {qualified("send_to_peer"), qualified("read_peer_messages")}
+    assert PEER_TOOLS == {
+        qualified("send_to_peer"),
+        qualified("read_peer_messages"),
+        qualified("withdraw_peer_message"),
+    }
     assert {qualified(f"{verb}_decision") for verb in ("raise", "withdraw")} <= approval._BUS_AUTO
     assert qualified("read_decisions") in approval._BUS_AUTO
     assert reviewed <= approval._REVIEW and not reviewed & approval._BUS_AUTO
@@ -1393,6 +1398,8 @@ DOCUMENTED_CALLS: dict[str, dict[str, object]] = {
     "send_to_peer": {"channel": "brand", "subject": "the hero image", "body": "ready?"},
     # "Omit it to read every channel."
     "read_peer_messages": {},
+    # Both required: the id send_to_peer gave, and the reason quoted to the lead.
+    "withdraw_peer_message": {"message_id": "c-0123456789ab", "reason": "the wrong lead"},
 }
 
 
@@ -1473,6 +1480,7 @@ def test_an_argument_a_tool_cannot_work_without_is_still_required() -> None:
         ("send_to_peer", "channel"),
         ("send_to_peer", "subject"),
         ("send_to_peer", "body"),
+        ("withdraw_peer_message", "message_id"),
     ):
         args = dict(documented[name])
         del args[needed]

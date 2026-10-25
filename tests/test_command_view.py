@@ -2471,9 +2471,12 @@ PANE_MODULES = (
 # The imports from one pane's module of another's that are argued for: DETAIL acts
 # through the queue row's own functions in FOCUS (``inbox.approval_controls``,
 # ``editor``, ``draw_command``), and DIGEST's history draws the board's authors and
-# the queue's command rows. Anything shared by two panes otherwise lives in a module
-# that is no pane's, as a command's clipboard text lives in ``command_view``.
+# the queue's command rows. DETAIL's thread of a link draws every text an agent wrote
+# through the board's ``author``, so that one renderer marks quoted text in every
+# pane. Anything shared by two panes otherwise lives in a module that is no pane's,
+# as a command's clipboard text lives in ``command_view``.
 PANE_IMPORTS = {
+    ("detail", "board_pane"),
     ("detail", "inbox"),
     ("digest_pane", "board_pane"),
     ("digest_pane", "inbox"),

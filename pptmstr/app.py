@@ -1296,8 +1296,9 @@ def _still_to_read(snap: Snapshot, wake: effects.SessionWoken) -> bool:
     """
     Whether ``wake`` still names something to wake for: every wake does but a
     peer message's, whose link may have been read, or closed, since it was
-    ordered, whose messages that are not quiet may have been withdrawn, and
-    whose decisions may have ended. Quiet mail alone wakes nobody, here as in
+    ordered, whose messages that are not quiet may have been withdrawn,
+    whose decisions may have ended, and whose questions owed an answer
+    (``Snapshot.peer_owing``) may have been answered. Quiet mail alone wakes nobody, here as in
     the store (``store._still_owed``).
     """
     if wake.reason is not effects.WakeReason.PEER_MESSAGE:
@@ -1306,6 +1307,7 @@ def _still_to_read(snap: Snapshot, wake: effects.SessionWoken) -> bool:
     return link is not None and bool(
         any(not c.quiet for c in snap.peer_unread(wake.session_id, link))
         or snap.peer_untold(wake.session_id, link)
+        or snap.peer_owing(wake.session_id, link)
     )
 
 
@@ -1454,89 +1456,149 @@ def _record_channels(state: AppState) -> Observer:
 
 
 def _read_channel_reports(
-    reports: tuple[channels.Outcome, ...], state: AppState | None = None
+    reports: tuple[channels.Report, ...], state: AppState | None = None
 ) -> None:
     """
-    Say each link fact that did not reach its log, on the draw thread. The
-    next start reads that link as its log was left: not live, where the stop
-    marker landed.
+    Say each link fact that did not reach its log, and what each relink's
+    sweep did, on the draw thread. The next start reads a link as its log was
+    left: not live, where the stop marker landed.
 
     **Put in front of the operator as well**, with ``state``
     (``_not_done``): a link or a close the operator made that holds for this
     run only is an act of theirs that did not take, and a line in LOG is in a
-    pane that is not resident. Not at shutdown, which passes no state: there is
-    no frame left to show it in. What each notice says is ``_report_notice``'s.
+    pane that is not resident. So is a sweep that left an earlier link it
+    could not close, or could not list the name's links: an earlier link may
+    then read live at the next start. Not at shutdown, which passes no state:
+    there is no frame left to show it in. What each notice says is
+    ``_not_written``'s and ``_sweep_notices``'.
     """
     for report in reports:
-        if isinstance(report.result, channels.NotAppended):
-            if state is not None:
-                _not_done(state, _report_notice(report))
-            if report.swept is not None and report.link == report.swept.made:
-                LOG.error(
-                    "channel",
-                    f"{report.link}: is linked, and no earlier link under #{report.link.name}"
-                    f" was checked or closed: {report.result.reason}",
-                )
-                continue
-            stopped = (
-                ""
-                if report.marker is None
-                else (
-                    "; its log says recording stopped"
-                    if isinstance(report.marker, channels.Appended)
-                    else f"; nor could its log be marked as stopped ({report.marker.reason})"
-                )
-            )
+        match report:
+            case channels.Outcome():
+                _read_outcome(report, state)
+            case channels.Swept():
+                _read_sweep(report, state)
+            case _:
+                assert_never(report)
+
+
+def _read_outcome(report: channels.Outcome, state: AppState | None) -> None:
+    """Say a submitted fact that did not reach its log; one that did is not said."""
+    if not isinstance(report.result, channels.NotAppended):
+        return
+    if state is not None:
+        _not_done(state, _not_written(report.link, type(report.fact), report.result.reason))
+    LOG.error(
+        "channel",
+        f"{report.link}: a {type(report.fact).__name__} did not reach the link's"
+        f" log: {report.result.reason}{_stopped(report.marker)}",
+    )
+
+
+def _stopped(marker: channels.Appended | channels.NotAppended | None) -> str:
+    """What a failed fact's report adds for the stop marker tried after it."""
+    match marker:
+        case None:
+            return ""
+        case channels.Appended():
+            return "; its log says recording stopped"
+        case channels.NotAppended():
+            return f"; nor could its log be marked as stopped ({marker.reason})"
+        case _:
+            assert_never(marker)
+
+
+def _read_sweep(report: channels.Swept, state: AppState | None) -> None:
+    """
+    Say what the sweep for ``report.made`` did: the earlier links it closed, in
+    LOG, and each it could not close, or that it could list none, in LOG and in
+    front of the operator. Every line names the earlier link or says none was
+    tried; none says ``made``'s own close failed, since nothing closed it.
+    """
+    made, name = report.made, report.made.name
+    if state is not None:
+        for notice in _sweep_notices(report):
+            _not_done(state, notice)
+    closes = report.closes
+    if isinstance(closes, channels.Unlisted):
+        LOG.error(
+            "channel",
+            f"{made}: was linked, and no earlier link under #{name} was checked or closed:"
+            f" the links under #{name} could not be listed ({closes.reason})",
+        )
+        return
+    closed = [str(c.link) for c in closes if isinstance(c.result, channels.Appended)]
+    if closed:
+        LOG.info(
+            "channel",
+            f"{made}: was linked, and closed the earlier link{'s' if len(closed) > 1 else ''}"
+            f" under #{name} that could read live again: {', '.join(closed)}",
+        )
+    for close in closes:
+        if isinstance(close.result, channels.NotAppended):
             LOG.error(
                 "channel",
-                f"{report.link}: a {type(report.fact).__name__} did not reach the link's"
-                f" log: {report.result.reason}{stopped}",
+                f"{close.link}: the close owed it when {made} was linked did not reach its"
+                f" log: {close.result.reason}{_stopped(close.marker)}",
             )
 
 
-def _report_notice(report: channels.Outcome) -> str:
-    """
-    What the operator is told of ``report``, a fact that did not reach its log.
+# What an earlier link a sweep did not close may do at the next start, said
+# without the new link's state, which the report does not know (``_sweep_notices``).
+_LEFT_LIVE = (
+    "{what} may read live at the next start, and if the link just made reads live"
+    " then too, the next start withholds every live link under #{name}"
+)
 
-    **A close is one of three things**, and the writer's report says which
-    (``Outcome.swept``). It is not read off the store when the report drains:
-    by then the operator may have closed the very link a sweep reported
-    against.
 
-    - not swept: the operator's own close, applied before it was queued
-      (``_not_written``);
-    - swept, against the link just made: the name's links could not be listed,
-      so whether any earlier link needed closing is unknown. The new link stays
-      linked for this run, and the next start may withhold it;
-    - swept, against an earlier link: its close did not land. The notice names
-      it by when it was made and says it is not the one just linked, since the
-      two share a name. When its stop marker did not land either, it may read
-      live at the next start, and then the new link is withheld with it.
+def _sweep_notices(report: channels.Swept) -> list[str]:
     """
-    reason = report.result.reason if isinstance(report.result, channels.NotAppended) else ""
-    swept, name, what = report.swept, report.link.name, drawable.text(reason)
-    if swept is None:
-        return _not_written(report.link, type(report.fact), reason)
-    if report.link == swept.made:
-        return (
-            f"#{name} is linked for this run; any earlier links under #{name} could not be"
-            f" checked, so none was closed ({what}); until #{name} is linked again, the next"
-            f" start may withhold it"
+    What the operator is told of a sweep: one notice when the name's links
+    could not be listed, one per earlier link it could not close, and nothing
+    for a close that landed.
+
+    Read off the report alone, never the store, and so worded to be true
+    whatever became of the link just made by the time it drains: the operator
+    may have closed it, and its own creation may not have reached its log
+    (``_not_written``, the next report drained). Each says what the earlier
+    links may do at the next start and leaves the new link's state alone:
+
+    - Unlisted: whether any earlier link needed closing is unknown, so one
+      left live may read live at the next start. Several live links under a
+      name are all withheld, so that is said as conditional on the new link
+      still reading live then, which it does not once closed or never written.
+    - An earlier link's close that did not land: the notice names the link by
+      when it was made and says it is not the one just linked, since the two
+      share a name. When its stop marker did not land either, it may read
+      live at the next start, on the same terms.
+    """
+    name = report.made.name
+    closes = report.closes
+    if isinstance(closes, channels.Unlisted):
+        return [
+            f"#{name} was linked, but the earlier links under #{name} could not be listed"
+            f" ({drawable.text(closes.reason)}), so none was checked or closed; until #{name}"
+            f" is linked again, {_LEFT_LIVE.format(what='any of them left live', name=name)}"
+        ]
+    said: list[str] = []
+    for close in closes:
+        if not isinstance(close.result, channels.NotAppended):
+            continue
+        made = (
+            "its creation unreadable"
+            if close.created_at is None
+            else f"made {time.strftime('%Y-%m-%d %H:%M', time.localtime(close.created_at))}"
         )
-    made = (
-        "its creation unreadable"
-        if swept.created_at is None
-        else f"made {time.strftime('%Y-%m-%d %H:%M', time.localtime(swept.created_at))}"
-    )
-    said = (
-        f"an earlier link under #{name} ({made}, not the one just linked) could not be"
-        f" closed: {what}"
-    )
-    if not isinstance(report.marker, channels.Appended):
-        said += (
-            f"; nor could it be marked as stopped, so until #{name} is linked again, the next"
-            f" start may withhold #{name}"
+        notice = (
+            f"an earlier link under #{name} ({made}, not the one just linked) could not be"
+            f" closed: {drawable.text(close.result.reason)}"
         )
+        if not isinstance(close.marker, channels.Appended):
+            notice += (
+                f"; nor could it be marked as stopped, so until #{name} is linked again,"
+                f" {_LEFT_LIVE.format(what='it', name=name)}"
+            )
+        said.append(notice)
     return said
 
 
@@ -3700,6 +3762,46 @@ def _show_health(state: AppState, node: NodeId) -> None:
     state.pending_pane = "HEALTH"
 
 
+def _go_to_session(state: AppState, node: NodeId) -> None:
+    """
+    Bring a session to the front from a row that names it: the cursor on that
+    session, through the call a click on its card makes, FOCUS, whose main
+    space is the session's conversation (``_focus_layout``), and SESSION in
+    front of whatever the operator has docked beside it there. A session that
+    owes something puts the cursor on what it owes, as that click would, and
+    the conversation follows the cursor.
+    """
+    snap = state.frame_snap
+    if snap is None:
+        return
+    state.focus.to_node(snap, (node[0], None), scope=focus_mod.Scope.SESSION)
+    if hello_imgui.current_layout_name() != FOCUS:
+        state.pending_layout = FOCUS
+    state.pending_pane = "SESSION"
+
+
+def _show_thread(state: AppState) -> None:
+    """
+    Bring DETAIL in front after a click on a card's channel line, which has
+    already pointed the cursor at the link (``rail._tail``): DETAIL draws the
+    link's thread, and in FOCUS it shares its space with HEALTH. The layout is
+    left as it is, since both layouts dock DETAIL.
+    """
+    state.pending_pane = "DETAIL"
+
+
+def _resume_session(state: AppState, node: NodeId) -> None:
+    """
+    Open the resume form for the session a row names, as its card's
+    "Resume…" does (``_open_resume``). Nothing for a session the store holds
+    no root for: there is no card to resume from.
+    """
+    snap = state.frame_snap
+    rec = None if snap is None else snap.get((node[0], None))
+    if rec is not None:
+        _open_resume(state, rec)
+
+
 def _card_actions(state: AppState) -> session_menu.Actions:
     """
     What a card's menu calls: the functions the other surfaces are handed.
@@ -4612,6 +4714,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 hide_ended=state.settings.hide_ended_subagents,
                 now_wall=state.frame_wall,
                 new_task=lambda: _perform(state, main_menu.NewTask()),
+                link_opened=lambda: _show_thread(state),
             )
 
     def inbox_pane() -> None:
@@ -4629,6 +4732,8 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 close=lambda node: _close(state, node),
                 dismiss=lambda node: _dismiss(state, node),
                 relaunch=lambda spec: _relaunch(state, spec),
+                go_to=lambda node: _go_to_session(state, node),
+                resume=lambda node: _resume_session(state, node),
             ),
             state.frame_now,
             wrap=state.settings.wrap_inputs,

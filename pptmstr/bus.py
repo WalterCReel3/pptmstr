@@ -66,13 +66,13 @@ import dataclasses
 import re
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, assert_never
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from . import boardgraph, brief
+from . import boardgraph, brief, drawable
 from .board import (
     UNDELIVERABLE,
     BoardConcern,
@@ -119,6 +119,7 @@ from .digest import (
     unverified_heading,
     unverified_label,
 )
+from .effects import PEER_TITLE_CHARS as PEER_TITLE_CHARS
 from .effects import (
     BoardDelivered,
     ClaimSettled,
@@ -127,15 +128,20 @@ from .effects import (
     DigestDelivered,
     Effect,
     InboxDelivered,
+    PeerIdentity,
     PeerInboxDelivered,
     PeerSettled,
+    PeerWithdrawSettled,
     SessionWoken,
     TaskWriteSettled,
     WakeReason,
+    peer_identity,
+    peer_text,
 )
 from .intents import (
     BoardRead,
     ConcernPosted,
+    ConcernWithdrawn,
     DecisionRaised,
     DecisionsRead,
     DecisionWithdrawn,
@@ -163,6 +169,7 @@ from .model import (
     MAX_WITHDRAWAL_REASON_CHARS,
     Answered,
     Basis,
+    CitedQuestion,
     ClaimRefusal,
     Concern,
     ConcernId,
@@ -173,6 +180,7 @@ from .model import (
     NodeId,
     ObligationKind,
     PeerRefusal,
+    PeerWithdrawRefusal,
     Provenance,
     Snapshot,
     Standing,
@@ -2724,7 +2732,11 @@ def _blocks_said(blocks: Sequence[TaskId]) -> str:
 
 
 def _decision_refusal_text(
-    refusal: DecisionRefusal, decision_id: str, root: bool, strangers: Sequence[TaskId] = ()
+    refusal: DecisionRefusal,
+    decision_id: str,
+    root: bool,
+    strangers: Sequence[TaskId] = (),
+    now_on: PeerIdentity | None = None,
 ) -> str:
     """
     Why a raise or a withdrawal did not take effect, and what to do instead.
@@ -2741,7 +2753,9 @@ def _decision_refusal_text(
     its session, so it is told which.
 
     ``strangers`` is the entries of ``blocks`` the board does not have, when the
-    caller found out which.
+    caller found out which. ``now_on`` is the lead on the live link of that
+    name now, which the store names on ``LINKED_AFTER``
+    (``DecisionSettled.peer``).
     """
     match refusal:
         case DecisionRefusal.TOO_MANY_OPEN:
@@ -2786,8 +2800,9 @@ def _decision_refusal_text(
             return (
                 "The live link of that name went live after you made this call, so "
                 "it is not a link you could have raised this for, and its lead may "
-                "not be the one you meant. read_peer_messages lists your session's "
-                "live links; raise it again if it is for the lead on that one."
+                f"not be the one you meant: {_linked_now(now_on)} read_peer_messages "
+                "lists your session's live links; raise it again if it is for the "
+                "lead on that one."
             )
         case DecisionRefusal.ALREADY_RAISED:
             return "The id generated for it was already in use. Call again; nothing changed."
@@ -3087,6 +3102,7 @@ def _decisions_text(
     now: float,
     reader: NodeId,
     role_of: Callable[[NodeId], str],
+    peers: Mapping[str, PeerIdentity] | None = None,
 ) -> str:
     """
     The reply to ``read_decisions``: one decision whole when an id was given,
@@ -3094,7 +3110,8 @@ def _decisions_text(
 
     ``shown`` is what the store handed over -- the reader's own, and for the
     root of a session every decision raised in it. ``role_of`` names the asker
-    of one that is not the reader's.
+    of one that is not the reader's, and ``peers`` the lead of another session
+    that raised one over a link (``DecisionsDelivered.peers``).
 
     **Both forms fit ``_MAX_BOARD_CHARS``.** The read by id fits by what a
     decision may hold (``_DECISION_FRAME_CHARS``). The list is filled against
@@ -3110,7 +3127,8 @@ def _decisions_text(
             # The store hands another session's decision only to a member of
             # the live link it was raised over, and its name was checked to be
             # one a channel can have.
-            return f"the lead on #{_named(decision.channel)}"
+            peer = (peers or {}).get(decision.session_id, PeerIdentity(session=decision.session_id))
+            return f"the lead on #{_named(decision.channel)} ({peer_said(peer)})"
         return _one_line(role_of(decision.asker))[:_MAX_ROLE_CHARS]
 
     if wanted is not None:
@@ -3130,16 +3148,16 @@ def _decisions_text(
 
     mine = [d for d in shown if d.asker == reader]
     still = sum(1 for d in shown if d.is_open)
-    peers = sum(1 for d in shown if d.session_id != reader[0])
+    across = sum(1 for d in shown if d.session_id != reader[0])
     counted = (
         f"Your session has {len(shown)} decision(s), {still} still open; "
         f"{len(mine)} of them you raised yourself. As the session's lead you are "
         f"shown every one, each marked with who raised it."
-        if root and not peers
+        if root and not across
         else (
             (
                 f"You are shown {len(shown)} decision(s), {still} still open; "
-                f"{len(mine)} of them you raised yourself, and {peers} the lead on the "
+                f"{len(mine)} of them you raised yourself, and {across} the lead on the "
                 f"other end of a channel raised, shown while that link is open. As the "
                 f"session's lead you are shown every one raised in your session too, "
                 f"each marked with who raised it."
@@ -3652,8 +3670,14 @@ def _stated_peer_message(args: Mapping[str, Any]) -> _PeerMessage | str:
     return _PeerMessage(channel, subject, body, flags["needs_answer"], answers, flags["quiet"])
 
 
-def _peer_refusal_text(refusal: PeerRefusal, channel: str) -> str:
-    """The sentence a lead is told when its message to a peer was not sent."""
+def _peer_refusal_text(
+    refusal: PeerRefusal, channel: str, now_on: PeerIdentity | None = None
+) -> str:
+    """
+    The sentence a lead is told when its message to a peer was not sent.
+    ``now_on`` is the lead on the live link of that name now, which the store
+    names on ``LINKED_AFTER`` (``PeerSettled.recipient``).
+    """
     on = f"#{_named(channel)}"
     match refusal:
         case PeerRefusal.NOT_A_LEAD:
@@ -3677,8 +3701,9 @@ def _peer_refusal_text(refusal: PeerRefusal, channel: str) -> str:
             return (
                 f"The live link named {on} went live after you made this call, so it "
                 f"is not a link you could have written this for, and its lead may not "
-                f"be the one you meant. read_peer_messages lists your session's live "
-                f"links; send it again if it is for the lead on that one."
+                f"be the one you meant: {_linked_now(now_on)} read_peer_messages lists "
+                f"your session's live links; send it again if it is for the lead on "
+                f"that one."
             )
         case PeerRefusal.OTHER_LINK:
             return (
@@ -3699,50 +3724,302 @@ def _peer_refusal_text(refusal: PeerRefusal, channel: str) -> str:
             assert_never(refusal)
 
 
-def _peer_messages_text(answer: PeerInboxDelivered, named: str | None) -> str:
+def _withdraw_refusal_text(refusal: PeerWithdrawRefusal, message: str) -> str:
+    """
+    The sentence a lead is told when its withdrawal of a peer message was refused.
+    """
+    match refusal:
+        case PeerWithdrawRefusal.NOT_YOURS:
+            # One sentence for an id nobody holds and a message someone else
+            # sent, so trying an id tells a lead nothing about it.
+            return (
+                f"Your session sent no message {message} that this run holds. Only "
+                f"a message's sender withdraws it: a message sent to you is answered "
+                f"or left, and ask the operator to stop one that is not yours."
+            )
+        case PeerWithdrawRefusal.NOT_A_MEMBER:
+            return (
+                "The link it was sent over is closed, or your session is no longer "
+                "on it, so nothing reaches its lead through that link now."
+            )
+        case PeerWithdrawRefusal.WITHDRAWN:
+            return "It is already withdrawn."
+        case PeerWithdrawRefusal.ANSWERED:
+            return (
+                "Its recipient has already answered it, and the answer names it as "
+                "its re. Send a message on the same channel if what you asked has "
+                "changed."
+            )
+        case PeerWithdrawRefusal.ALREADY_READ:
+            return "It is mail inside your team, and its recipient has read it."
+        case PeerWithdrawRefusal.TEAM_MAIL:
+            return (
+                "It is mail inside your team, not a message to another team's lead, "
+                "and withdraw_peer_message withdraws only those. Send its recipient "
+                "a concern saying it no longer stands."
+            )
+        case PeerWithdrawRefusal.NOT_APPLIED:
+            return _refusal_text(TaskRefusal.NOT_APPLIED)
+        case _:
+            assert_never(refusal)
+
+
+def _withdrawn_message_lines(c: Concern, peers: Mapping[str, PeerIdentity]) -> list[str]:
+    """
+    One peer message the reader was handed and its sender then withdrew, as a
+    ``read_peer_messages`` reply lists it: a header naming the lead that
+    withdrew it, then the reason it gave behind that lead's mark. Its body is
+    not shown again: the reader was handed it once.
+    """
+    channel = f"#{_named(c.channel or '')}"
+    sender = peers.get(c.sender[0], PeerIdentity(session=c.sender[0]))
+    said = [channel, f"message {_named(c.id)}", "WITHDRAWN BY ITS SENDER"]
+    if c.needs_answer:
+        said.append("no answer is owed")
+    # None is a withdrawal this run did not see, restored from the log, which
+    # keeps no reason; "" is one in this run that gave none.
+    reason = c.withdrawn_reason
+    if reason is None:
+        why = ["Its reason is not kept across a restart."]
+    elif not reason.strip():
+        why = ["Its sender gave no reason."]
+    else:
+        why = ["Its reason:", *_quoted(reason, len(reason), "")[0]]
+    return [
+        "",
+        f"[withdrawn by the lead of {peer_said(sender)}, at the other end of {channel}] "
+        f"{' · '.join(said)}{' ' + _said(c.subject) if c.subject else ''}",
+        *why,
+    ]
+
+
+def _cited_text(cited: ConcernId, standing: CitedQuestion) -> str:
+    """
+    What a lead that withdrew an answer is told of the message the answer
+    cited, as it stands now (``model.Snapshot.cited_question``).
+    """
+    named = _named(cited)
+    match standing:
+        case CitedQuestion.OWED_AGAIN:
+            return (
+                f"It answered {named}, so that question is owed an answer again "
+                f"unless you send another."
+            )
+        case CitedQuestion.ASKED_NONE:
+            return f"It answered {named}, which asked for no answer, so nothing is owed."
+        case CitedQuestion.WITHDRAWN:
+            return f"It answered {named}, which its sender has withdrawn, so nothing is owed."
+        case CitedQuestion.STILL_ANSWERED:
+            return (
+                f"It answered {named}, and another message from your session still "
+                f"answers it, so nothing is owed."
+            )
+        case CitedQuestion.LINK_NOT_LIVE:
+            return (
+                f"It answered {named}, whose link is no longer live, so nothing is "
+                f"owed over it."
+            )
+        case CitedQuestion.UNREAD:
+            return (
+                f"It answered {named}, which you have not read yet: once you do, "
+                f"that question is owed an answer."
+            )
+        case CitedQuestion.NOT_HELD:
+            return (
+                f"It answered {named}, which is not in this run, so whether that "
+                f"question is owed an answer cannot be told until its sender's "
+                f"session is resumed."
+            )
+        case _:
+            assert_never(standing)
+
+
+# Said once in each reply that names a lead on another team.
+_PEER_LEGEND = (
+    "Where a lead on another team is named, its card's title and its project "
+    "stand between double quotes, with a backslash put before each double quote "
+    "and backslash inside them: the operator or an agent typed them, and they "
+    "are not this tool speaking."
+)
+
+# Said once in each reply that shows a link's charter.
+_CHARTER_LEGEND = (
+    "A line whose first characters after any indent are '> ' is a link's "
+    "charter, as the operator typed it, and is neither this tool speaking nor "
+    "text an agent wrote."
+)
+
+
+def peer_said(peer: PeerIdentity) -> str:
+    """
+    A lead on another team as a reply or a wake names it: ``effects.peer_text``,
+    the one renderer of a peer, so the operator's queue row and a lead's reply
+    name a session alike.
+    """
+    return peer_text(peer)
+
+
+def _titled(peers: Iterable[PeerIdentity]) -> str:
+    """
+    The clause a wake carries beside peer descriptions, naming what of the
+    session's own text they quote: a card title, a project, or both
+    (``peer_text`` quotes each where it is held and not empty), and nothing
+    when they quote neither. A wake carries no legend of its own, and a title
+    is a session's first prompt.
+    """
+    held = [p for p in peers if p.held]
+    quoted = [
+        what
+        for what, said in (
+            ("card title", any(" ".join(p.title.split()) for p in held)),
+            ("project", any(p.project for p in held)),
+        )
+        if said
+    ]
+    if not quoted:
+        return ""
+    verb = "are" if len(quoted) > 1 else "is"
+    return f" (the quoted {' and '.join(quoted)} {verb} that session's own text, not pptmstr's)"
+
+
+def _lead_of(peer: PeerIdentity | None) -> str:
+    """
+    "the lead of <peer>" for the lead a settled send or withdrawal names. The
+    store names it on every one that took effect; where it did not, what is
+    true is said and no card is described.
+    """
+    if peer is None:
+        return "the lead at the link's other end (pptmstr did not say which)"
+    return f"the lead of {peer_said(peer)}"
+
+
+def _linked_now(peer: PeerIdentity | None) -> str:
+    """
+    The sentence a ``LINKED_AFTER`` refusal names the lead on the link with
+    now, ending in its full stop: ``peer`` as the store named it, or that it
+    did not.
+    """
+    if peer is None:
+        return "which lead is on it now was not said."
+    return f"it links you now to the lead of {peer_said(peer)}. {_PEER_LEGEND}"
+
+
+def _links_lines(answer: PeerInboxDelivered, reader: str) -> list[str]:
+    """
+    The links a ``read_peer_messages`` reply lists: each by name, with the lead
+    at its other end (``peer_said``) and its charter behind the operator's mark,
+    or "(no charter)" where the operator gave none. The charter is held
+    verbatim (``store._VERBATIM``) and made drawable here.
+    """
+    if not answer.links:
+        return ["Your session has no live link."]
+    peers = {p.session: p for p in answer.peers}
+    chartered = any(link.charter.strip() for link in answer.links)
+    legend = f"{_PEER_LEGEND} {_CHARTER_LEGEND}" if chartered else _PEER_LEGEND
+    lines = [f"Your session's live links. {legend}"]
+    for link in answer.links:
+        others = sorted(link.members - {reader}) or sorted(link.members)
+        who = " and ".join(
+            f"the lead of {peer_said(peers.get(m, PeerIdentity(session=m)))}" for m in others
+        )
+        if not link.charter.strip():
+            lines.append(f"- #{_named(link.name)}: {who}. (no charter)")
+            continue
+        lines.append(f"- #{_named(link.name)}: {who}. Charter:")
+        charter = drawable.text(link.charter)
+        lines += _quoted(charter, len(charter), "    ", mark=_ANSWER)[0]
+    return lines
+
+
+def _peer_message_lines(
+    c: Concern, peers: Mapping[str, PeerIdentity], owed: bool = False
+) -> list[str]:
+    """
+    One peer message as a ``read_peer_messages`` reply shows it: a header
+    naming the lead that sent it, then its text behind the sender's mark.
+    ``owed`` is a question handed over by an earlier read and not answered,
+    and its header says so in place of asking for an answer afresh.
+    """
+    # The channel came from a log as surely as the body did: named, so a
+    # record whose channel is not a name cannot finish the header for it.
+    channel = f"#{_named(c.channel or '')}"
+    said = [channel, f"message {_named(c.id)}"]
+    if c.re is not None:
+        said.append(f"answers {_named(c.re)}")
+    if owed:
+        said.append("ALREADY READ, STILL OWED AN ANSWER")
+    elif c.needs_answer:
+        said.append("NEEDS AN ANSWER")
+    if c.quiet:
+        said.append("sent quiet: it asks nothing")
+    sender = peers.get(c.sender[0], PeerIdentity(session=c.sender[0]))
+    return [
+        "",
+        f"[from the lead of {peer_said(sender)}, at the other end of "
+        f"{channel}{_edited_note(c.edited)}] "
+        f"{' · '.join(said)}{' ' + _said(c.subject) if c.subject else ''}",
+        *_quoted(c.body, len(c.body), "")[0],
+    ]
+
+
+def _peer_messages_text(answer: PeerInboxDelivered, named: str | None, reader: str) -> str:
     """
     A ``read_peer_messages`` reply: the messages handed over, quoted behind the
-    sender's mark like any agent's words; what a link not live in this run
-    holds back, counted and never shown; and the links the reader is on.
+    sender's mark like any agent's words and headed by the lead that sent them;
+    the questions an earlier read handed over that the reader has not answered,
+    shown again the same way and marked as already read; the messages an
+    earlier read handed over that their sender has since withdrawn, once each,
+    with the sender's reason quoted as its words; what a link not live
+    in this run holds back, counted and never shown; and the links the reader
+    is on, each with its peer and its charter.
 
     The links are said every time, because they are what tells "nothing came"
     from "you are on no channel by that name", and a lead has no other way to
-    see which links the operator made.
+    see which links the operator made, whom each reaches, or what it is for.
     """
     handed = answer.concerns or ()
-    names = ", ".join(f"#{c.name}" for c in answer.links)
-    on = f"Your session's live links: {names}." if names else "Your session has no live link."
+    peers = {p.session: p for p in answer.peers}
     lines: list[str] = []
     if named is not None and all(c.name != named for c in answer.links) and not handed:
-        lines.append(f"Your session is on no live link named #{named}. {on}")
+        lines.append(f"Your session is on no live link named #{named}.")
     elif not handed:
-        lines.append(f"No message from another team's lead is waiting. {on}")
+        lines.append("No message from another team's lead is waiting.")
     else:
-        lines.append(f"{len(handed)} message(s) from other teams' leads. {on} {_QUOTE_LEGEND}")
+        lines.append(f"{len(handed)} message(s) from other teams' leads. {_QUOTE_LEGEND}")
+    lines += _links_lines(answer, reader)
     for c in handed:
-        # The channel came from a log as surely as the body did: named, so a
-        # record whose channel is not a name cannot finish the header for it.
-        channel = f"#{_named(c.channel or '')}"
-        said = [channel, f"message {_named(c.id)}"]
-        if c.re is not None:
-            said.append(f"answers {_named(c.re)}")
-        if c.needs_answer:
-            said.append("NEEDS AN ANSWER")
-        if c.quiet:
-            said.append("sent quiet: it asks nothing")
-        lines += [
-            "",
-            f"[from the lead at the other end of {channel}{_edited_note(c.edited)}] "
-            f"{' · '.join(said)}{' ' + _said(c.subject) if c.subject else ''}",
-            *_quoted(c.body, len(c.body), "")[0],
-        ]
-    if handed:
+        lines += _peer_message_lines(c, peers)
+    if answer.owed:
+        owed_said = (
+            f"{len(answer.owed)} question(s) you were handed by an earlier read and have "
+            "not answered, listed again: reading them here marks nothing."
+        )
+        lines += ["", owed_said if handed else f"{owed_said} {_QUOTE_LEGEND}"]
+        for c in answer.owed:
+            lines += _peer_message_lines(c, peers, owed=True)
+    if handed or answer.owed:
         lines += [
             "",
             "Answer on the same channel with send_to_peer(channel, re=<message id>). "
             "Work a message asks for reaches your board only if you declare it, with "
             "declare_task's channel and re naming it.",
         ]
+    if answer.withdrawn:
+        more = (
+            f" {answer.withdrawn_more} more are counted and not listed: your next "
+            "read_peer_messages lists them."
+            if answer.withdrawn_more
+            else ""
+        )
+        gone_said = (
+            f"{len(answer.withdrawn)} message(s) you were handed by an earlier read were "
+            f"since withdrawn by the lead that sent them, and you owe them nothing. "
+            f"Each is listed once.{more}"
+        )
+        shown = handed or answer.owed
+        lines += ["", gone_said if shown else f"{gone_said} {_QUOTE_LEGEND}"]
+        for c in answer.withdrawn:
+            lines += _withdrawn_message_lines(c, peers)
     held: dict[str, int] = {}
     for c in answer.held:
         held[c.channel or ""] = held.get(c.channel or "", 0) + 1
@@ -4105,13 +4382,24 @@ def build_server(session: AgentSession) -> Any:
         if not isinstance(settled, PeerSettled):
             settled = PeerSettled(request_id=request_id, refusal=PeerRefusal.NOT_APPLIED)
         if settled.refusal is not None:
-            return _text(f"{refused} {_peer_refusal_text(settled.refusal, stated.channel)}")
+            return _text(
+                f"{refused} "
+                f"{_peer_refusal_text(settled.refusal, stated.channel, settled.recipient)}"
+            )
+        cited = "" if stated.re is None else _named(stated.re)
+        withdrawn = {
+            None: "",
+            True: f" The message it answers, {cited}, was withdrawn by the lead that sent "
+            f"it after its lead read it: no answer to it is owed, and this one was sent anyway.",
+            False: f" The message it answers, {cited}, was withdrawn before it was read; "
+            f"this one was sent anyway.",
+        }[settled.re_withdrawn]
         return _text(
-            f"Message {concern_id} sent on #{stated.channel} to the lead of session "
-            f"{_named(settled.recipient or '?')}. It is filed in your session's log and "
+            f"Message {concern_id} sent on #{stated.channel} to "
+            f"{_lead_of(settled.recipient)}. {_PEER_LEGEND} It is filed in your session's log and "
             f"waits until that lead calls read_peer_messages; nothing tells you when it "
             f"is read. {_peer_wake_said(stated.quiet)} If they answer, their message "
-            f"names {concern_id} as its re."
+            f"names {concern_id} as its re.{withdrawn}"
         )
 
     @tool(
@@ -4124,7 +4412,9 @@ def build_server(session: AgentSession) -> Any:
         "board only if you declare it, with declare_task's channel and re. A "
         "message that is not quiet wakes you: pptmstr sends you a message of its "
         "own saying how many wait on which channel, never their text. A quiet one "
-        "does not, and is read with the rest whenever you next call this.",
+        "does not, and is read with the rest whenever you next call this. After "
+        "the new messages it lists again each question you were handed earlier and "
+        "have not answered, marked as already read; that marks nothing.",
         _schema(
             {
                 "channel": {
@@ -4165,7 +4455,88 @@ def build_server(session: AgentSession) -> Any:
             return _text(
                 f"Your peer messages were NOT read. {_refusal_text(TaskRefusal.NOT_APPLIED)}"
             )
-        return _text(_peer_messages_text(answer, named))
+        return _text(_peer_messages_text(answer, named, me[0]))
+
+    @tool(
+        "withdraw_peer_message",
+        "Withdraw a message YOU sent to another team's lead with send_to_peer. If "
+        "that lead has not read it, it never arrives. If it has, its next "
+        "read_peer_messages says you withdrew it, with your reason quoted as yours "
+        "if you gave one, and a question you withdraw is no longer owed an answer; "
+        "it is not woken for it. A reason is text that lead reads, so a withdrawal "
+        "that gives one waits for the operator's approval wherever send_to_peer "
+        "does; one without a reason never waits. Only a message's sender can "
+        "withdraw it, only over a link your session is still on, and not once it "
+        "has been answered.",
+        _schema(
+            {
+                "message_id": {
+                    "type": "string",
+                    "description": ("The id send_to_peer gave the message (c- and 12 hex digits)."),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Optional: why you are withdrawing it, quoted to the other "
+                        "lead if it had read the message. Giving one makes the call "
+                        "wait for the operator where send_to_peer would. "
+                        f"At most {MAX_WITHDRAWAL_REASON_CHARS} characters."
+                    ),
+                },
+            },
+            required=("message_id",),
+        ),
+    )
+    async def withdraw_peer_message(args: dict[str, Any]) -> dict[str, Any]:
+        me = _sender(args)
+        message_id = str(args.get("message_id") or "").strip()
+        named = _named(message_id[:MAX_ID_CHARS])
+        refused = f"Message {named} was NOT withdrawn."
+        if me[1] is not None:
+            return _text(
+                f"{refused} Messages between teams are sent and withdrawn by a "
+                f"session's lead and no other agent. Ask your lead with post_concern."
+            )
+        # A blank reason is none, as the gate reads it (``approval
+        # ._reviewed_by_arguments``): a call the gate let through unparked
+        # for having no reason hands the other lead no words.
+        reason = str(args.get("reason") or "")
+        reason = reason if reason.strip() else ""
+        too_long = _length_refusal("reason", reason, MAX_WITHDRAWAL_REASON_CHARS)
+        if too_long is not None:
+            return _text(f"{refused} {too_long}")
+        request_id = f"x-{uuid.uuid4().hex[:12]}"
+        future = bridge.ask(
+            request_id,
+            PeerWithdrawSettled(request_id=request_id, refusal=PeerWithdrawRefusal.NOT_APPLIED),
+        )
+        bridge.emit(
+            ConcernWithdrawn(
+                message_id, reason=reason, node_id=me, request_id=request_id, peer_only=True
+            )
+        )
+        settled = await future
+        if not isinstance(settled, PeerWithdrawSettled):
+            settled = PeerWithdrawSettled(
+                request_id=request_id, refusal=PeerWithdrawRefusal.NOT_APPLIED
+            )
+        if settled.refusal is not None:
+            return _text(f"{refused} {_withdraw_refusal_text(settled.refusal, named)}")
+        said = [
+            f"Message {named} on #{_named(settled.channel or '')} to "
+            f"{_lead_of(settled.recipient)} is withdrawn. {_PEER_LEGEND}"
+        ]
+        if settled.read:
+            said.append(
+                "That lead had already read it: its next read_peer_messages says you "
+                f"withdrew it, {'with your reason' if reason else 'and that you gave no reason'}"
+                ", and nothing wakes it for that. It owes no answer to it."
+            )
+        else:
+            said.append("That lead had not read it, and it never arrives.")
+        if settled.answers is not None and settled.cited is not None:
+            said.append(_cited_text(settled.answers, settled.cited))
+        return _text(" ".join(said))
 
     @tool(
         "claim_task",
@@ -5252,8 +5623,9 @@ def build_server(session: AgentSession) -> Any:
             on_board = await board_ids(me)
             strangers = () if on_board is None else tuple(b for b in blocks if b not in on_board)
             return _text(f"{refused} {_decision_refusal_text(why, decision_id, root, strangers)}")
+        peer = settled.peer if isinstance(settled, DecisionSettled) else None
         if why is not None:
-            return _text(f"{refused} {_decision_refusal_text(why, decision_id, root)}")
+            return _text(f"{refused} {_decision_refusal_text(why, decision_id, root, now_on=peer)}")
         said = [
             f"Decision {decision_id} is in front of the operator "
             f"({_standing_said(standing, 'you')}; reversible: "
@@ -5269,8 +5641,8 @@ def build_server(session: AgentSession) -> Any:
         ]
         if channel is not None:
             said.append(
-                f"It is raised on #{channel}: the other lead on that link can read it "
-                f"and its answer with read_decisions while the link is open. If its "
+                f"It is raised on #{channel}: {_lead_of(peer)} can read it and its "
+                f"answer with read_decisions while the link is open. {_PEER_LEGEND} If its "
                 f"session is running, pptmstr wakes that lead with a message naming "
                 f"this decision's id and not its text, and wakes it again when the "
                 f"operator answers or dismisses it."
@@ -5328,6 +5700,7 @@ def build_server(session: AgentSession) -> Any:
                 now,
                 me,
                 lambda node: session.role_of(node) or "another agent",
+                {peer.session: peer for peer in answer.peers},
             )
         )
 
@@ -5371,6 +5744,7 @@ def build_server(session: AgentSession) -> Any:
         read_inbox,
         send_to_peer,
         read_peer_messages,
+        withdraw_peer_message,
         read_board,
         read_task,
         read_digest,
@@ -5430,11 +5804,13 @@ BUS_TOOLS = frozenset(
     )
 )
 
-# The two tools between leads of linked sessions. On every session's server and
+# The three tools between leads of linked sessions. On every session's server and
 # stamped like the rest, and apart from ``BUS_TOOLS`` because that list is also
 # what every restricted role is given (``templates.BUS_TOOL_NAMES``): a worker has
 # no peer to write to, and its handler refuses one that calls them anyway.
-PEER_TOOLS = frozenset(qualified(name) for name in ("send_to_peer", "read_peer_messages"))
+PEER_TOOLS = frozenset(
+    qualified(name) for name in ("send_to_peer", "read_peer_messages", "withdraw_peer_message")
+)
 
 # The three tools only a contained session's server has, which the gate stamps
 # for that session and for no other. Spelled here and not read off
@@ -5480,6 +5856,12 @@ WAKE_HEADING = "This message is from pptmstr, not from the operator. Waiting for
 # reads it by id whether it was named or not. The woken session's own
 # decisions are never folded: its lead asked them, and each is named.
 WAKE_DECISIONS_NAMED = 3
+
+# How many questions a lead was handed on a link and owes an answer to its
+# settle's wake names by id (``Snapshot.peer_owing``) before the rest are
+# counted. The same bound for the same reason: the ids past it are in the
+# reply ``read_peer_messages`` gives on that channel, each with its text.
+WAKE_QUESTIONS_NAMED = WAKE_DECISIONS_NAMED
 
 # What a tool reply says about being woken, to the session's lead and to a
 # sub-agent. Concerns between workers wake nobody, and neither does anything
@@ -5528,11 +5910,12 @@ def wake_message(snap: Snapshot, wakes: Sequence[SessionWoken]) -> str:
 
     The operator's answers and dismissals of decisions the lead across a
     channel raised are named up to ``WAKE_DECISIONS_NAMED`` and the rest
-    counted on one line after them.
+    counted on one line after them, which names the lead of each session that
+    raised one of the counted.
     """
     lines = [WAKE_HEADING]
     seen: set[tuple[WakeReason, str]] = set()
-    folded = 0
+    folded: dict[str, int] = {}
     named = 0
     for wake in wakes:
         key = (wake.reason, wake.subject_id)
@@ -5541,14 +5924,17 @@ def wake_message(snap: Snapshot, wakes: Sequence[SessionWoken]) -> str:
         seen.add(key)
         if _across_a_link(snap, wake):
             if named >= WAKE_DECISIONS_NAMED:
-                folded += 1
+                raiser = snap.decisions[wake.subject_id].session_id
+                folded[raiser] = folded.get(raiser, 0) + 1
                 continue
             named += 1
         lines.append(f"- {wake_line(snap, wake)}")
     if folded:
+        peers = [peer_identity(snap, raiser) for raiser in sorted(folded)]
+        who = " and ".join(f"the lead of {peer_said(peer)}" for peer in peers)
         lines.append(
-            f"- and {folded} more decision(s) the lead linked to you raised were answered "
-            "or dismissed; read_decisions to see them."
+            f"- and {sum(folded.values())} more decision(s) that {who}{_titled(peers)} "
+            "raised were answered or dismissed; read_decisions to see them."
         )
     return "\n".join(lines)
 
@@ -5582,9 +5968,10 @@ def wake_line(snap: Snapshot, wake: SessionWoken) -> str:
             whose = _relayed(snap, decision.asker if decision is not None else None)
             if decision is not None and decision.channel is not None:
                 if decision.session_id != wake.session_id:
+                    peer = peer_identity(snap, decision.session_id)
                     whose = (
-                        f" on #{_one_line(decision.channel)}, which the lead linked to you "
-                        "raised,"
+                        f" on #{_one_line(decision.channel)}, which the lead of "
+                        f"{peer_said(peer)}{_titled([peer])} raised,"
                     )
             return (
                 f'decision {said}{whose} was {how}. read_decisions(decision_id="{said}") '
@@ -5611,9 +5998,11 @@ def peer_wake_line(snap: Snapshot, wake: SessionWoken) -> str:
     """
     A peer message's wake (Decided 10): how many messages wait for the lead on
     the link, counted when the wake is sent and not when it was ordered, so a
-    burst coalesced into one wake is counted whole. Never a message's text, nor
-    its sender's words in any form: what a linked lead wrote is read with
-    ``read_peer_messages``, quoted as theirs.
+    burst coalesced into one wake is counted whole, and which lead is at the
+    link's other end (``peer_said``), its card's title and project quoted as
+    typed and said to be that session's own text (``_titled``). Never a
+    message's text, nor its sender's words in any form: what a linked lead
+    wrote is read with ``read_peer_messages``, quoted as theirs.
 
     The decisions raised on the link that the lead is owed a wake for
     (``Snapshot.peer_untold``) are named after the count, by id and never by
@@ -5623,6 +6012,14 @@ def peer_wake_line(snap: Snapshot, wake: SessionWoken) -> str:
     counted ones too: a wake left owed for them would be asked again, counted
     toward the link's chain, for decisions this line already sent the lead to
     ``read_decisions`` for.
+
+    A settle's wake names the questions the lead was handed on the link and
+    has not answered (``Snapshot.peer_owing``), by id, at most
+    ``WAKE_QUESTIONS_NAMED`` and the rest counted, and says that a read of
+    the channel lists them again; the count is left out when nothing else
+    waits. Nothing is reported told for them: the store names them only at a
+    settle, an asker's restore or the operator's release of a held wake
+    (``model.PeerWakes.owing``).
     """
     link = snap.channels.get(wake.subject_id)
     if link is None:
@@ -5630,12 +6027,27 @@ def peer_wake_line(snap: Snapshot, wake: SessionWoken) -> str:
     name = _one_line(link.name)
     count = len(snap.peer_unread(wake.session_id, link))
     untold = [_one_line(did) for did in snap.peer_untold(wake.session_id, link)]
+    owing = [_one_line(cid) for cid in snap.peer_owing(wake.session_id, link)]
     said = [
         f'{count} unread on #{name}; call read_peer_messages(channel="{name}"), '
         "which returns it."
     ]
-    if untold and not count:
+    if (untold or owing) and not count:
         said = []
+    others = sorted(link.members - {wake.session_id}) or sorted(link.members)
+    peers = [peer_identity(snap, m) for m in others]
+    who = " and ".join(f"the lead of {peer_said(peer)}" for peer in peers)
+    said.append(f"#{name} links you to {who}{_titled(peers)}.")
+    if owing:
+        named = ", ".join(owing[:WAKE_QUESTIONS_NAMED])
+        more = len(owing) - WAKE_QUESTIONS_NAMED
+        said.append(
+            f"You were handed question(s) {named}"
+            + (f" and {more} more" if more > 0 else "")
+            + f" on #{name} and have not answered: read_peer_messages("
+            f'channel="{name}") lists them again, marked as already read and still '
+            "owed. Answer with send_to_peer(channel, re=<message id>)."
+        )
     for did in untold[:WAKE_DECISIONS_NAMED]:
         said.append(
             f"decision {did} was raised on #{name} by the lead linked to you. "

@@ -48,10 +48,12 @@ from .. import drawable
 from ..model import (
     AgentRecord,
     AgentState,
+    Channel,
     EndedHow,
     NodeId,
     Obligation,
     ObligationKind,
+    PeerIndex,
     Recalled,
     Snapshot,
     TranscriptPresence,
@@ -274,29 +276,47 @@ def _density(rec: AgentRecord, owed: list[Obligation], *, unread: int = 0) -> st
     return "active"
 
 
-def channel_lines(snap: Snapshot, rec: AgentRecord) -> tuple[str, ...]:
+def channel_lines(
+    snap: Snapshot, rec: AgentRecord, index: PeerIndex | None = None
+) -> tuple[str, ...]:
     """
     One line per live link a root's session is in, by name: ``#name ↔ peer``,
-    and how many peer messages on it wait for this lead, when any do. Nothing
-    for a sub-agent, and nothing for a link that is closed: a closed link is
-    one the operator took out of view.
+    how many peer messages on it wait for this lead, when any do, and whose
+    move it is on the link (``session_menu.whose_move_text``). Nothing for a sub-agent, and
+    nothing for a link that is closed: a closed link is one the operator took
+    out of view.
 
     The name is the operator's and passed the plain-name rule, and it is still
     drawn through ``drawable.text``, as every text that reaches a draw call
     from the store may be. The peer is named as its card is
     (``session_menu.peer_label``).
+
+    ``index`` is the frame's ``Snapshot.peer_index``, built here when none is
+    given: a rail drawing every card builds it once and passes it to each.
+    """
+    return tuple(line for _, line in channel_rows(snap, rec, index))
+
+
+def channel_rows(
+    snap: Snapshot, rec: AgentRecord, index: PeerIndex | None = None
+) -> tuple[tuple[Channel, str], ...]:
+    """
+    ``channel_lines``, each with the link it is the line of: what a click on
+    that line points the cursor at (``FocusState.to_link``).
     """
     if rec.node_id[1] is not None:
         return ()
     me = rec.node_id[0]
-    out: list[str] = []
+    peers_of = snap.peer_index() if index is None else index
+    out: list[tuple[Channel, str]] = []
     for link in session_menu.live_links(snap, me):
         peers = ", ".join(session_menu.peer_label(snap, p) for p in sorted(link.members - {me}))
         line = f"#{drawable.text(link.name)} ↔ {peers}"
-        waiting = len(snap.peer_inbox_of(rec.node_id, link))
+        waiting = peers_of.waiting.get((rec.node_id, link.id), 0)
         if waiting:
             line += f" · {waiting} unread"
-        out.append(line)
+        move = snap.whose_move(link, peers_of)
+        out.append((link, f"{line} · {session_menu.whose_move_text(snap, move, me)}"))
     return tuple(out)
 
 
@@ -640,8 +660,9 @@ class _Box:
     outer_x: float
     right: float
     height: float
-    # The card's channel lines (``channel_lines``), drawn last, at its foot.
-    links: tuple[str, ...] = ()
+    # The card's channel lines with their links (``channel_rows``), drawn
+    # last, at its foot.
+    links: tuple[tuple[Channel, str], ...] = ()
 
 
 def draw(
@@ -654,6 +675,7 @@ def draw(
     hide_ended: bool = False,
     now_wall: float | None = None,
     new_task: Callable[[], None] | None = None,
+    link_opened: Callable[[], None] | None = None,
 ) -> None:
     """
     Build the rail from one snapshot. Never reads the store.
@@ -672,6 +694,10 @@ def draw(
     (``fleet_view.fold``): no card, no count, no mention. ``now_wall`` is
     ``time.time()`` as the frame read it, and is what a closed card's age is measured
     against; ``now`` is monotonic and cannot be.
+
+    ``link_opened`` is called after a click on a card's channel line has pointed
+    the cursor at that link, so the shell can bring the pane that draws its
+    thread in front. None does nothing more than the pointing.
     """
     # Before the empty-rail return, not after: an empty snapshot is the one case
     # where every id in the set is stale.
@@ -690,6 +716,8 @@ def draw(
         return
 
     owed_by_session = _by_session(snap)
+    # Every card's channel lines read this one, built for this frame alone.
+    peers = snap.peer_index()
     cursor = focus.node(snap)
     state.arm_scroll(cursor)
 
@@ -707,6 +735,8 @@ def draw(
                 menu=menu,
                 hide_ended=hide_ended,
                 now_wall=now_wall,
+                link_opened=link_opened,
+                peers=peers,
             )
     if new_task is not None:
         imgui.spacing()
@@ -789,6 +819,8 @@ def _group(
     menu: session_menu.Wiring | None = None,
     hide_ended: bool = False,
     now_wall: float | None = None,
+    link_opened: Callable[[], None] | None = None,
+    peers: PeerIndex | None = None,
 ) -> None:
     """
     One session: the root's card, and -- when open -- a card per sub-agent under it.
@@ -866,6 +898,8 @@ def _group(
         indent=0.0,
         menu=menu,
         now_wall=now_wall,
+        link_opened=link_opened,
+        peers=peers,
     )
     if not expanded:
         return
@@ -886,6 +920,8 @@ def _group(
             scope=Scope.AGENT,
             indent=_GROUP_INDENT,
             menu=menu,
+            link_opened=link_opened,
+            peers=peers,
         )
     _bracket(left, root_bottom, bottom)
 
@@ -938,6 +974,8 @@ def _card(
     indent: float,
     menu: session_menu.Wiring | None = None,
     now_wall: float | None = None,
+    link_opened: Callable[[], None] | None = None,
+    peers: PeerIndex | None = None,
 ) -> float:
     """
     One agent, root or sub-agent, drawn the same way. Returns its bottom edge.
@@ -963,7 +1001,7 @@ def _card(
     density = _density(rec, owed, unread=unread)
     # Under the density's own lines, one each: a card's height is still fixed by
     # what it holds, and a link is something it holds.
-    links = channel_lines(snap, rec)
+    links = channel_rows(snap, rec, peers)
 
     draw = imgui.get_window_draw_list()
     line_h = imgui.get_text_line_height_with_spacing()
@@ -1101,6 +1139,7 @@ def _card(
             menu=menu,
             asked=asked,
             focused=focused,
+            link_opened=link_opened,
         )
 
     badges, widths, badges_w = _badge_row(owed)
@@ -1168,6 +1207,7 @@ def _card(
             menu=menu,
             asked=asked,
             focused=focused,
+            link_opened=link_opened,
         )
 
     y += line_h
@@ -1207,6 +1247,7 @@ def _card(
         menu=menu,
         asked=asked,
         focused=focused,
+        link_opened=link_opened,
     )
 
 
@@ -1224,29 +1265,38 @@ def _tail(
     menu: session_menu.Wiring | None = None,
     asked: bool = False,
     focused: bool = False,
+    link_opened: Callable[[], None] | None = None,
 ) -> float:
     """
     What every density class does once it has drawn its own reading: resolve the
     frame's click, draw the card's menu if it is open, close the card out, and
     report where it ended.
 
-    Two targets share this card's one ``invisible_button`` -- the disclosure and
-    everything else -- so the click is resolved in one place and they are mutually
-    exclusive. A disclosure that also selected is one gesture doing two things, and
-    the one it does second is the one nobody asked for.
+    Three targets share this card's one ``invisible_button`` -- the disclosure,
+    each channel line, and everything else -- so the click is resolved in one
+    place and they are mutually exclusive. A disclosure that also selected is one
+    gesture doing two things, and the one it does second is the one nobody asked
+    for.
 
-    Only the disclosure needs this. A sub-agent's card is a sibling in the group with
-    a button of its own, so ImGui routes its clicks and nothing here has to know it
-    exists.
+    Only the disclosure and the channel lines need this. A sub-agent's card is a
+    sibling in the group with a button of its own, so ImGui routes its clicks and
+    nothing here has to know it exists.
     """
     _draw_links(box)
     on_marker = hovered and _on_marker(marker)
-    if on_marker:
+    on_link = _link_at(box, imgui.get_mouse_pos().y) if hovered and not on_marker else None
+    if on_marker or on_link is not None:
         imgui.set_mouse_cursor(imgui.MouseCursor_.hand)
 
     if clicked:
         if on_marker:
             state.toggle(rec.node_id[0])
+        elif on_link is not None:
+            # A channel line is the link's and not the card's: its thread, in
+            # DETAIL, read from this card.
+            focus.to_link(on_link, rec.node_id)
+            if link_opened is not None:
+                link_opened()
         else:
             # The same scope the highlight was derived from, so the card that
             # lights and the card that was clicked are the same card by construction.
@@ -1282,14 +1332,31 @@ def _draw_links(box: _Box) -> None:
         return
     line_h = imgui.get_text_line_height_with_spacing()
     x = box.origin.x + _PAD + 4.0
-    y = box.origin.y + box.height - _PAD - line_h * len(box.links)
+    y = _links_top(box, line_h)
     room = max(box.right - _PAD - x, 20.0)
     _small()
-    for line in box.links:
+    for _, line in box.links:
         imgui.set_cursor_screen_pos(imgui.ImVec2(x, y + 2.0))
         imgui.text_colored(P.text_dim.vec4, ellipsis(line, room))
         y += line_h
     _normal()
+
+
+def _links_top(box: _Box, line_h: float) -> float:
+    """Where the card's first channel line is drawn (``_draw_links``)."""
+    return box.origin.y + box.height - _PAD - line_h * len(box.links)
+
+
+def _link_at(box: _Box, y: float) -> Channel | None:
+    """
+    The link whose channel line is at height ``y`` on the card, the rows
+    ``_draw_links`` drew them in, and None above the first and below the last.
+    """
+    if not box.links:
+        return None
+    line_h = imgui.get_text_line_height_with_spacing()
+    row = int((y - _links_top(box, line_h)) // line_h)
+    return box.links[row][0] if 0 <= row < len(box.links) else None
 
 
 def _end(outer_x: float, top: float, height: float) -> None:

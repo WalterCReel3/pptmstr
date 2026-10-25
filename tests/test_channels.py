@@ -9,7 +9,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 import pytest
@@ -24,10 +24,12 @@ from pptmstr.channels import (
     LinkCreated,
     LinkKey,
     NotAppended,
+    Outcome,
     Read,
     Short,
     Stopped,
     Swept,
+    SweptClose,
     Whole,
 )
 from pptmstr.intents import AgentSpawned, ChannelClosed, ChannelLinked
@@ -583,12 +585,16 @@ def test_the_writer_appends_off_the_calling_thread_and_reports_each_fact(tmp_pat
 
     reports = writer.close()
 
-    assert [type(r.result) for r in reports] == [Appended, Appended]
+    assert reports == (
+        Outcome(K1, _created(), Appended()),
+        Outcome(K1, LinkClosed(at=2.0, channel_id="k1"), Appended()),
+    )
     assert log.read(K1).facts == (_created(), LinkClosed(at=2.0, channel_id="k1"))
     after = channels.ChannelWriter(log)
     after.close()
     after.submit(K1, _created("k2"))
-    assert isinstance(after.drain()[0].result, NotAppended)
+    (late,) = after.drain()
+    assert isinstance(late, Outcome) and isinstance(late.result, NotAppended)
 
 
 def test_a_fact_that_does_not_land_stops_its_link_and_restores_it_not_live(
@@ -609,7 +615,10 @@ def test_a_fact_that_does_not_land_stops_its_link_and_restores_it_not_live(
     writer.submit(other, _created("k2"))
     writer.submit(K1, LinkClosed(at=3.0, channel_id="k1"))
 
-    first, second, later = writer.close()
+    reports = writer.close()
+
+    first, second, later = _outcomes(reports)
+    assert len(reports) == 3
 
     assert isinstance(first.result, NotAppended) and first.marker == Appended()
     assert second.result == Appended()
@@ -629,11 +638,23 @@ def test_a_fact_that_does_not_land_stops_its_link_and_restores_it_not_live(
 # -- linking a name closes what was left under it ------------------------------------
 
 
-def _link(log: ChannelLog, made: LinkKey) -> tuple[channels.Outcome, ...]:
+def _link(log: ChannelLog, made: LinkKey) -> tuple[channels.Report, ...]:
     """The operator's link of ``made``, as the writer appends it."""
     writer = channels.ChannelWriter(log)
     writer.submit(made, _created(made.link_id, 5.0))
     return writer.close()
+
+
+def _closes(reports: Iterable[channels.Report]) -> list[SweptClose]:
+    """Every close the sweeps in ``reports`` made or tried, in order."""
+    return [
+        c for r in reports if isinstance(r, Swept) and isinstance(r.closes, tuple) for c in r.closes
+    ]
+
+
+def _outcomes(reports: Iterable[channels.Report]) -> list[Outcome]:
+    """The submitted facts' outcomes in ``reports``, in order."""
+    return [r for r in reports if isinstance(r, Outcome)]
 
 
 @pytest.mark.skipif(not _unlistable(), reason="root reads any directory")
@@ -658,10 +679,10 @@ def test_a_link_withheld_by_a_read_error_is_closed_by_the_next_link_of_its_name(
 
     reports = _link(log, k2)
 
-    assert [(r.link, type(r.fact), r.result) for r in reports] == [
-        (K1, LinkClosed, Appended()),
-        (k2, LinkCreated, Appended()),
-    ]
+    assert reports == (
+        Swept(k2, (SweptClose(K1, _created().at, Appended()),)),
+        Outcome(k2, _created("k2", 5.0), Appended()),
+    )
     restored = _restored(log)
     closed, made = restored[K1].channel, restored[k2].channel
     assert restored[K1].withheld is None and closed is not None and not closed.live
@@ -708,9 +729,10 @@ def test_two_live_links_under_one_name_are_both_closed_by_the_next_link(tmp_path
 
     reports = _link(log, k3)
 
-    assert [r.link for r in reports] == [K1, k2, k3]
-    assert all(r.result == Appended() for r in reports)
-    assert [r.swept and r.swept.made for r in reports] == [k3, k3, None]
+    swept, made = reports
+    assert isinstance(swept, Swept) and swept.made == k3
+    assert [(c.link, c.result) for c in _closes(reports)] == [(K1, Appended()), (k2, Appended())]
+    assert isinstance(made, Outcome) and made.link == k3 and made.result == Appended()
     restored = _restored(log)
     assert {link for link, r in restored.items() if r.channel and r.channel.live} == {k3, ops}
     assert all(r.withheld is None for r in restored.values())
@@ -733,17 +755,17 @@ def test_a_close_that_does_not_land_is_said_and_the_new_link_is_still_made(
 
     swept, made = _link(_Failing(inner, K1), k2)
 
-    assert swept.link == K1 and isinstance(swept.fact, LinkClosed)
-    assert isinstance(swept.result, NotAppended) and swept.marker == Appended()
-    # Said as the sweep's, of an earlier link made when its log says.
-    assert swept.swept == Swept(k2, _created().at)
-    assert made.link == k2 and made.result == Appended() and made.swept is None
+    # The sweep's, of an earlier link made when its log says; not a close of k2.
+    assert swept == Swept(
+        k2, (SweptClose(K1, _created().at, NotAppended("no space left on device"), Appended()),)
+    )
+    assert made == Outcome(k2, _created("k2", 5.0), Appended())
     mark = LOG.snapshot()[1]
     app._read_channel_reports((swept, made))
     entries, revision = LOG.snapshot()
     said = [e.text for e in entries[len(entries) - (revision - mark) :]]
     assert len(said) == 1
-    assert "#brand (k1): a LinkClosed did not reach" in said[0]
+    assert said[0].startswith("#brand (k1): the close owed it when #brand (k2) was linked")
     assert "no space left" in said[0] and "recording stopped" in said[0]
     restored = _restored(inner)
     assert restored[K1].withheld is not None
@@ -763,12 +785,107 @@ def test_links_that_cannot_be_listed_close_nothing_and_the_new_link_is_still_mad
 
     unlisted, made = _link(Unlistable(inner, LinkKey("none", "k0")), k2)
 
-    assert isinstance(unlisted.result, NotAppended)
-    assert unlisted.link == k2 and unlisted.swept == Swept(k2)
-    assert "could not be listed" in unlisted.result.reason
-    assert "the mount went away" in unlisted.result.reason
-    assert made.link == k2 and made.result == Appended()
+    assert isinstance(unlisted, Swept) and unlisted.made == k2
+    assert isinstance(unlisted.closes, Unlisted)
+    assert "the mount went away" in unlisted.closes.reason
+    assert made == Outcome(k2, _created("k2", 5.0), Appended())
     assert inner.read(K1).facts == (_created(),)
+
+
+# The records a sweep left on disk with the clock at ``_SWEEP_AT``, captured from
+# the writer as it was when a sweep close was reported as an ``Outcome``. The
+# report is in-process only; what the sweep writes is the same record as then.
+_SWEEP_AT = 1_700_000_000.25
+_CREATED_K1 = (
+    b'{"kind": "link-created", "at": 1.0, "channel_id": "k1", "members": ["sess-a", "sess-b"],'
+    b' "charter": "the brand work"}\n'
+)
+_CREATED_K2 = (
+    b'{"kind": "link-created", "at": 5.0, "channel_id": "k2", "members": ["sess-a", "sess-b"],'
+    b' "charter": "the brand work"}\n'
+)
+_LOGS = {
+    "landed": {
+        "k1": {
+            "00000000.json": _CREATED_K1,
+            "00000001.json": b'{"kind": "link-closed", "at": 1700000000.25, "channel_id": "k1"}\n',
+        },
+        "k2": {"00000000.json": _CREATED_K2},
+    },
+    "failed": {
+        "k1": {
+            "00000000.json": _CREATED_K1,
+            "00000001.json": (
+                b'{"kind": "recording-stopped", "at": 1700000000.25,'
+                b' "reason": "no space left on device"}\n'
+            ),
+        },
+        "k2": {"00000000.json": _CREATED_K2},
+    },
+    # Nothing reaches k1: its close and its stop marker are both lost.
+    "unmarked": {"k1": {"00000000.json": _CREATED_K1}, "k2": {"00000000.json": _CREATED_K2}},
+    # Nothing is tried on k1: the name's links could not be listed.
+    "unlisted": {"k1": {"00000000.json": _CREATED_K1}, "k2": {"00000000.json": _CREATED_K2}},
+}
+
+
+class _Unmarkable(_Failing):
+    """``_Failing``, whose stop marker for the failing link is lost as well."""
+
+    def append(self, link: LinkKey, fact: channels.Fact) -> Appended | NotAppended:
+        if link == self.failing and isinstance(fact, RecordingStopped):
+            return NotAppended("read-only file system")
+        return super().append(link, fact)
+
+
+class _NameUnlistable(_Failing):
+    """``_Failing``, whose name directories cannot be listed."""
+
+    def links(self, name: str | None = None) -> tuple[LinkKey, ...] | Unlisted:
+        if name is not None:
+            raise OSError("the mount went away")
+        return self.inner.links(name)
+
+
+@pytest.mark.parametrize("close", ["landed", "failed", "unmarked", "unlisted"])
+def test_a_sweep_writes_the_records_it_wrote_before_its_report_was_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close: str
+) -> None:
+    """
+    The sweep's report became a ``Swept`` of its own; its records did not
+    change. A close that lands is the same ``link-closed`` record, and one
+    that fails leaves the same stop marker, byte for byte. A close whose
+    marker is lost too, and a sweep that could list nothing, write nothing to
+    the earlier link, and the new link's creation is the same record.
+    """
+    inner = FileChannels(tmp_path)
+    assert inner.append(K1, _created()) == Appended()
+    monkeypatch.setattr(time, "time", lambda: _SWEEP_AT)
+    logs: dict[str, ChannelLog] = {
+        "landed": inner,
+        "failed": _Failing(inner, K1),
+        "unmarked": _Unmarkable(inner, K1),
+        "unlisted": _NameUnlistable(inner, LinkKey("none", "k0")),
+    }
+
+    reports = _link(logs[close], LinkKey("brand", "k2"))
+
+    assert [type(r) for r in reports] == [Swept, Outcome]
+    swept = reports[0]
+    assert isinstance(swept, Swept)
+    # Each case reaches the path it names.
+    if close == "unlisted":
+        assert isinstance(swept.closes, Unlisted)
+    else:
+        (made,) = _closes(reports)
+        assert isinstance(made.result, Appended if close == "landed" else NotAppended)
+        assert (
+            (made.marker is None)
+            if close == "landed"
+            else (isinstance(made.marker, Appended if close == "failed" else NotAppended))
+        )
+    assert sorted(p.name for p in (tmp_path / "brand").iterdir()) == ["k1", "k2"]
+    assert {d: _bytes(tmp_path / "brand" / d) for d in ("k1", "k2")} == _LOGS[close]
 
 
 def _bytes(directory: Path) -> dict[str, bytes]:
@@ -831,7 +948,7 @@ def test_a_relink_leaves_a_log_that_can_never_be_live_byte_for_byte(
 
     for again in ("k2", "k3"):
         reports = _link(log, LinkKey("brand", again))
-        assert all(r.link != K1 for r in reports)
+        assert all(c.link != K1 for c in _closes(reports))
 
     assert _bytes(directory) == before
 
@@ -845,9 +962,9 @@ class _Full(_Failing):
         return self.inner.append(link, fact)
 
 
-def _settled(writer: channels.ChannelWriter, count: int) -> list[channels.Outcome]:
-    """The writer's next ``count`` outcomes, waited for."""
-    got: list[channels.Outcome] = []
+def _settled(writer: channels.ChannelWriter, count: int) -> list[channels.Report]:
+    """The writer's next ``count`` reports, waited for."""
+    got: list[channels.Report] = []
     deadline = time.monotonic() + 5.0
     while len(got) < count:
         assert time.monotonic() < deadline, got
@@ -873,6 +990,7 @@ def test_a_link_this_process_stopped_is_closed_by_a_relink_only_if_it_could_read
     writer = channels.ChannelWriter(log)
     writer.submit(K1, LinkClosed(at=2.0, channel_id="k1"))
     (failed,) = _settled(writer, 1)
+    assert isinstance(failed, Outcome)
     assert isinstance(failed.result, NotAppended) and writer.refusal(K1) is not None
     assert (failed.marker == Appended()) == (marker == "landed")
     log.fail = False
@@ -885,14 +1003,14 @@ def test_a_link_this_process_stopped_is_closed_by_a_relink_only_if_it_could_read
     restored = _restored(inner)
     assert restored[k2].withheld is None
     if marker == "landed":
-        assert [r.link for r in reports] == [k2]
+        assert reports == (Outcome(k2, _created("k2", 5.0), Appended()),)
         assert _bytes(tmp_path / "brand" / "k1") == before
         assert restored[K1].withheld is not None
     else:
-        assert [(r.link, type(r.fact), r.result) for r in reports] == [
-            (K1, LinkClosed, Appended()),
-            (k2, LinkCreated, Appended()),
-        ]
+        assert reports == (
+            Swept(k2, (SweptClose(K1, _created().at, Appended()),)),
+            Outcome(k2, _created("k2", 5.0), Appended()),
+        )
         closed = restored[K1].channel
         assert restored[K1].withheld is None and closed is not None and not closed.live
 
@@ -916,7 +1034,7 @@ def test_a_log_that_cannot_be_read_now_is_closed_for_when_it_can(tmp_path: Path)
     finally:
         record.chmod(0o600)
 
-    assert reports[0].link == K1 and reports[0].result == Appended()
+    assert [(c.link, c.result) for c in _closes(reports)] == [(K1, Appended())]
     closed = _restored(log)[K1].channel
     assert closed is not None and not closed.live
 
@@ -936,9 +1054,9 @@ def test_an_unlistable_directory_under_another_name_does_not_stop_the_sweep(
     finally:
         (tmp_path / "ops").chmod(0o700)
 
-    assert [(r.link, r.result) for r in reports] == [
-        (K1, Appended()),
-        (LinkKey("brand", "k2"), Appended()),
+    assert [(c.link, c.result) for c in _closes(reports)] == [(K1, Appended())]
+    assert [(r.link, r.result) for r in _outcomes(reports)] == [
+        (LinkKey("brand", "k2"), Appended())
     ]
 
 
@@ -963,9 +1081,11 @@ def test_a_link_of_a_newer_shape_is_closed_and_a_log_with_no_link_is_left(
     writer.submit(LinkKey("brand", "k3"), _created("k3", 6.0))
     later = writer.close()
 
-    assert [r.link.link_id for r in first] == ["k1", "k2"]
-    assert [r.link.link_id for r in later] == ["k0", "k2", "k3"]
-    assert all(r.result == Appended() for r in (*first, *later))
+    assert [c.link.link_id for c in _closes(first)] == ["k1"]
+    assert [c.link.link_id for c in _closes(later)] == ["k0", "k2"]
+    assert [r.link.link_id for r in _outcomes((*first, *later))] == ["k2", "k3"]
+    assert all(c.result == Appended() for c in _closes((*first, *later)))
+    assert all(r.result == Appended() for r in _outcomes((*first, *later)))
     assert isinstance(log.read(K1).facts[-1], LinkClosed)
 
 

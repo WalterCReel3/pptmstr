@@ -91,6 +91,7 @@ from .intents import (
     Intent,
     PeerInboxRead,
     PeerQuestionAged,
+    PeerQuestionDismissed,
     PeerSent,
     PeerWakeSent,
     SessionDetached,
@@ -268,10 +269,10 @@ def outcomes(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> t
             # holds it.
             return ()
 
-        case PeerQuestionAged() | HeldMailDismissed():
+        case PeerQuestionAged() | HeldMailDismissed() | PeerQuestionDismissed():
             # This run's alone as well: the shell measures a question's age
             # again from its logged delivery after a restart, and a dismissed
-            # row of held mail is raised again then.
+            # row of held mail or of a question is raised again then.
             return ()
 
         case BoardRestored():
@@ -502,6 +503,11 @@ def outcomes(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> t
             stopped = _changed(before.concerns, after.concerns, intent.concern_id)
             if stopped is None:
                 return ()
+            # Withdrawn after its lead was handed it, which only a peer message
+            # is: a kind of its own, since a ``concern-withdrawn`` after a
+            # delivery restores as contested (``boardlog.PeerRetracted``).
+            if stopped.delivered_at is not None:
+                return (Fact(stopped.sender[0], boardlog.PeerRetracted(now, stopped.id)),)
             return (Fact(stopped.sender[0], boardlog.Withdrawn(now, stopped.id)),)
 
         case InboxRead():
@@ -635,10 +641,14 @@ def _filed(snap: Snapshot, concern: Concern) -> tuple[Fact, ...]:
     records: list[Record] = [posted]
     if concern.edited:
         records.append(boardlog.Edited(concern.posted_at, concern.id, concern.body))
-    if concern.state is ConcernState.WITHDRAWN:
-        records.append(boardlog.Withdrawn(concern.posted_at, concern.id))
-    elif concern.state is ConcernState.DELIVERED and concern.delivered_at is not None:
+    if concern.delivered_at is not None and concern.state is not ConcernState.POSTED:
         records.append(boardlog.Delivered(concern.delivered_at, (concern.id,)))
+    if concern.state is ConcernState.WITHDRAWN:
+        records.append(
+            boardlog.Withdrawn(concern.posted_at, concern.id)
+            if concern.delivered_at is None
+            else boardlog.PeerRetracted(concern.delivered_at, concern.id)
+        )
     return tuple(Fact(session_id, record) for record in records)
 
 

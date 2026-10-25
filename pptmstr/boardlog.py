@@ -442,7 +442,8 @@ class PeerPosted:
     build before this one decodes.
 
     The edits, withdrawals and deliveries of a peer message are the same records
-    as a concern's, keyed on the same id.
+    as a concern's, keyed on the same id. Its sender's withdrawal after delivery
+    is a kind of its own (``PeerRetracted``).
     """
 
     KIND: ClassVar[str] = "peer-posted"
@@ -484,6 +485,30 @@ class Withdrawn:
     """The operator stopped a concern from being delivered."""
 
     KIND: ClassVar[str] = "concern-withdrawn"
+
+    at: float
+    concern_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PeerRetracted:
+    """
+    A peer message's sender withdrew it after its lead was handed it
+    (``bus.withdraw_peer_message``). Filed in the sender's log, where the
+    message and its delivery are.
+
+    **A kind of its own, not a ``concern-withdrawn``.** That record stops a
+    concern still waiting, and every build restores a ``concern-withdrawn``
+    after a ``concern-delivered`` as two writers' disagreement (``restore``).
+    A field on it would be ignored by an older build, which would then read
+    exactly that. A build older than this kind reads it as ``Unrecognised``
+    instead, its board is ``short``, and the message stands there as delivered.
+
+    The withdrawer's reason is not carried: it is the sender's words to a lead
+    that read the message, and the log does not keep them.
+    """
+
+    KIND: ClassVar[str] = "peer-retracted"
 
     at: float
     concern_id: str
@@ -664,6 +689,7 @@ Known = (
     | PeerPosted
     | Edited
     | Withdrawn
+    | PeerRetracted
     | Delivered
     | Raised
     | Answered
@@ -1139,6 +1165,7 @@ def _named(record: Record) -> tuple[tuple[str | None, tuple[str, ...]], ...]:
             | WritesAccrued()
             | Edited()
             | Withdrawn()
+            | PeerRetracted()
             | Delivered()
             | Answered()
             | Dismissed()
@@ -1443,7 +1470,8 @@ def restore(records: Iterable[Record]) -> Board:
     window held: a live claim carrying somebody else's result. So each record is
     asked the one thing ``store._apply`` guards -- ``_one_writers`` lists them for
     a task; an edit, a withdrawal and a delivery need a concern not yet handed
-    over or stopped; ``_decision_one_writers`` lists them for a decision; a thing
+    over or stopped, and a peer message's retraction one handed over and not
+    stopped; ``_decision_one_writers`` lists them for a decision; a thing
     is introduced once. A record that fails marks its task, concern or decision
     ``contested``. From there the log has two histories of it and no record says
     which it belongs to, so the thing stands as it stood and every later record
@@ -1552,6 +1580,25 @@ def restore(records: Iterable[Record]) -> Board:
                     stray.append(record)
                     continue
                 if not _waiting(concern):
+                    contested.append(record)
+                    concerns[record.concern_id] = dataclasses.replace(concern, contested=True)
+                    continue
+                concerns[record.concern_id] = dataclasses.replace(
+                    concern, state=ConcernState.WITHDRAWN
+                )
+            case PeerRetracted():
+                # The one record about a concern already handed over: one
+                # reducer files it only for a peer message, after its delivery,
+                # and only once.
+                concern = concerns.get(record.concern_id)
+                if concern is None:
+                    stray.append(record)
+                    continue
+                if (
+                    concern.channel is None
+                    or concern.state is not ConcernState.DELIVERED
+                    or concern.contested
+                ):
                     contested.append(record)
                     concerns[record.concern_id] = dataclasses.replace(concern, contested=True)
                     continue

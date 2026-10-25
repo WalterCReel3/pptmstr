@@ -2654,8 +2654,9 @@ def test_a_held_edit_of_a_declaration_says_what_the_board_keeps_of_its_provenanc
     """
     The row shows the agent's mark while ``a`` sends the draft. With the editor
     on another row, the expanded row says what the bus will store of the
-    draft's provenance -- and nothing for a draft the gate does not count as
-    an edit, though its text differs.
+    draft's provenance -- and nothing, neither that line nor the withheld-edit
+    warning, for a draft the gate does not count as an edit, though its text
+    differs (``inbox.draft_is_edit``).
     """
     call = parked(inbox._DECLARE_TASK, dict(_DECLARED))
     elsewhere = write(5, "elsewhere")
@@ -2671,7 +2672,7 @@ def test_a_held_edit_of_a_declaration_says_what_the_board_keeps_of_its_provenanc
     pane.state.edits[call.id] = json.dumps(_DECLARED, indent=7)
     said.clear()
     pane.draw(seam)
-    assert inbox._WITHHELD in said
+    assert inbox._WITHHELD not in said
     assert not [line for line in said if line.startswith("approving your edit")]
 
 
