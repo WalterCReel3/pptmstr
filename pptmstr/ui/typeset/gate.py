@@ -24,8 +24,19 @@ Left alone that leaves the pane on every frame the text is on screen. So every
 such call in ``views`` and ``diffs`` is made inside ``into_library()``, which
 logs what was raised once with its traceback, stops the library as a draw that
 raised ``TypesetUnavailable`` does (``stopped``), and raises that in its place.
-Only the calls into the library are inside it: what pptmstr's own code raises
-around them is a defect and leaves as itself.
+That stop holds for the process: ``pre_frame`` makes it the gate's failure, and
+only a load of the fonts clears that.
+
+**So pptmstr's own code that runs inside such a call catches what it raises, at
+its own edge** (``own_defect``): a callback the library makes from inside its
+draw (the link handler, a copy, the captioned stream's blocks) or pptmstr's work
+around a call into the library (``formula``). It logs the exception as
+pptmstr's defect, at ERROR with its traceback, and gives a lesser answer for its
+own text: the library is not stopped for it, and no other pane notices.
+``imscribe.TypesetUnavailable`` passes such an edge as it is. **The rule is whose
+code raised, not what was being attempted**: each call into the library that
+such code makes is wrapped narrowly in ``into_library`` of its own, so what it
+raises is still the library stopping.
 
 **A draw that set less than it was handed says so two ways, and neither is an
 exception** (``noted``). A view's ``draw`` answers false when a block in view
@@ -131,8 +142,10 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import struct
 import traceback
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
@@ -154,6 +167,7 @@ by the last, and the body's recipient gets the five characters.
 """
 
 _DESTINATIONS_RULE = "pptmstr_link_destinations"
+_BARE_ADDRESSES_RULE = "pptmstr_bare_addresses"
 _STARS_RULE = "pptmstr_written_stars"
 _AS_WRITTEN_RULE = "pptmstr_as_written"
 
@@ -232,6 +246,29 @@ def _imgui() -> Any:
     from imgui_bundle import imgui
 
     return imgui
+
+
+_DEFECTS_SAID: set[str] = set()
+_DEFECTS_KEPT = 256
+
+
+def own_defect(doing: str, failure: BaseException) -> None:
+    """
+    Log what pptmstr's own code raised while ``doing``, inside or around a call
+    into the library: at ERROR with its traceback, once for each message, as
+    pptmstr's defect. The caller gives a lesser answer of its own; nothing here
+    stops the library. Never raises.
+    """
+    said = f"pptmstr's own code raised {type(failure).__name__} while {doing}: {failure}"
+    if said in _DEFECTS_SAID:
+        return
+    if len(_DEFECTS_SAID) < _DEFECTS_KEPT:
+        _DEFECTS_SAID.add(said)
+    try:
+        trace = "".join(traceback.format_exception(failure))
+    except Exception:
+        trace = ""
+    LOG.error("typeset", f"{said}\n{trace}".rstrip())
 
 
 def failed(failure: BaseException) -> None:
@@ -547,11 +584,261 @@ def read(source: str, theme: Any) -> Any:
     return parse_markdown(source, theme, references=False)
 
 
+_FORMULAS_KEPT = 256
+_FORMULAS: OrderedDict[tuple[Any, ...], tuple[Any, Any, str]] = OrderedDict()
+"""
+What ``formula`` answered, by the body, the theme it was read with and the scale
+it was asked at: the last few hundred, because a stream made again reads every
+fence again and a settled document is read again when its text changes. A theme
+is a dict-holding dataclass and has no hash, so it is held by identity, and kept
+in the answer so that its identity is not another's: the seam's themes are made
+once an epoch (``themes.demoted``), so a theme of another size is another key.
+"""
+
+_REFUSED: OrderedDict[tuple[Any, ...], tuple[Any, Any, str]] = OrderedDict()
+"""
+What a view refused after ``formula`` said it would set it (``refused``), by the
+body and the theme, at every scale, and held apart from ``_FORMULAS``: only
+another such refusal evicts one, so reading other formulas cannot make the view
+meet it again.
+"""
+
+_SIZES: OrderedDict[tuple[Any, ...], tuple[Any, tuple[float, float, float]]] = OrderedDict()
+"""
+What ``formula_size`` measured, keyed and kept as ``_FORMULAS`` is.
+"""
+
+_NOT_ONE_FORMULA = "the fence does not hold one display formula"
+
+OWN_ERROR = "pptmstr error"
+"""
+The reason a formula is code under when pptmstr's own code raised while asking
+about it (``formula``, ``own_defect``).
+"""
+
+_READING_FORMULA = into_library("reading a formula")
+
+
+def formula(body: str, theme: Any, scale: float = 1.0) -> tuple[Any, str]:
+    """
+    The body of a ```` ```math ```` fence as one display formula, set in
+    ``theme`` at ``scale`` times its text's size: ``(block, "")``, or
+    ``(None, reason)`` where it will not be set.
+
+    Read alone, as ``$$`` + body + ``$$`` with mathematics on: **nothing else
+    is ever read with mathematics on**, so a ``$`` in prose is text. The lines
+    of the body are joined into one formula by the reader. A body that reads as
+    anything but one closed display formula (empty, or holding a ``$$`` line of
+    its own) is refused with ``_NOT_ONE_FORMULA``.
+
+    **The library is asked first whether it will set it**, and a refusal is
+    answered here and never handed to a view: a view that meets one draws its
+    source and answers false, which takes the whole entry it is in off the
+    library (``views._short``). The block's own text and runs are laid out as a
+    paragraph in ``typesetter.base_style(theme)``, the style a document of that
+    theme is laid out in, so it is asked at the size the document sets it at;
+    a theme of another size is another key here and is asked again. The
+    library's reason is the answer's.
+
+    **At a scale other than 1 it is asked at that size**: the block is the one
+    read at 1 with every run's ``scale`` set (``_scaled``), the size the view
+    then draws it at, and that block is what the library is asked about. One
+    refused at 1 is refused at every scale without asking again.
+
+    What a view still refuses after this said yes is kept by ``refused``, and
+    answered from here from then on, at every scale.
+
+    The read and the pre-check's calls into the native module (``_refusal``)
+    are calls into the library (``into_library``): what they raise stops the
+    library, as a call into it does anywhere. What pptmstr's own code around
+    them raises is pptmstr's defect (``own_defect``): the answer is then
+    ``(None, OWN_ERROR)``, not kept, so the fence is code and the library is
+    not stopped.
+    """
+    from imscribe import TypesetUnavailable
+
+    try:
+        return _formula(body, theme, scale)
+    except TypesetUnavailable:
+        raise
+    except Exception as failure:
+        own_defect("asking whether a formula will be set", failure)
+        return None, OWN_ERROR
+
+
+def _held(answers: OrderedDict[Any, Any], key: tuple[Any, ...], theme: Any) -> Any:
+    held = answers.get(key)
+    if held is None or held[0] is not theme:
+        return None
+    answers.move_to_end(key)
+    return held
+
+
+def _formula(body: str, theme: Any, scale: float) -> tuple[Any, str]:
+    from imscribe import MarkdownText, parse_markdown
+
+    for held in (
+        _held(_REFUSED, (body, id(theme)), theme),
+        _held(_FORMULAS, (body, id(theme), scale), theme),
+    ):
+        if held is not None:
+            return held[1], held[2]
+    answer: tuple[Any, str] = (None, _NOT_ONE_FORMULA)
+    if scale != 1.0:
+        block, why = _formula(body, theme, 1.0)
+        answer = (None, why)
+        if block is not None:
+            block = _scaled(block, scale)
+            why_not = _refusal(block, theme)
+            answer = (block, "") if why_not is None else (None, why_not)
+    else:
+        with _READING_FORMULA:
+            read = parse_markdown(f"$$\n{body}\n$$", theme, references=False, math=True)
+        blocks = read.blocks
+        if len(blocks) == 1 and isinstance(blocks[0], MarkdownText):
+            block = blocks[0]
+            found = block.formulas
+            if len(found) == 1 and found[0].display and found[0].state == "set":
+                why_not = _refusal(block, theme)
+                answer = (block, "") if why_not is None else (None, why_not)
+    _keep(_FORMULAS, (body, id(theme), scale), theme, answer)
+    return answer
+
+
+def _scaled(block: Any, scale: float) -> Any:
+    """
+    A formula block read at 1 with every run set at ``scale`` times its size.
+    """
+    from dataclasses import replace
+
+    return replace(block, runs=tuple(run._replace(scale=scale) for run in block.runs))
+
+
+def refused(body: str, theme: Any, reason: str) -> None:
+    """
+    Keep that a view refused the formula of ``body`` in ``theme``, which
+    ``formula`` had said it would set: ``formula`` answers the refusal from now
+    on, at every scale. Whatever size it was refused at, the fence is then code:
+    no formula has been found that the library refuses at one size and sets at
+    another (``tests/test_math_fence.py``), so a smaller size is not tried.
+    """
+    _keep(_REFUSED, (body, id(theme)), theme, (None, reason))
+
+
+def _keep(answers: OrderedDict[Any, Any], key: tuple[Any, ...], theme: Any, answer: Any) -> None:
+    answers[key] = (theme, *answer)
+    answers.move_to_end(key)
+    while len(answers) > _FORMULAS_KEPT:
+        answers.popitem(last=False)
+
+
+_MEASURING_FORMULA = into_library("measuring a formula")
+
+
+def formula_size(block: Any, body: str, theme: Any) -> tuple[float, float, float]:
+    """
+    How wide and how tall a formula block read at 1 (``formula``) is set in
+    ``theme``, and the height of a line of that theme's paragraphs, in pixels:
+    what ``views.formula_scale`` sizes it by. Every call into the native module
+    is the library's (``into_library``).
+
+    Measured once at 1, because the library sets a formula at a run's scale
+    linearly: ``\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}`` is 95.43 x 37.66 px at
+    1 and 190.86 x 75.31 at 2 (2026-10-22, the default theme), so its size at
+    any scale is this one times the scale.
+    """
+    from imscribe import BlockKind, px_from_sp
+
+    held = _held(_SIZES, (body, id(theme)), theme)
+    if held is not None:
+        size: tuple[float, float, float] = held[1]
+        return size
+    typesetter = _typesetter()
+    with _MEASURING_FORMULA:
+        ts = typesetter.module()
+        if ts is None:
+            return 0.0, 0.0, 0.0
+        runs = [ts.Run(*run) for run in block.runs]
+        with ts.Paragraph() as paragraph:
+            paragraph.set_text(block.text, runs)
+            paragraph.layout(_ASKED_WIDTH_PX, typesetter.base_style(theme))
+            lines = paragraph.lines()
+        # The pitch of the theme's paragraph lines, which follows the size the
+        # operator set for the text.
+        line = float(px_from_sp(theme.style(BlockKind.PARAGRAPH).leading, theme.px_per_inch))
+    left = min((float(line_.min[0]) for line_ in lines), default=0.0)
+    right = max((float(line_.max[0]) for line_ in lines), default=0.0)
+    top = min((float(line_.min[1]) for line_ in lines), default=0.0)
+    foot = max((float(line_.max[1]) for line_ in lines), default=0.0)
+    size = (right - left, foot - top, line)
+    _keep(_SIZES, (body, id(theme)), theme, (size,))
+    return size
+
+
+_ASKED_WIDTH_PX = 100_000.0
+"""
+The measure a formula is asked at. A display formula wider than its measure is
+set and runs past it; it is not refused for its width.
+"""
+
+
+_ASKING_FORMULA = into_library("asking whether a formula will be set")
+
+
+def _refusal(block: Any, theme: Any) -> str | None:
+    """
+    Why the library would not set the formula of a display-formula block in
+    ``theme``, or ``None`` when it would.
+
+    The calls into imscribe's typesetter and the native module (``_laid_formula``)
+    are the library's and are made inside ``into_library``: what they raise stops
+    the library. The reason made of their answer is pptmstr's (``_refusal_said``).
+    """
+    typesetter = _typesetter()
+    with _ASKING_FORMULA:
+        ts = typesetter.module()
+        if ts is None:
+            return f"the library is not in use: {typesetter.reason()}"
+        first, error = _laid_formula(ts, typesetter, block, theme)
+    return _refusal_said(first, error)
+
+
+def _laid_formula(
+    ts: Any, typesetter: Any, block: Any, theme: Any
+) -> tuple[tuple[bool, str] | None, str]:
+    """
+    The block laid out as a paragraph by the native module: whether its first
+    formula was refused and why (``None`` where none was found), and the
+    paragraph's error. Every call here is the library's.
+    """
+    runs = [ts.Run(*run) for run in block.runs]
+    with ts.Paragraph() as paragraph:
+        paragraph.set_text(block.text, runs)
+        paragraph.layout(_ASKED_WIDTH_PX, typesetter.base_style(theme))
+        found = paragraph.formulas()
+        error = paragraph.error
+        said = str(error.message or error.code)
+    first = (bool(found[0].refused), str(found[0].reason)) if found else None
+    return first, said
+
+
+def _refusal_said(first: tuple[bool, str] | None, error: str) -> str | None:
+    """
+    The reason ``_refusal`` answers, from what the library said of the formula.
+    """
+    if first is None:
+        return f"the library found no formula in it ({error})"
+    refused, reason = first
+    if refused:
+        return reason or "the library would not set it"
+    return None
+
+
 def _reader() -> None:
     """
     Make the library's markdown reader show what was written, and check that it does.
 
-    Five changes to the one parser object ``read`` and the library's stream
+    Six changes to the one parser object ``read`` and the library's stream
     read with (reference definitions off, mathematics off), all made on the
     parser and not on the text:
 
@@ -559,6 +846,8 @@ def _reader() -> None:
       CommonMark's own ``html: false`` reading has it -- a tag, a comment opener, a
       generic's ``<T>`` -- ``![alt](url)`` is an exclamation mark and a link, and
       a character reference is the characters it was written with.
+    - A core rule (``_bare_addresses``) makes a bare ``http(s)://`` address in
+      text a link, before the next one runs.
     - A core rule (``_show_destinations``) writes each link's destination after
       its text.
     - An inline rule (``_written_stars``) reads the stars of a glob, a comment
@@ -587,6 +876,10 @@ def _reader() -> None:
     parser.disable(list(_HIDING_RULES))
     if _DESTINATIONS_RULE not in parser.core.ruler.get_all_rules():
         parser.core.ruler.push(_DESTINATIONS_RULE, _show_destinations)
+    if _BARE_ADDRESSES_RULE not in parser.core.ruler.get_all_rules():
+        # Before the destinations are written, so that a bare address is a link
+        # whose text is its destination and is not said twice.
+        parser.core.ruler.before(_DESTINATIONS_RULE, _BARE_ADDRESSES_RULE, _bare_addresses)
     if _STARS_RULE not in parser.inline.ruler.get_all_rules():
         parser.inline.ruler.before("emphasis", _STARS_RULE, _written_stars)
     parser.inline.ruler.at("escape", _written_escapes)
@@ -723,6 +1016,168 @@ def _as_written(state: Any, silent: bool) -> bool:
         state.pending += source[at + 1]
     state.pos = at + 2
     return True
+
+
+_BARE_SCHEME = re.compile(r"https?://", re.IGNORECASE)
+# White space, <, >, ", and CJK and full-width punctuation: the CJK Symbols and
+# Punctuation block, and the full-width forms of ASCII punctuation with the
+# half-width CJK marks after them.
+_BARE_ENDS = re.compile('[\\s<>"\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]')
+_BARE_ESCAPED = re.compile(r"\\([!-/:-@\[-`{-~])")
+_BARE_NOT_AFTER = frozenset("+-./:@")
+_BARE_TRAILING = frozenset("?!.,:*_~'")
+
+
+def _bare_addresses(state: Any) -> None:
+    """
+    Make each bare ``http://`` or ``https://`` address in text a link whose text
+    is the address as written.
+
+    Modelled on GFM's extended URL autolink
+    (https://github.github.com/gfm/#autolinks-extension-), read 2026-10-20, and
+    narrower than it on purpose: model output is read for what it says, so a
+    link the writer did not mean costs more than an address left as text.
+
+    - Only the two schemes, in any case. No ``www.``-only address and no bare
+      email, which GFM also links: ``see www.x.org`` or ``a@b.c`` in prose is
+      as often a name as a destination.
+    - It starts where nothing that could be part of a scheme (an ASCII letter or
+      digit, ``+``, ``-``, ``.``: RFC 3986 section 3.1) and no ``/``, ``:`` or
+      ``@`` is before it, so ``xhttps://``, ``git+https://`` and an ``http://`` inside
+      another address are not one. GFM's list is narrower (line start, space,
+      ``*_~(``); this one also lets an address start after a quote or a bracket.
+      Only the address's own text token is looked at. The token before one that
+      starts a text token is a code span, a link or emphasis, which ends in the
+      source in a backtick, ``>``, ``)``, ``*``, ``_`` or ``~``; none of those
+      stops an address here, so looking back across tokens would decide nothing
+      differently. ``` `x`https://a.org ``` is linked.
+    - At least one letter or digit follows the ``//``. GFM asks for a domain with
+      a dot in it; ``http://localhost:8000`` is an address agents write.
+    - It ends at white space, ``<``, ``>`` or ``"``. GFM ends at the first two;
+      the other two are not URI characters (RFC 3986), and here raw HTML is
+      text, so ``href="https://x.org/">`` is an address and its quote and bracket.
+      It also ends at CJK and full-width punctuation (``、。，！？）「」``), which
+      GFM takes into the address: prose in those scripts puts no space after one.
+    - An address whose authority holds an ``@`` is not linked. A user before the
+      host is how ``https://docs.python.org@evil.example/`` reads as one site and
+      goes to another, and ``links.followable`` refuses it anyway.
+    - Then, until none applies, GFM's trims as cmark-gfm makes them: a trailing
+      ``?!.,:*_~`` (and ``'``) goes; a trailing ``)`` goes while the address has
+      more ``)`` than ``(``, so ``(see https://x.org/a)`` and
+      ``https://en.wikipedia.org/wiki/Foo_(bar)`` are both right; a trailing
+      ``;`` goes, and the whole of an entity-like ``&hl;`` with it. A trailing
+      ``]`` stays, as it does in GFM.
+
+    Its destination is the parser's own ``normalizeLink`` of it read as
+    CommonMark reads it -- a backslash before ASCII punctuation is an escape, so
+    ``Foo\\_(bar)`` goes to ``Foo_(bar)`` -- with the scheme lower-cased first (the
+    reader punycodes a host only for a lower-case scheme), and an address
+    ``validateLink`` refuses stays text, as markdown-it does for ``<...>``. The
+    text keeps the backslash (``_written_escapes``), so it differs from the
+    destination and ``_show_destinations`` says where the click goes; so it does
+    for a lookalike host and its ``xn--`` destination.
+
+    Only ``text`` tokens are read, and none inside a link: a code span, a fence, a
+    code block and mathematics are never ``text``, and an autolink or a
+    ``[t](u)`` is inside a link. The text is cut, never rewritten, so what is set
+    is the characters that were written. An address an emphasis rule broke into
+    pieces (``https://x.org/*a*``) is linked up to the break, as markdown-it's
+    own linkify would.
+
+    Not ``linkify-it-py``, which markdown-it's ``linkify`` option needs: one more
+    dependency for this grammar, and its fuzzy matching links a bare
+    ``example.com`` and an email, which is the recall this rule declines.
+    """
+    for token in state.tokens:
+        if token.type != "inline" or not token.children:
+            continue
+        out: list[Any] = []
+        inside = 0
+        for child in token.children:
+            if child.type == "link_open":
+                inside += 1
+            elif child.type == "link_close":
+                inside = max(0, inside - 1)
+            elif child.type == "text" and not inside:
+                out += _linked(state.md, child)
+                continue
+            out.append(child)
+        token.children = out
+
+
+def _linked(md: Any, text: Any) -> list[Any]:
+    """
+    One text token as itself, or cut into text and links around each bare address.
+    """
+    source = str(text.content)
+    Token = type(text)
+    pieces: list[Any] = []
+    done = 0
+
+    def said(content: str) -> None:
+        if content:
+            piece = Token("text", "", 0)
+            piece.content = content
+            piece.level = text.level
+            pieces.append(piece)
+
+    for found in _BARE_SCHEME.finditer(source):
+        start = found.start()
+        if start < done:
+            continue
+        before = source[start - 1] if start else ""
+        if (before.isascii() and before.isalnum()) or before in _BARE_NOT_AFTER:
+            continue
+        host = found.end()
+        if host >= len(source) or not source[host].isalnum():
+            continue
+        ending = _BARE_ENDS.search(source, host)
+        end = _trimmed(source, start, ending.start() if ending else len(source))
+        after_scheme = _BARE_ESCAPED.sub(r"\1", source[host:end])
+        if "@" in re.split(r"[/?#]", after_scheme, maxsplit=1)[0]:
+            continue
+        href = md.normalizeLink(found.group().lower() + after_scheme)
+        if not md.validateLink(href):
+            continue
+        said(source[done:start])
+        opened = Token("link_open", "a", 1)
+        opened.attrs = {"href": href}
+        opened.markup = "linkify"
+        opened.info = "auto"
+        opened.level = text.level
+        pieces.append(opened)
+        said(source[start:end])
+        closed = Token("link_close", "a", -1)
+        closed.markup = "linkify"
+        closed.info = "auto"
+        closed.level = text.level
+        pieces.append(closed)
+        done = end
+    if not done:
+        return [text]
+    said(source[done:])
+    return pieces
+
+
+def _trimmed(source: str, start: int, end: int) -> int:
+    """
+    Where an address read from ``start`` to ``end`` ends once GFM's trailing
+    punctuation, unbalanced ``)`` and entity-like ``;`` are off it.
+    """
+    while end > start:
+        last = source[end - 1]
+        if last in _BARE_TRAILING:
+            end -= 1
+        elif last == ")" and source.count(")", start, end) > source.count("(", start, end):
+            end -= 1
+        elif last == ";":
+            at = end - 2
+            while at > start and source[at].isalnum():
+                at -= 1
+            end = at if at < end - 2 and source[at] == "&" else end - 1
+        else:
+            break
+    return end
 
 
 def _show_destinations(state: Any) -> None:

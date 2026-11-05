@@ -17,7 +17,8 @@ those answers live here once.
   fonts; ``unload``.
 - ``themes``: a role's face, size and leading as the library's theme, pptmstr's
   inks as its palette, and which text the library sets at all.
-- ``views``: ``ViewCache``, and the calls a pane's typeset branch makes.
+- ``views``: ``ViewCache``, and the calls a pane's typeset branch makes;
+  ``follow_links``, what a click on a link in any markdown view calls.
 - ``find``: the matches of a needle in a ``ViewCache``'s views
   (``find_matches``), and the marks a view is handed (``find_marks``).
 - ``diffs``: the diff model of a parked call, a view of it, which fences are
@@ -139,6 +140,7 @@ from .views import (
     Stream,
     ViewCache,
     document,
+    follow_links,
     font,
     imfont,
     label,
@@ -197,6 +199,7 @@ __all__ = [
     "face_font",
     "find_marks",
     "find_matches",
+    "follow_links",
     "font",
     "imfont",
     "is_diff_fence",
