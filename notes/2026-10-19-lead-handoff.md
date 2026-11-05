@@ -26,13 +26,13 @@ starts with an empty board and can't read this one.
 - Commits: 1513a23 (research), a6b0f51 (round one), 944c207 (graph evidence), 720b406 (round
   two), 88af369 (merge of origin/main 713af05), 83f31b0 and 769c898 (this note), 91d4426 (round
   three), 982e20d (coordinator concept), then the merge of origin/main 7d3a21f (d305c0b), the
-  first three-lead case study, and round four's case-study items.
-- `make check` green at G-r4a: 14866 passed, 14 skipped, 23 xfailed (14903 collected; no test
-  file lost tests against d305c0b).
+  first three-lead case study, round four's case-study items, and the merge of origin/main
+  d81db99 (171010e).
+- `make check` green after that merge: 16081 passed, 76 skipped, 23 xfailed.
 - Baselines for the next gate:
   - **23** `[imgui-error]` lines, from tests that exercise error recovery;
-  - **1914** for `make typecheck-all` (red before this branch; don't let it rise). Only the
-    total was compared, not per file.
+  - **1936** for `make typecheck-all` after the merge (main alone 2067, the branch alone 1914; no
+    error in the merged tree is absent from both sides). Don't let it rise.
 - Built:
   - peer messages (H+, `peer-posted`, keyed on link id);
   - decisions in the asker's log, and channel decisions;
