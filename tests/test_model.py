@@ -323,7 +323,13 @@ def test_a_basis_is_one_of_three_and_unstated_is_not_one_of_them() -> None:
     assert Task(id="t", title="t").result_basis is None
     assert (
         Concern(
-            id="c", sender=("s", None), recipient=("s", "a"), subject="", body="", posted_at=0.0
+            id="c",
+            sender=("s", None),
+            recipient=("s", "a"),
+            subject="",
+            body="",
+            posted_at=0.0,
+            channel=None,
         ).basis
         is None
     )
@@ -344,7 +350,13 @@ def test_the_three_new_facts_are_absent_until_somebody_states_them() -> None:
     assert (blank.property, blank.not_run) == ("", None)
     assert (
         Concern(
-            id="c", sender=("s", None), recipient=("s", "a"), subject="", body="", posted_at=0.0
+            id="c",
+            sender=("s", None),
+            recipient=("s", "a"),
+            subject="",
+            body="",
+            posted_at=0.0,
+            channel=None,
         ).incident
         is False
     )

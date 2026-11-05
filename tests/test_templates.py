@@ -325,9 +325,12 @@ def test_review_roles_cannot_edit(template: WorkTemplate) -> None:
 def test_the_bus_names_in_templates_match_the_bus() -> None:
     # templates.py is SDK-free and spells the tool names rather than importing
     # them from bus.py, which is not. This keeps the two copies honest.
-    from pptmstr.bus import BUS_TOOLS, COMMAND_TOOLS
+    from pptmstr.bus import BUS_TOOLS, COMMAND_TOOLS, PEER_TOOLS
 
     assert set(BUS_TOOL_NAMES) == set(BUS_TOOLS)
+    # A worker's list never carries the tools between leads: only a lead sends
+    # to another team, and the handler refuses anyone else.
+    assert not set(PEER_TOOLS) & set(BUS_TOOL_NAMES)
     assert set(COMMAND_TOOL_NAMES) == set(COMMAND_TOOLS)
     assert not set(COMMAND_TOOL_NAMES) & set(BUS_TOOL_NAMES)
 

@@ -27,13 +27,14 @@ import re
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Set as AbstractSet
 from types import MappingProxyType
 from typing import assert_never
 
 from . import drawable
-from .approval import Policy
+from .approval import Policy, Summary, peer_channel, summary_of
 from .board import ROOT_NAMES, board_concerns, board_tasks, role_name
-from .boardlog import Board, Party, RestoredConcern, RestoredTask
+from .boardlog import Board, Party, RestoredConcern, RestoredDecision, RestoredTask
 from .command import (
     MAX_OPEN_PER_ASKER,
     MAX_OPEN_SUBAGENTS,
@@ -62,10 +63,16 @@ from .effects import (
     DigestDelivered,
     Effect,
     InboxDelivered,
+    PeerIdentity,
+    PeerInboxDelivered,
+    PeerSettled,
+    PeerWithdrawSettled,
     SessionDetachSettled,
     SessionWoken,
     TaskWriteSettled,
     WakeReason,
+    peer_forms,
+    peer_identity,
 )
 from .intents import (
     AgentFinished,
@@ -76,6 +83,9 @@ from .intents import (
     ApprovalResolved,
     BoardRead,
     BoardRestored,
+    ChannelClosed,
+    ChannelLinked,
+    ChannelsRestored,
     CommandApproved,
     CommandEnded,
     CommandRefused,
@@ -93,14 +103,22 @@ from .intents import (
     DecisionDismissed,
     DecisionRaised,
     DecisionsRead,
+    DecisionWakeSent,
     DecisionWithdrawn,
     DigestRead,
     FailedSessionClosed,
     FailureAcknowledged,
+    HeldMailDismissed,
     InboxRead,
     Intent,
+    PeerInboxRead,
+    PeerQuestionAged,
+    PeerQuestionDismissed,
+    PeerSent,
+    PeerWakeSent,
     SessionDetached,
     SessionRecalled,
+    SessionSettled,
     StateChanged,
     SubagentDelivered,
     SubagentProgress,
@@ -114,9 +132,11 @@ from .intents import (
     TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
+    WakeChainReleased,
 )
 from .model import (
     ALL_WRITERS,
+    EVERY_CHANNEL,
     FINAL_STATES,
     INTERRUPTED_TOPIC,
     MAX_ANSWER_CHARS,
@@ -125,7 +145,10 @@ from .model import (
     MAX_OPEN_DECISIONS_PER_ASKER,
     MAX_OPEN_SUBAGENT_DECISIONS,
     MAX_WITHDRAWAL_REASON_CHARS,
+    MAX_WITHDRAWALS_LISTED,
+    PEER_WAKE_CHAIN,
     RECALLED_TOPIC,
+    WITHDRAW_PEER_TOOL,
     AgentRecord,
     AgentState,
     Answered,
@@ -133,6 +156,10 @@ from .model import (
     ApprovedWrites,
     AskerFate,
     Basis,
+    Channel,
+    ChannelId,
+    ChannelScope,
+    Charter,
     ClaimRefusal,
     CommandOwed,
     CommandRefusal,
@@ -148,7 +175,13 @@ from .model import (
     NodeId,
     NotPlaced,
     Obligation,
+    PeerMailHeld,
+    PeerQuestionUnanswered,
+    PeerRefusal,
+    PeerWakes,
+    PeerWithdrawRefusal,
     PendingApproval,
+    Provenance,
     QuestionPending,
     Recalled,
     Restore,
@@ -161,15 +194,21 @@ from .model import (
     TaskState,
     TaskVersion,
     Unplaced,
+    WakeChainHeld,
     Withdrawn,
     approved_write,
     closing_notice,
     closing_result,
+    is_channel_name,
+    is_concern_id,
     is_operator,
     normalised_property,
     normalised_touches,
+    peer_addressed,
     restored_party,
+    stated_provenance,
     stored_as_sent,
+    why_held,
     withdrawal_notice,
     withdrawal_result,
 )
@@ -304,6 +343,12 @@ def _clock(now: float | None) -> float:
 # helpers built on it, ``commandtext.visible`` -- and ``tests/test_verbatim_drawn.py``
 # draws every pane over them and reads ``pptmstr/ui`` for a raw draw of one.
 #
+# Four of them also reach another lead's tool replies and wakes, and are made
+# drawable with ``drawable.text`` on the way there, from the verbatim field, each
+# time: a root's task and its directories (``session_base``, else ``cwd``) as its
+# card title and project, in ``effects.peer_identity``; and a channel's charter,
+# in ``bus._links_lines``.
+#
 # - The arguments a parked call's editor opens on, which approve sends back to
 #   the tool (with the drawable twin ``PendingApproval.args`` beside them).
 # - A session's launch: its directories, task, team and brief. A relaunch and a
@@ -320,9 +365,15 @@ def _clock(now: float | None) -> float:
 #   themselves. A command's texts are also held to a refusal the reducer asks of
 #   them (``command.request_refusal``, ``Snapshot.command_approval_refusal``), which
 #   has to see a NUL or a lone surrogate to refuse it.
+# - A channel's charter, which is written to the channel's log from the store
+#   and read back from it (``channels.outcomes``): the operator's text, kept as
+#   typed.
 #
-# A board log is not here because no field of it is: it is the store's own board,
-# written drawable and read back so (``_drawable``).
+# A board restore is not here because it never meets this table: ``_drawable``
+# leaves ``BoardRestored`` whole. The log is written from the store's board, so it
+# holds each field in the form the store holds it -- drawable, except the
+# operator's answer to a decision (``Answered.text`` above), which the log carries
+# verbatim (``boardlog.Answered``).
 _VERBATIM: drawable.Verbatim = {
     PendingApproval: frozenset({"raw_args", "shown_args"}),
     AgentSpawned: frozenset({"cwd", "session_base", "task", "template", "brief"}),
@@ -337,6 +388,8 @@ _VERBATIM: drawable.Verbatim = {
     Answered: frozenset({"text"}),
     CommandRefused: frozenset({"reason"}),
     Refused: frozenset({"reason"}),
+    ChannelLinked: frozenset({"charter"}),
+    Channel: frozenset({"charter"}),
 }
 
 
@@ -367,12 +420,15 @@ def _drawable(intent: Intent) -> Intent:
     form beside them where the two differ (``PendingApproval.args``).
 
     **A board restore is the one intent left whole.** Its board is a log the store's
-    own board was written to, so its text is drawable already, and a second pass
-    would write each backslash ``text`` wrote once more: the board would read as
-    nothing an agent wrote, and over the store that wrote it, as a different board
-    (``Unplaced.STORE_DIFFERS``), withholding the whole restore. A log that holds
-    what the store never writes is checked for where it is placed
-    (``Unplaced.UNDRAWABLE``).
+    own board was written to, so every text in it is already in the form the store
+    holds: drawable, and the operator's answer to a decision verbatim. A pass here
+    would write each backslash ``text`` wrote once more and escape every NUL and
+    lone surrogate in a restored answer: the board would read as nothing an agent
+    wrote, the answer would no longer be the one typed, and over the store that
+    wrote it the board would be a different one (``Unplaced.STORE_DIFFERS``),
+    withholding the whole restore. A log that holds what the store never writes
+    -- such a character anywhere but an answer -- is checked for where it is
+    placed (``Unplaced.UNDRAWABLE``).
     """
     if isinstance(intent, BoardRestored):
         return intent
@@ -408,6 +464,11 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
     restores = snap.restores
     decisions = snap.decisions
     commands = snap.commands
+    channels = snap.channels
+    channel_since = snap.channel_since
+    questions_aged = snap.questions_aged
+    held_dismissed = snap.held_dismissed
+    questions_dismissed = snap.questions_dismissed
     effects: tuple[Effect, ...] = ()
     reorder = False
 
@@ -577,6 +638,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             )
 
         case ApprovalRequested():
+            intent = dataclasses.replace(intent, pending=_peer_row(snap, intent.pending))
             rec = nodes.get(intent.node_id)
             if rec is None:
                 # An approval must never be dropped. Every other intent for an
@@ -755,6 +817,18 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             # addressed to a node that has not spawned yet is a real ordering, and
             # dropping it here would lose the operator's only view of a message the
             # sender believes it sent.
+            #
+            # A message between leads is filed only in the one shape a restore
+            # places: between leads of two sessions (``model.peer_addressed``),
+            # under a channel that is its link's name and with an ``re`` in the
+            # concern-id shape (``_peer_fields_hold``). The bus sends one
+            # through ``PeerSent`` and never here.
+            posted = intent.concern
+            if posted.is_peer and not (
+                peer_addressed(posted.sender, posted.recipient)
+                and _peer_fields_hold(posted.channel, posted.link, posted.re, channels)
+            ):
+                return snap, ()
             if intent.concern.id not in concerns:
                 concerns[intent.concern.id] = intent.concern
                 effects = _concern_wake(intent.concern)
@@ -795,15 +869,136 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 ),
             )
 
+        case PeerSent():
+            # Routed here, through the live link, at the instant it is filed
+            # (``intents.PeerSent``). The wake it owes the other lead is
+            # ``_peer_waking``'s, decided over the built snapshot.
+            route = snap.peer_route(intent.node_id, intent.channel)
+            # Who a link that went live after the call reaches now, so the
+            # refusal names the lead the sender may not have meant.
+            now_on = None
+            if not isinstance(route, PeerRefusal):
+                if intent.concern_id in concerns:
+                    route = PeerRefusal.ID_HELD
+                else:
+                    unsent = snap.peer_send_refusal(route[0], intent.called_at, intent.re)
+                    if unsent is PeerRefusal.LINKED_AFTER:
+                        now_on = peer_identity(snap, route[1][0])
+                    route = unsent or route
+            if isinstance(route, PeerRefusal):
+                return snap, (
+                    PeerSettled(request_id=intent.request_id, refusal=route, recipient=now_on),
+                )
+            link, recipient = route
+            concerns[intent.concern_id] = Concern(
+                id=intent.concern_id,
+                sender=intent.node_id,
+                recipient=recipient,
+                subject=intent.subject,
+                body=intent.body,
+                posted_at=intent.at,
+                edited=intent.edited,
+                channel=intent.channel,
+                needs_answer=intent.needs_answer,
+                re=intent.re,
+                quiet=intent.quiet,
+                link=link.id,
+            )
+            cited = None if intent.re is None else snap.concerns.get(intent.re)
+            effects = (
+                PeerSettled(
+                    request_id=intent.request_id,
+                    recipient=peer_identity(snap, recipient[0]),
+                    re_withdrawn=(
+                        cited.delivered_at is not None
+                        if cited is not None and cited.state is ConcernState.WITHDRAWN
+                        else None
+                    ),
+                ),
+            )
+
+        case PeerInboxRead():
+            # Read from the pre-apply view, then mark, as ``InboxRead`` does.
+            # Only what a live link hands over now is marked; the rest stays
+            # waiting, and the reply counts it as held.
+            waiting = snap.peer_inbox_named(intent.node_id, intent.channel)
+            handed = tuple(c for c in waiting if snap.peer_deliverable(c))
+            handed_ids = {c.id for c in handed}
+            for posted in handed:
+                concerns[posted.id] = dataclasses.replace(
+                    posted, state=ConcernState.DELIVERED, delivered_at=intent.at
+                )
+            reader = intent.node_id[0]
+            links = snap.channels_of(reader) if intent.node_id[1] is None else ()
+            # From the pre-apply view too, so what this read hands over is not
+            # also listed as owed. Listed only: nothing about them is marked.
+            # By the links the read covers, as ``_peer_waking`` lets go of the
+            # wake naming them, so a question is listed wherever that is.
+            covered = frozenset(link.id for link in _read_covers(snap, reader, intent.channel))
+            owed = (
+                tuple(c for c in snap.owed_answers(reader, EVERY_CHANNEL) if c.link in covered)
+                if intent.node_id[1] is None
+                else ()
+            )
+            # Listed once in a run: this read marks each it lists told, and
+            # nothing else does. Past the bound they are counted and left untold,
+            # for the next read to list.
+            untold = snap.withdrawn_untold(reader, covered) if intent.node_id[1] is None else ()
+            withdrawn = untold[:MAX_WITHDRAWALS_LISTED]
+            for gone in withdrawn:
+                concerns[gone.id] = dataclasses.replace(gone, withdrawal_told=True)
+            # Each other session the reply names, once, in the order it first
+            # names them: the link's other members, then the messages' senders.
+            others = dict.fromkeys(
+                [m for link in links for m in sorted(link.members) if m != reader]
+                + [posted.sender[0] for posted in (*handed, *owed, *withdrawn)]
+            )
+            effects = (
+                PeerInboxDelivered(
+                    request_id=intent.request_id,
+                    concerns=tuple(concerns[posted.id] for posted in handed),
+                    held=tuple(c for c in waiting if c.id not in handed_ids),
+                    links=links,
+                    peers=tuple(peer_identity(snap, session) for session in others),
+                    owed=owed,
+                    withdrawn=withdrawn,
+                    withdrawn_more=len(untold) - len(withdrawn),
+                ),
+            )
+
         case ConcernEdited():
             c = concerns.get(intent.concern_id)
             if c is not None and c.state is ConcernState.POSTED:
                 concerns[intent.concern_id] = dataclasses.replace(c, body=intent.body, edited=True)
 
         case ConcernWithdrawn():
+            # The operator's stops a concern still waiting and nothing else, and
+            # is answered to nobody. An agent's is its sender's, as
+            # ``_message_withdrawal_refusal`` rules it, and only a peer message
+            # when the tool asked (``peer_only``). The reason is kept as "" when
+            # none was given, so a reader tells it from one a restore did not
+            # keep (``Concern.withdrawn_reason``).
             c = concerns.get(intent.concern_id)
-            if c is not None and c.state is ConcernState.POSTED:
-                concerns[intent.concern_id] = dataclasses.replace(c, state=ConcernState.WITHDRAWN)
+            reason = intent.reason or ""
+            if intent.node_id is None:
+                if c is not None and c.state is ConcernState.POSTED:
+                    concerns[intent.concern_id] = dataclasses.replace(
+                        c, state=ConcernState.WITHDRAWN, withdrawn_reason=reason
+                    )
+            else:
+                stays = _message_withdrawal_refusal(snap, intent.node_id, c)
+                if stays is None and intent.peer_only and c is not None and not c.is_peer:
+                    stays = PeerWithdrawRefusal.TEAM_MAIL
+                if stays is None and c is not None:
+                    concerns[intent.concern_id] = dataclasses.replace(
+                        c, state=ConcernState.WITHDRAWN, withdrawn_reason=reason
+                    )
+                    after = dataclasses.replace(snap, concerns=MappingProxyType(concerns))
+                    settled = _withdraw_settled(snap, after, intent.request_id or "", c)
+                else:
+                    settled = PeerWithdrawSettled(request_id=intent.request_id or "", refusal=stays)
+                if intent.request_id is not None:
+                    effects = (settled,)
 
         case TaskAmended():
             # Amends, never creates. A typo in a task id would otherwise put an
@@ -897,17 +1092,17 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 tasks[intent.task_id] = dataclasses.replace(shown, claimed_version=intent.version)
 
         case TaskDeclared():
-            # Provenance comes from the intent, never from the record handed
-            # in: the intent's node_id is the sender the gate authenticated,
-            # and a declared_by a caller set on the Task is not evidence of
-            # anything. Stamping unconditionally leaves one writer for the
-            # field rather than two that have to agree.
+            # Who declared it comes from the intent, never from the record
+            # handed in: the intent's node_id is the sender the gate
+            # authenticated, and a declared_by a caller set on the Task is not
+            # evidence of anything. Stamping unconditionally leaves one writer
+            # for the field rather than two that have to agree.
             #
             # Touches are normalised here for the same reason: the overlap
             # check compares them, so a caller that could supply its own
             # spelling could evade the check by writing `./x.py`.
             #
-            # A result is blanked on the same grounds as the provenance is
+            # A result is blanked on the same grounds as the declarer is
             # stamped: it is the claimer's account of finished work, a task
             # being declared has neither, and the completion arm is its one
             # writer. What that account left unrun goes with it.
@@ -1182,7 +1377,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             placed = _restored(snap, intent)
             if placed is None:
                 return snap, ()
-            tasks, concerns, restores = placed
+            tasks, concerns, decisions, restores = placed
 
         case DecisionRaised():
             unfiled = _raise_refusal(snap, intent)
@@ -1190,7 +1385,10 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 # Everything an arm other than this one writes is set here and
                 # not read off the record handed in, as ``TaskDeclared`` does: the
                 # asker is the node the gate authenticated, and a decision being
-                # raised has no outcome and has been delivered to nobody.
+                # raised has no outcome and has been delivered to nobody. The
+                # link is the live one the name resolves to now, which
+                # ``_raise_refusal`` has just found joins the asker's session.
+                raised_over = None if intent.channel is None else snap.live_channel(intent.channel)
                 decisions = _filed(
                     decisions,
                     dataclasses.replace(
@@ -1199,9 +1397,19 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                         raised_at=now if intent.at is None else intent.at,
                         outcome=None,
                         first_delivered_at=None,
+                        channel=None if raised_over is None else raised_over.name,
+                        link=None if raised_over is None else raised_over.id,
                     ),
                 )
-            effects = _decision_settled(intent.request_id, unfiled)
+            effects = _decision_settled(
+                intent.request_id,
+                unfiled,
+                (
+                    _link_peer(snap, intent.node_id[0], intent.channel)
+                    if unfiled in (None, DecisionRefusal.LINKED_AFTER)
+                    else None
+                ),
+            )
 
         case DecisionAnswered():
             ended = _ended_by_operator(
@@ -1212,11 +1420,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             if ended is None:
                 return snap, ()
             decisions = ended
-            effects = _woken(
-                decisions[intent.decision_id].asker,
-                WakeReason.DECISION_ANSWERED,
-                intent.decision_id,
-            )
+            effects = _decided(snap, decisions[intent.decision_id], WakeReason.DECISION_ANSWERED)
 
         case DecisionDismissed():
             ended = _ended_by_operator(
@@ -1225,11 +1429,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             if ended is None:
                 return snap, ()
             decisions = ended
-            effects = _woken(
-                decisions[intent.decision_id].asker,
-                WakeReason.DECISION_DISMISSED,
-                intent.decision_id,
-            )
+            effects = _decided(snap, decisions[intent.decision_id], WakeReason.DECISION_DISMISSED)
 
         case DecisionWithdrawn():
             kept = _withdrawal_refusal(decisions, intent)
@@ -1264,10 +1464,19 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 decisions = _filed(
                     decisions, dataclasses.replace(named, first_delivered_at=intent.at)
                 )
+            readable = snap.decisions_readable_by(intent.node_id)
             effects = (
                 DecisionsDelivered(
                     request_id=intent.request_id,
-                    decisions=snap.decisions_readable_by(intent.node_id),
+                    decisions=readable,
+                    peers=tuple(
+                        peer_identity(snap, session)
+                        for session in dict.fromkeys(
+                            d.session_id
+                            for d in readable
+                            if d.channel is not None and d.session_id != intent.node_id[0]
+                        )
+                    ),
                 ),
             )
 
@@ -1469,6 +1678,60 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 state=AgentState.DONE, error=None, acknowledged=True
             )
 
+        case ChannelLinked():
+            if snap.link_refusal(intent.channel_id, intent.name, intent.members, intent.recording):
+                return snap, ()
+            channels = MappingProxyType(
+                {
+                    **channels,
+                    intent.channel_id: Channel(
+                        id=intent.channel_id,
+                        name=intent.name,
+                        members=intent.members,
+                        charter=intent.charter,
+                        created_at=intent.at,
+                    ),
+                }
+            )
+            channel_since = MappingProxyType({**channel_since, intent.channel_id: now})
+            nodes = _peer_rows(dataclasses.replace(snap, channels=channels), nodes)
+
+        case ChannelClosed():
+            open_ = channels.get(intent.channel_id)
+            if open_ is None or not open_.live:
+                return snap, ()
+            channels = MappingProxyType(
+                {**channels, open_.id: dataclasses.replace(open_, closed_at=intent.at)}
+            )
+            nodes = _peer_rows(dataclasses.replace(snap, channels=channels), nodes)
+
+        case ChannelsRestored():
+            unheld = {c.id: c for c in intent.channels if c.id not in channels}
+            if not unheld:
+                return snap, ()
+            channels = MappingProxyType({**channels, **unheld})
+            channel_since = MappingProxyType({**channel_since, **{cid: now for cid in unheld}})
+            nodes = _peer_rows(dataclasses.replace(snap, channels=channels), nodes)
+
+        case SessionSettled() | WakeChainReleased() | PeerWakeSent() | DecisionWakeSent():
+            # Nothing of the world moves: what each does to waking is
+            # ``_peer_waking``'s, below.
+            pass
+
+        case PeerQuestionAged():
+            # Kept only while the question is owed an answer: ``_owing_peer_mail``
+            # drops it otherwise, so an answer that crossed this word wins.
+            questions_aged = questions_aged | {intent.concern_id}
+
+        case HeldMailDismissed():
+            # Kept only while the mail is held (``_owing_peer_mail``).
+            held_dismissed = held_dismissed | intent.concerns
+
+        case PeerQuestionDismissed():
+            # Kept only while the same row would still be raised
+            # (``_owing_peer_mail``).
+            questions_dismissed = questions_dismissed | {(intent.concern_id, intent.running)}
+
         case _:
             # Not reachable at runtime; it is here for mypy, which reports an
             # unhandled Intent member as a type error at this line. That turns
@@ -1498,29 +1761,164 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
         nodes[owing] = nodes[owing].with_(recalled=None)
         reorder = True
 
+    # After every arm, whatever the intent: a parked row describes its lead
+    # from that lead's root record, and any step that adds, drops or rewrites a
+    # root can change the description.
+    if _redescribed(snap, nodes):
+        nodes = _peer_rows(
+            dataclasses.replace(snap, nodes=MappingProxyType(nodes), channels=channels), nodes
+        )
+
     order = _preorder(nodes) if reorder else snap.order
+    world, woken = _peer_waking(
+        snap,
+        intent,
+        Snapshot(
+            seq=snap.seq + 1,
+            nodes=MappingProxyType(nodes),
+            order=order,
+            needs_you=_needs_you(nodes, order),
+            any_active=any(r.state.is_active for r in nodes.values()),
+            concerns=MappingProxyType(concerns),
+            tasks=MappingProxyType(tasks),
+            unattributed_writes=unattributed,
+            restores=restores,
+            decisions=decisions,
+            commands=commands,
+            command_since=_command_since(snap, commands, now),
+            channels=channels,
+            channel_since=channel_since,
+            peer_wakes=snap.peer_wakes,
+            questions_aged=questions_aged,
+            held_dismissed=held_dismissed,
+            questions_dismissed=questions_dismissed,
+        ),
+        now,
+    )
     return (
         _back_on_fleet(
-            _owing_commands(
-                _owing_decisions(
-                    Snapshot(
-                        seq=snap.seq + 1,
-                        nodes=MappingProxyType(nodes),
-                        order=order,
-                        needs_you=_needs_you(nodes, order),
-                        any_active=any(r.state.is_active for r in nodes.values()),
-                        concerns=MappingProxyType(concerns),
-                        tasks=MappingProxyType(tasks),
-                        unattributed_writes=unattributed,
-                        restores=restores,
-                        decisions=decisions,
-                        commands=commands,
-                        command_since=_command_since(snap, commands, now),
-                    )
-                )
-            )
+            _owing_peer_mail(_owing_wake_chains(_owing_commands(_owing_decisions(world))))
         ),
-        effects,
+        effects + woken,
+    )
+
+
+def _peer_row(snap: Snapshot, pending: PendingApproval) -> PendingApproval:
+    """
+    ``pending`` with its queue row naming the session it would reach now, when
+    it is a call that reaches another team's lead (``approval.peer_channel``),
+    and as it was otherwise.
+
+    The driver summarises a call before the store has seen it, and only the
+    store knows whom a channel's name reaches, so the row is finished here: when
+    the call parks, and again whenever a link changes (``_peer_rows``). The
+    session is named as every lead is told of it (``effects.peer_text``): its
+    id's head, its card's title and its project.
+
+    A link that went live after the call parked is not one the call can reach:
+    ``requested_at`` is the call's stamp (``driver._park``), and ``PeerSent`` or
+    ``DecisionRaised`` refuses it (``Snapshot.linked_after``), so the row says
+    that and names nobody. An ``re`` the send would be refused for is not said
+    here: whether the store holds the message it cites changes on a resume, and
+    the row is rewritten only when a link changes.
+
+    The session is said in the longest of its descriptions that leaves the
+    call's subject whole on the row (``effects.peer_forms``, ``summary_of``).
+
+    A withdrawal names a message and no channel, so its link is the one the
+    store finds that message on (``Snapshot.parked_link``), and the row names
+    that link and the message's recipient. A message this call's agent did
+    not send to another team's lead is said to be refused, with no link: the
+    row is never put on a link the call does not act across.
+    """
+    if pending.tool_name == WITHDRAW_PEER_TOOL:
+        return _withdrawal_row(snap, pending)
+    channel = peer_channel(pending.tool_name, pending.raw_args)
+    if channel is None:
+        return pending
+    route = snap.peer_route(pending.node, channel)
+    reaches: str | tuple[str, ...]
+    if isinstance(route, PeerRefusal):
+        reaches = "it reaches no lead now"
+    elif snap.linked_after(route[0], pending.requested_at):
+        reaches = "will be refused: the link is newer than this call"
+    else:
+        reaches = peer_forms(peer_identity(snap, route[1][0]))
+    return _summarised(pending, summary_of(pending.tool_name, pending.raw_args, reaches=reaches))
+
+
+def _withdrawal_row(snap: Snapshot, pending: PendingApproval) -> PendingApproval:
+    """
+    ``_peer_row`` for a parked ``withdraw_peer_message``: the link the
+    withdrawn message went over and the lead it went to, from the store.
+    """
+    named = str(pending.raw_args.get("message_id") or "").strip()
+    message = snap.concerns.get(named)
+    across: str | None = None
+    reaches: str | tuple[str, ...]
+    if message is None or message.sender != pending.node or not message.is_peer:
+        reaches = "will be refused: this lead sent no such message to another team"
+    else:
+        across = message.channel
+        if snap.parked_link(pending) is None:
+            reaches = "it reaches no lead now"
+        else:
+            reaches = peer_forms(peer_identity(snap, message.recipient[0]))
+    return _summarised(
+        pending,
+        summary_of(pending.tool_name, pending.raw_args, reaches=reaches, across=across),
+    )
+
+
+def _summarised(pending: PendingApproval, summary: Summary) -> PendingApproval:
+    """
+    ``pending`` with ``summary`` as its row, and the span in it of the lead's
+    description (``PendingApproval.summary_peer``), as ``summary_of`` composed
+    them.
+    """
+    if summary.text == pending.summary and summary.peer == pending.summary_peer:
+        return pending
+    return dataclasses.replace(pending, summary=summary.text, summary_peer=summary.peer)
+
+
+def _peer_rows(snap: Snapshot, nodes: dict[NodeId, AgentRecord]) -> dict[NodeId, AgentRecord]:
+    """
+    ``nodes`` with every parked call that reaches another team's lead
+    re-summarised against ``snap``'s links and records (``_peer_row``). Asked
+    on every step that changes a link, so a row approved after the operator
+    closed a name and linked it again names the session it goes to -- and
+    ``PeerSent`` refuses it then if that link is newer than the call
+    (``Snapshot.linked_after``) -- and on every step that changes how a lead
+    is described (``_redescribed``), so the row names a card as the leads'
+    own lines do.
+    """
+    for node_id, rec in list(nodes.items()):
+        rows = tuple(_peer_row(snap, p) for p in rec.pending)
+        if any(a is not b for a, b in zip(rows, rec.pending, strict=True)):
+            nodes[node_id] = rec.with_(pending=rows)
+    return nodes
+
+
+def _redescribed(was: Snapshot, nodes: Mapping[NodeId, AgentRecord]) -> bool:
+    """
+    Whether a step that leaves ``nodes`` changed the description of some lead
+    (``effects.peer_identity``): a root record added or dropped, or one whose
+    description differs. False while nothing is parked, since only a parked
+    row holds a description.
+
+    The description is asked only of roots whose record object the step
+    replaced, so a step that touches no root costs one pass over the records.
+    """
+    if not any(rec.pending for rec in nodes.values()):
+        return False
+    if any(n[1] is None and n not in nodes for n in was.nodes):
+        return True
+    now = dataclasses.replace(was, nodes=MappingProxyType(nodes))
+    return any(
+        node[1] is None
+        and was.nodes.get(node) is not rec
+        and peer_identity(was, node[0]) != peer_identity(now, node[0])
+        for node, rec in nodes.items()
     )
 
 
@@ -1748,6 +2146,58 @@ def _declaration_refusal(
     if cycle:
         return TaskRefusal.WOULD_CYCLE, cycle
     return None, ()
+
+
+def _message_withdrawal_refusal(
+    snap: Snapshot, by: NodeId, concern: Concern | None
+) -> PeerWithdrawRefusal | None:
+    """
+    Why the agent ``by`` may not withdraw ``concern``, or None if it may.
+
+    **Only its sender may**: the node the gate stamped on the send, compared
+    whole, so a sub-agent of the sending session is not its lead and the
+    recipient is never the sender (``model.peer_addressed``). A concern this
+    store does not hold and one another agent sent are answered alike
+    (``PeerWithdrawRefusal.NOT_YOURS``).
+
+    A concern inside a team only while it waits. A peer message while it
+    waits and after its lead read it, since a question read and left open is
+    the one a sender most needs to take back; but only over a link that is
+    live and still has the sender's session on it, so a lead that has left a
+    link reaches nothing through it, and only while no message from its
+    recipient's session answers it (``Snapshot.is_answered``).
+    """
+    if concern is None or concern.sender != by:
+        return PeerWithdrawRefusal.NOT_YOURS
+    if concern.state is ConcernState.WITHDRAWN:
+        return PeerWithdrawRefusal.WITHDRAWN
+    if not concern.is_peer:
+        return None if concern.state is ConcernState.POSTED else PeerWithdrawRefusal.ALREADY_READ
+    link = snap.channels.get(concern.link) if concern.link is not None else None
+    if link is None or not link.joins(by[0]):
+        return PeerWithdrawRefusal.NOT_A_MEMBER
+    if snap.is_answered(concern):
+        return PeerWithdrawRefusal.ANSWERED
+    return None
+
+
+def _withdraw_settled(
+    snap: Snapshot, after: Snapshot, request_id: str, withdrawn: Concern
+) -> PeerWithdrawSettled:
+    """
+    The answer to a withdrawal ``_message_withdrawal_refusal`` allowed: whom
+    the message was for and whether that lead had read it, from the pre-apply
+    view ``snap``, and where the message it answered stands, from ``after``,
+    where it no longer answers it (``Snapshot.cited_question``).
+    """
+    return PeerWithdrawSettled(
+        request_id=request_id,
+        recipient=peer_identity(snap, withdrawn.recipient[0]),
+        channel=withdrawn.channel,
+        read=withdrawn.state is ConcernState.DELIVERED,
+        answers=withdrawn.re,
+        cited=after.cited_question(withdrawn),
+    )
 
 
 def _amender_refusal(task: Task, amender: NodeId | None) -> TaskRefusal | None:
@@ -2274,12 +2724,25 @@ def _filed(
 
 
 def _decision_settled(
-    request_id: str | None, refusal: DecisionRefusal | None
+    request_id: str | None, refusal: DecisionRefusal | None, peer: PeerIdentity | None = None
 ) -> tuple[Effect, ...]:
     """The reply to a raise or a withdrawal, or nothing when nobody asked."""
     if request_id is None:
         return ()
-    return (DecisionSettled(request_id=request_id, refusal=refusal),)
+    return (DecisionSettled(request_id=request_id, refusal=refusal, peer=peer),)
+
+
+def _link_peer(snap: Snapshot, session_id: str, channel: str | None) -> PeerIdentity | None:
+    """
+    The lead at the other end of the live link called ``channel`` from
+    ``session_id``, or None where there is no such link or it does not join
+    that session.
+    """
+    link = None if channel is None else snap.live_channel(channel)
+    if link is None or not link.joins(session_id):
+        return None
+    others = sorted(link.members - {session_id})
+    return peer_identity(snap, others[0]) if others else None
 
 
 def _raise_refusal(snap: Snapshot, intent: DecisionRaised) -> DecisionRefusal | None:
@@ -2288,6 +2751,11 @@ def _raise_refusal(snap: Snapshot, intent: DecisionRaised) -> DecisionRefusal | 
 
     An id already held is refused before anything is counted, so a retry of a
     raise that landed is told that and not that an allowance is spent.
+
+    A raise on a channel is the lead's, over a live link its session is a
+    member of (``DecisionRefusal.NOT_ON_CHANNEL``). Checked against the store
+    at the instant of filing, as ``blocks`` is: a link closed between the
+    call and this step refuses it.
 
     ``blocks`` is checked here and not only where it was typed: this is the
     instant the board is known, and a row that says "blocks t3" in the queue's
@@ -2305,6 +2773,15 @@ def _raise_refusal(snap: Snapshot, intent: DecisionRaised) -> DecisionRefusal | 
     asker = intent.node_id
     if intent.decision.id in snap.decisions:
         return DecisionRefusal.ALREADY_RAISED
+    channel = intent.channel
+    if channel is not None:
+        if asker[1] is not None:
+            return DecisionRefusal.NOT_A_LEAD
+        link = snap.live_channel(channel)
+        if link is None or not link.joins(asker[0]):
+            return DecisionRefusal.NOT_ON_CHANNEL
+        if snap.linked_after(link, intent.called_at):
+            return DecisionRefusal.LINKED_AFTER
     if blocked_tasks(snap, intent.decision, asker[0]) != tuple(
         dict.fromkeys(intent.decision.blocks)
     ):
@@ -2332,6 +2809,28 @@ def _woken(asker: NodeId, reason: WakeReason, subject_id: str) -> tuple[Effect, 
     return (SessionWoken(session_id=asker[0], reason=reason, subject_id=subject_id),)
 
 
+def _decided(snap: Snapshot, decision: Decision, reason: WakeReason) -> tuple[Effect, ...]:
+    """
+    The wakes the operator's answer or dismissal of ``decision`` orders: its
+    asker's, as for any decision, and for one raised on a channel every other
+    member's lead that reads it over the link (Decided 12), so the lead that
+    did not ask hears it from pptmstr and not as the asker's relay.
+
+    The operator's act, so none of these counts toward a link's chain; it
+    starts the chain again instead (``_moved``). The asker's session is woken
+    once, whichever of its agents asked.
+    """
+    asker = _woken(decision.asker, reason, decision.id)
+    link = None if decision.link is None else snap.channels.get(decision.link)
+    if link is None:
+        return asker
+    return asker + tuple(
+        SessionWoken(session_id=member, reason=reason, subject_id=decision.id)
+        for member in sorted(link.members - {decision.session_id})
+        if snap.channel_decision_readable(decision, member)
+    )
+
+
 def _concern_wake(concern: Concern) -> tuple[Effect, ...]:
     """
     The order to wake a lead for a concern one of its own workers addressed to
@@ -2340,6 +2839,11 @@ def _concern_wake(concern: Concern) -> tuple[Effect, ...]:
     Only worker to its own lead, so no agent can wake another into a loop: a
     lead's concern to a worker, a worker's to a worker, and anything across
     sessions are read with ``read_inbox`` when the recipient next looks.
+
+    A message between the leads of two linked sessions is not a concern this
+    rule is asked of: it arrives through ``PeerSent``, and its wake is
+    ``_peer_waking``'s, under a rule of its own that bounds the loop this one
+    rules out.
     """
     sender, recipient = concern.sender, concern.recipient
     if sender[1] is None or recipient[1] is not None or sender[0] != recipient[0]:
@@ -2355,6 +2859,688 @@ def _concern_wake(concern: Concern) -> tuple[Effect, ...]:
             sender=sender,
         ),
     )
+
+
+# -- waking a lead for its peer mail (Decided 10) -------------------------------------
+
+
+def _peer_waking(
+    before: Snapshot, intent: Intent, world: Snapshot, now: float
+) -> tuple[Snapshot, tuple[Effect, ...]]:
+    """
+    ``world`` with what ``intent`` did to waking (``Snapshot.peer_wakes``), and
+    the wakes it orders. **Delivery first**: a message that is not ``quiet``
+    wakes the lead it reaches, so no message waits on a lead remembering to
+    look (Decided 10).
+
+    - **What wakes.** A message filed by ``PeerSent`` that is not quiet wakes
+      its recipient's session. So does mail already waiting, at a session's
+      ``SessionSettled`` (its restore is in the store) and at a sender's
+      ``BoardRestored`` (its restore brought mail back for a running peer).
+    - **A decision raised on a channel wakes the other members' leads**
+      through the same per-link wake (``PeerWakes.untold``), whose line names
+      it by id beside the unread count: an agent's act like a message, so it
+      is coalesced with the link's mail, counted toward the chain and held at
+      its bound. The decisions still open on its links are named again to a
+      lead at its ``SessionSettled``, and to its peers at an asker's
+      ``BoardRestored``. The operator's answer is not this: it wakes every
+      member apart from this, uncounted (``_decided``).
+    - **An answer a lead was down for is named at its resume.** A channel
+      decision the other lead raised, answered or dismissed while this lead's
+      session could not be woken, is named to it at its ``SessionSettled``
+      with a wake of the answer's own reason, uncounted. A lead is marked as
+      told (``PeerWakes.heard``) when the shell sends it a wake naming one
+      (``DecisionWakeSent``), whether that was the operator's answer or a
+      settle, so each is named once a run; a wake the shell dropped, its
+      session failing or closed first, marks nothing. An asker's
+      ``BoardRestored`` that brings back ones it raised names them to its
+      running peers in the same way. Nothing is logged, so
+      after a restart every ended decision on a live link is named again at
+      the lead's first resume: repetition bounded by resumes, taken over
+      growing the log with a read receipt. How many one wake names is bounded
+      where its text is written (``bus.WAKE_DECISIONS_NAMED``).
+    - **Coalesced per link, between the order and the send.** A session
+      pending on a link -- woken, and the shell not yet done with that wake --
+      is not woken again on it: the wake line counts what is waiting when the
+      shell sends it (``bus.wake_line``). The shell's ``PeerWakeSent`` ends
+      it, and so does a ``PeerInboxRead`` by its lead for the links the read
+      covered and that owe it no decision, or the link having nothing left
+      for it to read (a withdrawal).
+      So a lead woken that ends its turn without reading is woken again by the
+      next message: a forgotten read costs a turn, never a stalled message.
+    - **Who can be woken** is ``_wakeable``'s: what a session that is not
+      there to be woken was owed is forgotten, and asked again at its next
+      ``SessionSettled``. Its mail stays waiting in the store.
+    - **A resume clears what its lead was owed on every link and wakes it.**
+      At ``SessionSettled`` the session is let go of (``PeerWakes.without``):
+      pending, owed decisions, and a held chain's row too. Its wake is then
+      asked again uncounted, whatever the link's chain stands at. The chain
+      itself is left as it is. Resuming a session is taken as an operator
+      act, so a held lead's row ends with it, though the act is on the
+      session and not the link.
+    - **A question the lead read and has not answered is named at its
+      settle.** A lead that owes an answer on a live link
+      (``Snapshot.owed_answers``) is woken on it at its ``SessionSettled``,
+      uncounted, with nothing else waiting, and the wake's line names those
+      questions (``PeerWakes.owing``). So is a running lead at an asker's
+      ``BoardRestored`` that brings back a question it owes: the question
+      and its delivery are in the asker's log, so after a restart that
+      resumes the recipient first, its own settle finds nothing owed. So is
+      a lead whose held wake on the link the operator's act on it wakes
+      (``_moved``): the operator is looking at that link. Only these ask
+      it: the shell's ``PeerWakeSent`` lets it go and asks nothing again for
+      it, so a lead that ends its turn without answering is not woken for
+      them before its next settle, such a restore or such an act.
+    - **The backstop.** Each wake an agent's message brings about counts
+      toward its link's chain; at ``PEER_WAKE_CHAIN`` the next is held, and
+      owed to the operator as a ``WakeChainHeld`` row. A wake the system
+      orders on its own -- at a ``SessionSettled`` or a sender's
+      ``BoardRestored`` -- is not a turn of the exchange, and is neither
+      counted nor held. The operator acting on the link (``_moved``) starts
+      the chain again and wakes what was held at once.
+
+    A wake is only ever ordered here for a session with a message on the link
+    that is not quiet and that the link would hand over now, a decision on
+    it still owed, or, at its settle, an asker's restore or the operator's
+    release of its held wake, a question on it owed an answer. Quiet mail is
+    read with the next wake or read, and wakes nobody.
+    """
+    wakes = {
+        lid: kept
+        for lid, held in world.peer_wakes.items()
+        if (kept := _still_owed(world, lid, held)) is not None
+    }
+    # Each ask is a session, its link, whether an agent's message brought it
+    # about (and so counts toward the chain and can be held), and whether it
+    # names the questions the lead owes an answer to (``PeerWakes.owing``).
+    asked: list[tuple[str, Channel, bool, bool]] = []
+    woken: list[Effect] = []
+    match intent:
+        case PeerSent():
+            filed = world.concerns.get(intent.concern_id)
+            if (
+                intent.concern_id not in before.concerns
+                and filed is not None
+                and not filed.quiet
+                and filed.link is not None
+                and filed.link in world.channels
+            ):
+                asked.append((filed.recipient[0], world.channels[filed.link], True, False))
+        case DecisionRaised():
+            raised = world.decisions.get(intent.decision.id)
+            if intent.decision.id not in before.decisions and raised is not None:
+                asked.extend(
+                    (sid, link, True, False) for sid, link in _to_tell(world, wakes, (raised,))
+                )
+        case PeerInboxRead():
+            if intent.node_id[1] is None:
+                reader = intent.node_id[0]
+                for link in _read_covers(world, reader, intent.channel):
+                    # A read of the link's mail is not a read of the decisions
+                    # raised on it: a wake still owed for one stays as it is,
+                    # though no longer for the questions the read listed again.
+                    if link.id not in wakes:
+                        continue
+                    if wakes[link.id].untold_to(reader):
+                        wakes[link.id] = dataclasses.replace(
+                            wakes[link.id], owing=wakes[link.id].owing - {reader}
+                        )
+                    else:
+                        wakes[link.id] = wakes[link.id].without(reader)
+        case PeerWakeSent():
+            spent_on = world.channels.get(intent.link_id)
+            if spent_on is not None:
+                if spent_on.id in wakes:
+                    spent = wakes[spent_on.id]
+                    wakes[spent_on.id] = dataclasses.replace(
+                        spent,
+                        pending=spent.pending - {intent.session_id},
+                        owing=spent.owing - {intent.session_id},
+                        untold=tuple(
+                            (sid, did)
+                            for sid, did in spent.untold
+                            if sid != intent.session_id or did not in intent.told
+                        ),
+                    )
+                if any(
+                    c.id not in intent.covered and not c.quiet
+                    for c in world.peer_unread(intent.session_id, spent_on)
+                ) or wakes.get(spent_on.id, PeerWakes()).untold_to(intent.session_id):
+                    asked.append((intent.session_id, spent_on, True, False))
+        case SessionSettled():
+            # A resume clears a held chain's row and wakes the lead (the
+            # docstring's "A resume" item). The decisions still open on its
+            # links are named to it again: nothing records what an earlier run
+            # was told or read. So are the questions it was handed and owes an
+            # answer to, once: its own log holds any reply it sent in an earlier
+            # run, restored ahead of this.
+            for link in world.channels_of(intent.session_id):
+                if link.id in wakes:
+                    wakes[link.id] = wakes[link.id].without(intent.session_id)
+                owes = bool(world.owed_answers(intent.session_id, link))
+                asked.append((intent.session_id, link, False, owes))
+            _to_tell(
+                world,
+                wakes,
+                tuple(d for d in world.decisions.values() if d.is_open),
+                only=intent.session_id,
+            )
+            woken.extend(_unheard(world, wakes, intent.session_id))
+        case DecisionWakeSent():
+            _heard(world, wakes, intent.session_id, intent.decisions)
+        case BoardRestored():
+            restored = frozenset(world.decisions) - frozenset(before.decisions)
+            for link in world.channels_of(intent.session_id):
+                for peer in sorted(link.members - {intent.session_id}):
+                    # The asker's log holds a question and its delivery, so a
+                    # restore can bring back one a running lead owes.
+                    #
+                    # By the shell's order, nothing makes ``peer`` pending on
+                    # this link before the asker's restore: only the asker's
+                    # log or its live acts can, and a live act comes after its
+                    # restore (``app._open_board_log``). So a question brought
+                    # back is woken for below and never coalesced into a wake
+                    # already pending, which would not name it.
+                    owes = bool(
+                        frozenset(c.id for c in world.owed_answers(peer, link))
+                        - frozenset(c.id for c in before.owed_answers(peer, link))
+                    )
+                    asked.append((peer, link, False, owes))
+                    woken.extend(_unheard(world, wakes, peer, among=restored))
+            _to_tell(
+                world,
+                wakes,
+                tuple(
+                    d
+                    for did, d in world.decisions.items()
+                    if did not in before.decisions and d.is_open
+                ),
+            )
+        case _:
+            pass
+    for lid in _moved(before, intent, world, wakes):
+        moved = wakes[lid]
+        wakes[lid] = dataclasses.replace(moved, chain=0, held=())
+        # The operator is looking at this link, so a held lead's wake names
+        # what it owes there too. Counted, and the chain is 0 again, so it is
+        # not held a second time.
+        on = world.channels[lid]
+        asked.extend((sid, on, True, bool(world.owed_answers(sid, on))) for sid, _ in moved.held)
+    for session_id, link, counted, owes in asked:
+        owed = wakes.get(link.id, PeerWakes())
+        if (
+            session_id in owed.pending
+            or owed.is_held(session_id)
+            or not _wakeable(world, session_id)
+            or (
+                all(c.quiet for c in world.peer_unread(session_id, link))
+                and not owed.untold_to(session_id)
+                and not owes
+            )
+        ):
+            continue
+        if counted and owed.chain >= PEER_WAKE_CHAIN:
+            wakes[link.id] = dataclasses.replace(owed, held=(*owed.held, (session_id, now)))
+            continue
+        wakes[link.id] = dataclasses.replace(
+            owed,
+            chain=owed.chain + counted,
+            pending=owed.pending | {session_id},
+            owing=owed.owing | {session_id} if owes else owed.owing,
+        )
+        woken.append(
+            SessionWoken(session_id=session_id, reason=WakeReason.PEER_MESSAGE, subject_id=link.id)
+        )
+    kept_wakes = {lid: w for lid, w in wakes.items() if w != PeerWakes()}
+    if kept_wakes == dict(world.peer_wakes):
+        return world, tuple(woken)
+    return dataclasses.replace(world, peer_wakes=MappingProxyType(kept_wakes)), tuple(woken)
+
+
+def _to_tell(
+    world: Snapshot,
+    wakes: dict[ChannelId, PeerWakes],
+    decisions: Iterable[Decision],
+    only: str | None = None,
+) -> list[tuple[str, Channel]]:
+    """
+    Put each of ``decisions`` raised on a link in ``wakes`` as owed to every
+    member's lead across the link that reads it and can be woken
+    (``PeerWakes.untold``), or to ``only``'s alone, and return each session and
+    link a wake is now owed on. A decision already owed is not owed twice.
+    """
+    owing: list[tuple[str, Channel]] = []
+    for decision in sorted(decisions, key=lambda d: (d.raised_at, d.id)):
+        link = None if decision.link is None else world.channels.get(decision.link)
+        if link is None or not link.live:
+            continue
+        for member in sorted(link.members - {decision.session_id}):
+            if only is not None and member != only:
+                continue
+            if not world.channel_decision_readable(decision, member):
+                continue
+            if not _wakeable(world, member):
+                continue
+            owed = wakes.get(link.id, PeerWakes())
+            if (member, decision.id) in owed.untold:
+                continue
+            wakes[link.id] = dataclasses.replace(owed, untold=(*owed.untold, (member, decision.id)))
+            owing.append((member, link))
+    return owing
+
+
+def _heard(
+    world: Snapshot,
+    wakes: dict[ChannelId, PeerWakes],
+    session_id: str,
+    named: AbstractSet[DecisionId],
+) -> None:
+    """
+    Mark each of ``named`` that is a channel decision the lead across a live
+    link raised, and that has ended, as told to ``session_id``'s lead
+    (``PeerWakes.heard``): the shell sent it a wake naming them
+    (``intents.DecisionWakeSent``).
+
+    Marked at the send and not at the order, as ``PeerWakes.untold`` is let
+    go of: the shell holds a wake for its window, and longer for a session
+    still starting, and drops it if the session fails or is closed meanwhile.
+    A decision whose wake was dropped stays unmarked, and ``_unheard`` names
+    it at the session's next ``SessionSettled``.
+    """
+    for did in sorted(named):
+        decision = world.decisions.get(did)
+        if decision is None or decision.is_open or decision.session_id == session_id:
+            continue
+        link = None if decision.link is None else world.channels.get(decision.link)
+        if (
+            link is None
+            or not link.live
+            or not world.channel_decision_readable(decision, session_id)
+        ):
+            continue
+        owed = wakes.get(link.id, PeerWakes())
+        wakes[link.id] = dataclasses.replace(owed, heard=owed.heard | {(session_id, did)})
+
+
+def _unheard(
+    world: Snapshot,
+    wakes: dict[ChannelId, PeerWakes],
+    session_id: str,
+    among: AbstractSet[DecisionId] | None = None,
+) -> list[SessionWoken]:
+    """
+    A wake for each channel decision on ``session_id``'s live links that the
+    lead across the link raised and the operator answered or dismissed, and
+    that ``session_id``'s lead has not been told of in this run, oldest
+    ending first. Uncounted, like the open decisions a settle names: the
+    operator's act, read at a resume or a restore. ``among`` limits it to
+    those decisions: an asker's restore names only what it brought back.
+
+    Naming one does not mark it told: the shell does, once it sends the wake
+    (``intents.DecisionWakeSent``, ``_heard``). A second settle or restore
+    before then names it again, and the shell sends a session's held wakes
+    as one message that names each decision once (``bus.wake_message``).
+
+    A withdrawn decision is not named: its asker took it back, and nothing
+    was decided for the other lead to act on. How many one wake names is
+    ``bus.wake_message``'s to bound.
+    """
+    if not _wakeable(world, session_id):
+        return []
+    ended: list[tuple[float, Decision]] = []
+    for link in world.channels_of(session_id):
+        owed = wakes.get(link.id, PeerWakes())
+        for decision in world.decisions.values():
+            match decision.outcome:
+                case Answered(at=at) | Dismissed(at=at):
+                    pass
+                case _:
+                    continue
+            if (
+                decision.link == link.id
+                and (among is None or decision.id in among)
+                and decision.session_id != session_id
+                and (session_id, decision.id) not in owed.heard
+                and world.channel_decision_readable(decision, session_id)
+            ):
+                ended.append((at, decision))
+    named: list[SessionWoken] = []
+    for _, decision in sorted(ended, key=lambda e: (e[0], e[1].id)):
+        reason = (
+            WakeReason.DECISION_ANSWERED
+            if isinstance(decision.outcome, Answered)
+            else WakeReason.DECISION_DISMISSED
+        )
+        named.append(SessionWoken(session_id=session_id, reason=reason, subject_id=decision.id))
+    return named
+
+
+def _still_owed(world: Snapshot, link_id: ChannelId, owed: PeerWakes) -> PeerWakes | None:
+    """
+    ``owed`` with every session that can no longer be woken let go of, and
+    every pending session with nothing left on the link to wake it for no
+    longer pending, or None when its link is no longer live: a closed link
+    hands nothing over, so it has nothing to wake anybody for.
+
+    Nothing left to wake it for is a withdrawal of the last message that is
+    not quiet, which is the last the wake was for: quiet mail still unread
+    wakes nobody. The shell drops that wake unsent (``app._still_to_read``),
+    and a session left pending for it would have every later message on the
+    link coalesced into a wake nobody sends.
+
+    A decision owed (``PeerWakes.untold``) that has ended -- answered,
+    dismissed or withdrawn -- or that its lead can no longer read is owed no
+    longer: an answer or a dismissal orders a wake of its own (``_decided``),
+    and a withdrawn question is nothing to wake a lead for.
+
+    A settle's wake for questions owed (``PeerWakes.owing``) is owed no longer
+    once its lead owes none of them: a message from its session answers each.
+    """
+    link = world.channels.get(link_id)
+    if link is None or not link.live:
+        return None
+    still = tuple(
+        (sid, did)
+        for sid, did in owed.untold
+        if (decided := world.decisions.get(did)) is not None
+        and decided.is_open
+        and world.channel_decision_readable(decided, sid)
+    )
+    if still != owed.untold:
+        owed = dataclasses.replace(owed, untold=still)
+    owing = frozenset(sid for sid in owed.owing if world.owed_answers(sid, link))
+    if owing != owed.owing:
+        owed = dataclasses.replace(owed, owing=owing)
+    for session_id in sorted(
+        owed.pending | {sid for sid, _ in owed.held} | {sid for sid, _ in owed.untold}
+    ):
+        if not _wakeable(world, session_id):
+            owed = owed.without(session_id)
+        elif (
+            session_id in owed.pending
+            and all(c.quiet for c in world.peer_unread(session_id, link))
+            and not owed.untold_to(session_id)
+            and session_id not in owed.owing
+        ):
+            owed = dataclasses.replace(owed, pending=owed.pending - {session_id})
+    return owed
+
+
+def _read_covers(snap: Snapshot, reader: str, channel: ChannelScope) -> tuple[Channel, ...]:
+    """
+    The live links of ``reader``'s that a read of ``channel`` by its lead
+    covers: the one of that name, or every one. The one test of "this read
+    covers it" for both what the read lists as owed (``PeerInboxRead``'s arm
+    of ``_apply``) and the wake it lets go of (``_peer_waking``), so a
+    question's wake is let go of only by a read that listed it.
+    """
+    return tuple(
+        link
+        for link in snap.channels_of(reader)
+        if channel is EVERY_CHANNEL or channel == link.name
+    )
+
+
+def _wakeable(world: Snapshot, session_id: str) -> bool:
+    """
+    Whether ``session_id`` has a run a wake can reach (``Snapshot.wakeable``).
+    The same test the shell sends a wake under (``app._sendable``), asked here
+    so that a wake the shell would drop is never left pending.
+    """
+    return world.wakeable(session_id)
+
+
+def _moved(
+    before: Snapshot, intent: Intent, world: Snapshot, wakes: Mapping[ChannelId, PeerWakes]
+) -> tuple[ChannelId, ...]:
+    """
+    Every link among ``wakes`` that ``intent`` moved, which starts its chain
+    again. **Only the operator acting on that link moves it**: an approval or
+    a refusal of a parked call that reaches across it (``approval.peer_channel``,
+    or for a withdrawal, which names no channel, the withdrawn message's link
+    as ``Snapshot.parked_link`` finds it), an answer or a dismissal of a decision raised
+    on it, an edit or a withdrawal of a message sent over it that changed the
+    message, and a release of its held wakes (``WakeChainReleased``).
+
+    - **Only the operator's.** A park the CLI aborted at its timeout, or one a
+      teardown cancelled, settles with nobody having looked
+      (``ApprovalResolved.from_operator``). An edit or a withdrawal counts
+      only with no node on it, which is how the operator's is told from an
+      agent's (as on ``TaskAmended``), and only when it changed the message's
+      body or state: one of a message already handed over is not applied,
+      and nobody saw anything new.
+    - **Scoped to the link** and not to its members' sessions: the operator
+      approving a builder's write in one of them has not seen what the two
+      leads are saying to each other. What the operator types into a lead's
+      session is not a fact of the store, and is not counted.
+
+    Nothing an agent does moves it, because the backstop is there for two
+    agents that keep each other busy, and anything they alone can produce
+    they can produce every round. That includes a completed task naming the
+    link in its provenance: a lead can declare, claim and complete one with no
+    other agent and no operator involved. Nor do claims, declarations, or
+    either team's other work, which would keep two leads talking past each
+    other while their workers build from ever being surfaced. A refused call
+    changes nothing, and is not progress either.
+    """
+    if not wakes:
+        return ()
+    match intent:
+        case WakeChainReleased():
+            released = wakes.get(intent.link_id)
+            return (intent.link_id,) if released is not None and released.held else ()
+        case ApprovalResolved():
+            if not intent.from_operator:
+                return ()
+            rec = before.nodes.get(intent.node_id)
+            parked = rec.pending_by_id(intent.pending_id) if rec is not None else None
+            if parked is None:
+                return ()
+            if parked.tool_name == WITHDRAW_PEER_TOOL:
+                # It names no channel: its link is the withdrawn message's.
+                on = before.parked_link(parked)
+                return (on,) if on is not None and on in wakes else ()
+            name = peer_channel(parked.tool_name, parked.raw_args)
+            return tuple(
+                lid for lid in wakes if name is not None and world.channels[lid].name == name
+            )
+        case DecisionAnswered() | DecisionDismissed():
+            decided = world.decisions.get(intent.decision_id)
+            on = None if decided is None else decided.link
+            return (on,) if on is not None and on in wakes else ()
+        case ConcernEdited() | ConcernWithdrawn():
+            if intent.node_id is not None:
+                return ()
+            was, message = before.concerns.get(intent.concern_id), world.concerns.get(
+                intent.concern_id
+            )
+            if message is None or was is None:
+                return ()
+            if (was.body, was.state) == (message.body, message.state):
+                return ()
+            over = message.link
+            return (over,) if over is not None and over in wakes else ()
+        case _:
+            return ()
+
+
+def _owing_wake_chains(world: Snapshot) -> Snapshot:
+    """
+    ``world`` with a ``WakeChainHeld`` row in ``needs_you`` for every wake a
+    link holds, at its place by age. Derived from ``peer_wakes`` on every step,
+    as decisions are (``_owing_decisions``), so a row leaves exactly when its
+    wake does.
+    """
+    owed = [
+        WakeChainHeld(
+            node=(session_id, None),
+            since=since,
+            summary=(
+                f"#{world.channels[lid].name}: {PEER_WAKE_CHAIN} wakes in a row between "
+                f"{_peer_pair(world, lid)} with no operator act on it - this "
+                "lead's wake is held"
+            ),
+            link=lid,
+            channel=world.channels[lid].name,
+        )
+        for lid, wakes in world.peer_wakes.items()
+        for session_id, since in wakes.held
+    ]
+    if not owed:
+        return world
+    return dataclasses.replace(
+        world, needs_you=tuple(sorted((*world.needs_you, *owed), key=lambda o: o.since))
+    )
+
+
+def _owing_peer_mail(world: Snapshot) -> Snapshot:
+    """
+    ``world`` with a ``PeerQuestionUnanswered`` row for every question still
+    owed an answer that the shell said is past its age or whose recipient's
+    session is not running (``_wakeable``), and for every question not yet
+    read whose recipient's session is not running (Decided 4: read or not,
+    a lead that is not running cannot answer); and a ``PeerMailHeld`` row
+    for every lead and link with held peer mail the operator has not
+    dismissed, each at its place by age. Derived on every step, as a held
+    wake's row is, so a row leaves exactly when what raised it does.
+
+    **The two kinds do not overlap.** A question row is for a question its
+    own link hands over (``Snapshot.questions_unread``,
+    ``Snapshot.awaiting_answer``), and a held-mail row for mail it does not
+    (``Snapshot.peer_held``): an unread question on a link this run does not
+    hold is counted in its held-mail row and raises no question row.
+
+    **Mail on a link closed in its log raises no row.** A link in the store
+    and not live has a close in its log, in this run or an earlier one:
+    either the operator's (``ChannelClosed``) or the one the writer's sweep
+    writes into every earlier log under a name when the operator links that
+    name again (``channels.ChannelWriter._sweep``). The store cannot tell the
+    two apart (``LinkClosed`` carries no provenance), so a swept link that was
+    whole and live, one withheld at startup or another window's, goes silent
+    too, though nobody closed it on purpose. Either way a closed link is never
+    live again, so its mail can never be handed over and its row would return
+    after every restart. The mail stays in the
+    store and its sender's log, and ``read_peer_messages`` still reports it
+    held. Mail on a link this run does not hold (withheld, or not restored)
+    or on a live link that does not hand it over still raises one.
+
+    ``questions_aged`` and ``held_dismissed`` are cut here to what still
+    stands: a question answered or whose link closed, and mail handed over or
+    withdrawn, are let go of. So a question whose only answer is withdrawn
+    later is owed again, and the shell measures its age afresh from delivery,
+    which has passed: its row returns at once.
+
+    ``questions_dismissed`` is cut to the rows that would still be raised for
+    the reason they were dismissed for (``PeerQuestionUnanswered.running``). A
+    row dismissed while its lead's session was down lets go at a resume, which
+    ends that row, so the question raises a row again if its age then passes.
+    """
+    awaiting = {c.id: c for c in world.awaiting_answer()}
+    aged = frozenset(cid for cid in world.questions_aged if cid in awaiting)
+    held = world.peer_held()
+    dismissed = frozenset(c.id for c in held if c.id in world.held_dismissed)
+    asked: list[PeerQuestionUnanswered] = []
+    for question in world.questions_unread():
+        assert question.link is not None and question.channel is not None
+        if _wakeable(world, question.recipient[0]):
+            # A running lead is woken for it, and the age runs from its read.
+            continue
+        asked.append(
+            PeerQuestionUnanswered(
+                node=question.recipient,
+                since=question.posted_at,
+                summary=(
+                    f"#{question.channel}: a question from the lead linked to "
+                    f"{question.recipient[0][:8]} is unread and unanswered - its session "
+                    "is not running"
+                ),
+                question=question.id,
+                link=question.link,
+                channel=question.channel,
+                running=False,
+                delivered=False,
+            )
+        )
+    for cid, question in sorted(awaiting.items()):
+        assert question.link is not None and question.channel is not None
+        # A recipient whose session cannot be woken will not answer however long
+        # the age is, so its question is shown at once (Decided 4). Asked of the
+        # session state on every step, so a resume puts the question back under
+        # the age, which the shell measures from delivery.
+        running = _wakeable(world, question.recipient[0])
+        if running and cid not in aged:
+            continue
+        # Not "unanswered" while the session is down: its lead read the
+        # question, and an answer it sent is in its own log, which is not read
+        # until the session is resumed (``Snapshot.awaiting_answer``).
+        why = (
+            "is unanswered past its age"
+            if running
+            else "has no answer in this run - its session is not running"
+        )
+        asked.append(
+            PeerQuestionUnanswered(
+                node=question.recipient,
+                since=question.delivered_at or 0.0,
+                summary=(
+                    f"#{question.channel}: a question from the lead linked to "
+                    f"{question.recipient[0][:8]} {why}"
+                ),
+                question=cid,
+                link=question.link,
+                channel=question.channel,
+                running=running,
+            )
+        )
+    raised = {(row.question, row.running) for row in asked}
+    shut = frozenset(d for d in world.questions_dismissed if d in raised)
+    owed: list[Obligation] = [row for row in asked if (row.question, row.running) not in shut]
+    by_lead: dict[tuple[str, ChannelId], list[Concern]] = {}
+    for message in held:
+        if message.link is None or message.id in dismissed:
+            continue
+        over = world.channels.get(message.link)
+        if over is None or over.live:
+            by_lead.setdefault((message.recipient[0], message.link), []).append(message)
+    for (session_id, lid), messages in sorted(by_lead.items()):
+        # A link the store holds is named by its own name; only one it does
+        # not hold is known by the name its messages give it.
+        over = world.channels.get(lid)
+        channel = over.name if over is not None else messages[0].channel or ""
+        why = why_held(world, lid, messages)
+        owed.append(
+            PeerMailHeld(
+                node=(session_id, None),
+                since=messages[0].posted_at,
+                summary=(
+                    f"#{channel}: {len(messages)} message(s) for {session_id[:8]} held - "
+                    f"the link {why}, so nothing hands them over"
+                ),
+                link=lid,
+                channel=channel,
+                messages=tuple(m.id for m in messages),
+                why=why,
+            )
+        )
+    if (
+        aged == world.questions_aged
+        and dismissed == world.held_dismissed
+        and shut == world.questions_dismissed
+        and not owed
+    ):
+        return world
+    return dataclasses.replace(
+        world,
+        questions_aged=aged,
+        held_dismissed=dismissed,
+        questions_dismissed=shut,
+        needs_you=tuple(sorted((*world.needs_you, *owed), key=lambda o: o.since)),
+    )
+
+
+def _peer_pair(world: Snapshot, link_id: ChannelId) -> str:
+    """The two leads of a link, by their session ids' heads, in a stable order."""
+    return " and ".join(sid[:8] for sid in sorted(world.channels[link_id].members))
 
 
 def _ended_by_operator(
@@ -2825,17 +4011,23 @@ def blocked_tasks(
 # -- a board from its log ------------------------------------------------------------
 
 
-def _restored(
-    snap: Snapshot, intent: BoardRestored
-) -> tuple[dict[TaskId, Task], dict[ConcernId, Concern], Mapping[str, Restore]] | None:
+def _restored(snap: Snapshot, intent: BoardRestored) -> (
+    tuple[
+        dict[TaskId, Task],
+        dict[ConcernId, Concern],
+        Mapping[DecisionId, Decision],
+        Mapping[str, Restore],
+    ]
+    | None
+):
     """
-    The tasks, concerns and restore reports after ``intent``, or None when it
-    changes none of them.
+    The tasks, concerns, decisions and restore reports after ``intent``, or None
+    when it changes none of them.
 
     **Everything the board holds is placed or is named in the report with why
-    not.** A task or concern is placed when its id is free. One the store
-    already holds for this session exactly as the log has it is counted and left.
-    Each of the rest is a ``NotPlaced``.
+    not.** A task, concern or decision is placed when its id is free. One the
+    store already holds for this session exactly as the log has it is counted
+    and left. Each of the rest is a ``NotPlaced``.
 
     **An id another session's board has is never written over.** ``tasks`` is one
     map for every session and leads choose ids by hand, so a resumed session's
@@ -2845,7 +4037,7 @@ def _restored(
     reader of the map and is not made here.
 
     **A store that holds a different board for the session takes nothing.** If
-    it has a task or concern of this session that the log has differently, or
+    it has a task, concern or decision of this session that the log has differently, or
     does not have at all, the store is ahead of the log or beside it -- a
     session still running in this process, a second window on one session id --
     and laying the log's board over part of it would make a board neither
@@ -2902,7 +4094,7 @@ def _restored(
     differing: list[NotPlaced] = []
     new_tasks: list[Task] = []
     new_concerns: list[Concern] = []
-    held = [0, 0]
+    held = [0, 0, 0]
 
     logged: set[str] = set()
     for restored_task in board.tasks:
@@ -2955,7 +4147,7 @@ def _restored(
             unplaced.append(NotPlaced("concern", restored_concern.id, Unplaced.REPEATED))
             continue
         filed.add(restored_concern.id)
-        concern = _restored_concern(restored_concern, session_id, node_of, at_of)
+        concern = _restored_concern(restored_concern, session_id, node_of, at_of, snap.channels)
         filed_already = snap.concerns.get(restored_concern.id)
         if isinstance(concern, Unplaced):
             unplaced.append(NotPlaced("concern", restored_concern.id, concern))
@@ -2972,13 +4164,57 @@ def _restored(
                 )
             )
         elif _timeless_concern(filed_already) == _timeless_concern(concern):
-            held[1] += 1
+            held[2 if concern.is_peer else 1] += 1
         else:
             differing.append(NotPlaced("concern", concern.id, Unplaced.STORE_DIFFERS))
     differing += [
         NotPlaced("concern", c.id, Unplaced.STORE_ONLY)
         for c in snap.concerns.values()
         if c.sender[0] == session_id and c.id not in filed
+    ]
+
+    decisions = dict(snap.decisions)
+    new_decisions: list[Decision] = []
+    raised: set[str] = set()
+    held_decisions = 0
+    for restored_decision in board.decisions:
+        # The operator's answer is held verbatim (``_VERBATIM``) and may hold
+        # what no other logged text does; every other text is the store's
+        # drawable form.
+        if drawable.undrawable(dataclasses.replace(restored_decision, outcome=None)):
+            raised.add(restored_decision.id)
+            unplaced.append(
+                NotPlaced("decision", _said_id(restored_decision.id), Unplaced.UNDRAWABLE)
+            )
+            continue
+        if restored_decision.id in raised:
+            unplaced.append(NotPlaced("decision", restored_decision.id, Unplaced.REPEATED))
+            continue
+        raised.add(restored_decision.id)
+        decision = _restored_decision(restored_decision, session_id, node_of, at_of, snap.channels)
+        raised_already = snap.decisions.get(restored_decision.id)
+        if isinstance(decision, Unplaced):
+            unplaced.append(NotPlaced("decision", restored_decision.id, decision))
+        elif raised_already is None:
+            decisions[decision.id] = decision
+            new_decisions.append(decision)
+        elif raised_already.session_id != session_id:
+            unplaced.append(
+                NotPlaced(
+                    "decision",
+                    decision.id,
+                    Unplaced.OTHER_SESSION_HAS_ID,
+                    holder=raised_already.session_id,
+                )
+            )
+        elif _timeless_decision(raised_already) == _timeless_decision(decision):
+            held_decisions += 1
+        else:
+            differing.append(NotPlaced("decision", decision.id, Unplaced.STORE_DIFFERS))
+    differing += [
+        NotPlaced("decision", d.id, Unplaced.STORE_ONLY)
+        for d in snap.decisions.values()
+        if d.session_id == session_id and d.id not in raised
     ]
 
     report = Restore(
@@ -2993,17 +4229,22 @@ def _restored(
     if differing:
         withheld = [NotPlaced("task", t.id, Unplaced.WITHHELD) for t in new_tasks]
         withheld += [NotPlaced("concern", c.id, Unplaced.WITHHELD) for c in new_concerns]
+        withheld += [NotPlaced("decision", d.id, Unplaced.WITHHELD) for d in new_decisions]
         report = dataclasses.replace(
             report,
             at=None if prior is None else prior.at,
             tasks=held[0],
             concerns=held[1],
+            peer_messages=held[2],
+            decisions=held_decisions,
             unplaced=(*differing, *withheld, *unplaced),
             parties=MappingProxyType({}) if prior is None else prior.parties,
         )
-        tasks, concerns = dict(snap.tasks), dict(snap.concerns)
+        tasks, concerns, decisions = dict(snap.tasks), dict(snap.concerns), dict(snap.decisions)
     else:
-        fresh = bool(new_tasks or new_concerns) or prior is None or prior.at is None
+        fresh = (
+            bool(new_tasks or new_concerns or new_decisions) or prior is None or prior.at is None
+        )
         report = dataclasses.replace(
             report,
             # The reading the newest of what is held was converted with. A later
@@ -3012,13 +4253,20 @@ def _restored(
             # side of "before the restore".
             at=clock.monotonic if fresh or prior is None else prior.at,
             tasks=held[0] + len(new_tasks),
-            concerns=held[1] + len(new_concerns),
+            concerns=held[1] + sum(1 for c in new_concerns if not c.is_peer),
+            peer_messages=held[2] + sum(1 for c in new_concerns if c.is_peer),
+            decisions=held_decisions + len(new_decisions),
             unplaced=tuple(unplaced),
             parties=MappingProxyType({**({} if prior is None else prior.parties), **parties}),
         )
     if report == prior:
         return None
-    return tasks, concerns, MappingProxyType({**snap.restores, session_id: report})
+    return (
+        tasks,
+        concerns,
+        snap.decisions if decisions == snap.decisions else MappingProxyType(decisions),
+        MappingProxyType({**snap.restores, session_id: report}),
+    )
 
 
 def _as_declared(tasks: dict[TaskId, Task], task: Task) -> Task:
@@ -3046,8 +4294,9 @@ def _as_declared(tasks: dict[TaskId, Task], task: Task) -> Task:
 
 def _said_id(logged: str) -> str:
     """
-    The id of a logged task or concern that is not placed for holding what no store
-    writes, as its report names it: drawable, since the id may be what held it.
+    The id of a logged task, concern or decision that is not placed for holding what
+    no store writes, as its report names it: drawable, since the id may be what held
+    it.
     """
     return drawable.text(logged) if drawable.undrawable(logged) else logged
 
@@ -3073,6 +4322,17 @@ def _stated(text: str | None) -> Basis | None:
         return Basis.stated(text)
     except ValueError:
         return None
+
+
+def _charter(text: str | None) -> Charter:
+    """
+    A logged charter mark as the member it names. One this build does not define,
+    or none, reads as unstated, for the reason ``_stated`` reads a basis so.
+    """
+    try:
+        return Charter.UNSTATED if text is None else Charter(text)
+    except ValueError:
+        return Charter.UNSTATED
 
 
 def _restored_task(
@@ -3103,7 +4363,11 @@ def _restored_task(
     - saying more than its state has: a holder or a handed version on a task
       nobody holds, a completion's time, result, basis or unrun list on one that
       is not finished. Placing it without them would be a board the log does
-      not describe, reported as placed whole.
+      not describe, reported as placed whole;
+    - a provenance with no channel -- a blank one, or a message answered or a
+      charter marked with none -- or with a name the bus would have refused or
+      trimmed: a channel that is not one drawable directory name, an ``re`` not
+      shaped as a concern id, an empty one included (``stated_provenance``).
 
     A task the operator closed and one its declarer withdrew are the finished
     tasks with no holder (``TaskClosed``, ``TaskWithdrawn``), and each is placed
@@ -3127,6 +4391,23 @@ def _restored_task(
         logged.holder is not None or logged.claimed_version is not None
     ):
         return Unplaced.INCOHERENT
+    provenance: Provenance | None = None
+    if (logged.channel, logged.re, logged.inside_charter) != (None, None, None):
+        # Read by the bus's own rule (``stated_provenance``), which no
+        # declaration the bus took fails and which is what the names are taken
+        # to have passed: a channel that is one drawable directory name, an re
+        # with a concern id's shape. The mark is read as an unknown basis is
+        # (``_charter``), so it is not given to the rule.
+        try:
+            checked = stated_provenance(logged.channel, logged.re, None)
+        except ValueError:
+            return Unplaced.INCOHERENT
+        # None for a blank channel, or a message answered or a charter marked on
+        # no channel; a different value for a name the bus would have trimmed,
+        # or an empty message id. The bus logs none of those.
+        if checked is None or (checked.channel, checked.re) != (logged.channel, logged.re):
+            return Unplaced.INCOHERENT
+        provenance = dataclasses.replace(checked, inside_charter=_charter(logged.inside_charter))
 
     history: list[TaskVersion] = []
     for prior, following in itertools.pairwise(logged.versions):
@@ -3158,6 +4439,7 @@ def _restored_task(
         released_at=None if logged.released_at is None else at_of(logged.released_at),
         superseded=tuple(history),
         held_by=held_by,
+        provenance=provenance,
         after_all_writers=logged.after_all_writers,
     )
     if (logged.withdrawn_by_lead or logged.withdrawal_edited) and not logged.withdrawn:
@@ -3221,6 +4503,7 @@ def _restored_concern(
     session_id: str,
     node_of: Callable[[Party], NodeId],
     at_of: Callable[[float], float],
+    channels: Mapping[ChannelId, Channel],
 ) -> Concern | Unplaced:
     """
     ``logged`` as the concern the store files, or why it is not this board's.
@@ -3233,10 +4516,37 @@ def _restored_concern(
     holds such a concern when it is handed one: ``ConcernPosted`` does not ask
     whose the recipient is, and a restore that left it out would be a board
     short of something the reducer filed.
+
+    **A peer message's fields are asked again by the rules ``send_to_peer``
+    put them through**: a channel that is a name, an ``re`` in the concern-id
+    shape, and, where ``channels`` holds its link, the link's own name. The
+    read prints the channel inside its own words and the ``re`` beside it, so a
+    record that fails one did not come from that tool, and is not placed.
     """
     sender = node_of(logged.sender)
     if sender[0] != session_id:
         return Unplaced.NOT_THIS_SESSIONS
+    if logged.channel is None and (
+        logged.needs_answer or logged.re is not None or logged.quiet or logged.link is not None
+    ):
+        # ``Concern`` refuses to be built so; a log's fold never produces it.
+        return Unplaced.INCOHERENT
+    if logged.channel is not None and not logged.link:
+        # Nor this: ``PeerSent`` names the link it routed over, and a message
+        # without one could be handed over by no link, or by whichever link
+        # later took its name.
+        return Unplaced.INCOHERENT
+    if logged.channel is not None and (
+        isinstance(logged.recipient, str) or not peer_addressed(sender, logged.recipient)
+    ):
+        # No step files any other (``model.peer_addressed``). A recipient named
+        # by address alone would resolve inside this session -- "lead" to this
+        # session's own lead -- and hand a peer's message to the wrong team.
+        return Unplaced.INCOHERENT
+    if logged.channel is not None and not _peer_fields_hold(
+        logged.channel, logged.link, logged.re, channels
+    ):
+        return Unplaced.INCOHERENT
     return Concern(
         id=logged.id,
         sender=sender,
@@ -3250,6 +4560,135 @@ def _restored_concern(
         task_id=logged.task_id,
         basis=_stated(logged.basis),
         incident=logged.incident,
+        channel=logged.channel,
+        needs_answer=logged.needs_answer,
+        re=logged.re,
+        quiet=logged.quiet,
+        link=logged.link,
+    )
+
+
+def _channel_as_linked(
+    channel: str, link: ChannelId | None, channels: Mapping[ChannelId, Channel]
+) -> bool:
+    """
+    Whether a logged record's ``channel`` is one a step could have written for
+    ``link``: a channel name, and the link's own name where the store holds the
+    link. A link the store does not hold yet is not asked about its name here;
+    the read asks it then (``Snapshot.peer_deliverable``,
+    ``Snapshot.channel_decision_readable``).
+    """
+    if not is_channel_name(channel):
+        return False
+    held = None if link is None else channels.get(link)
+    return held is None or held.name == channel
+
+
+def _peer_fields_hold(
+    channel: str | None,
+    link: ChannelId | None,
+    cites: ConcernId | None,
+    channels: Mapping[ChannelId, Channel],
+) -> bool:
+    """
+    Whether a peer message's own fields are ones ``send_to_peer`` could have
+    filed: its channel as ``_channel_as_linked`` reads it, and an ``re`` that
+    is absent or in the concern-id shape the tool checks.
+    """
+    return (
+        channel is not None
+        and _channel_as_linked(channel, link, channels)
+        and (cites is None or is_concern_id(cites))
+    )
+
+
+def _restored_decision(
+    logged: RestoredDecision,
+    session_id: str,
+    node_of: Callable[[Party], NodeId],
+    at_of: Callable[[float], float],
+    channels: Mapping[ChannelId, Channel],
+) -> Decision | Unplaced:
+    """
+    ``logged`` as the decision the store holds, or why it is not this board's.
+
+    The raise arm's limits on how many may be open are not asked: they bound
+    what one agent can put in front of the operator at once, and a decision the
+    store filed was within them when it was filed. Neither is ``blocks``
+    checked against the board, since a task it names may be one this restore
+    could not place, and leaving the decision out for that would lose the
+    operator's answer over a link.
+
+    What only one arm writes is refused where no arm writes it: an answer longer
+    than ``DecisionAnswered`` takes, and a first delivery of a decision that was
+    neither answered nor dismissed. A standing this build does not define has
+    no member to restore as.
+
+    A decision on a channel is a lead's (``DecisionRefusal.NOT_A_LEAD``), so one
+    whose asker is a sub-agent is refused, and its channel must be its link's
+    name where the store holds the link (``_channel_as_linked``).
+    """
+    asker = node_of(logged.asker)
+    if asker[0] != session_id:
+        return Unplaced.NOT_THIS_SESSIONS
+    try:
+        standing = Standing(logged.standing)
+    except ValueError:
+        return Unplaced.INCOHERENT
+    outcome: DecisionOutcome | None
+    match logged.outcome:
+        case None:
+            outcome = None
+        case Answered():
+            if len(logged.outcome.text) > MAX_ANSWER_CHARS:
+                return Unplaced.INCOHERENT
+            outcome = Answered(text=logged.outcome.text, at=at_of(logged.outcome.at))
+        case Dismissed():
+            outcome = Dismissed(at=at_of(logged.outcome.at))
+        case Withdrawn():
+            outcome = Withdrawn(at=at_of(logged.outcome.at))
+        case _:
+            assert_never(logged.outcome)
+    delivered = logged.first_delivered_at
+    if delivered is not None and not isinstance(outcome, Answered | Dismissed):
+        return Unplaced.INCOHERENT
+    # The raise arm sets a channel exactly with the link it named, and a reply
+    # draws the name inside its own words, so a record saying otherwise did not
+    # come from that arm.
+    if (not logged.link) != (logged.channel is None):
+        return Unplaced.INCOHERENT
+    if logged.channel is not None and (
+        asker[1] is not None or not _channel_as_linked(logged.channel, logged.link, channels)
+    ):
+        return Unplaced.INCOHERENT
+    return Decision(
+        id=logged.id,
+        asker=asker,
+        question=logged.question,
+        blocks=logged.blocks,
+        if_unanswered=logged.if_unanswered,
+        evidence=logged.evidence,
+        recommendation=logged.recommendation,
+        standing=standing,
+        reversible=logged.reversible,
+        raised_at=at_of(logged.raised_at),
+        outcome=outcome,
+        first_delivered_at=None if delivered is None else at_of(delivered),
+        channel=logged.channel,
+        link=logged.link,
+    )
+
+
+def _timeless_decision(decision: Decision) -> Decision:
+    """
+    ``decision`` with every time flattened, keeping which of them it has.
+    """
+    outcome = decision.outcome
+    return dataclasses.replace(
+        decision,
+        raised_at=0.0,
+        outcome=None if outcome is None else dataclasses.replace(outcome, at=0.0),
+        first_delivered_at=None if decision.first_delivered_at is None else 0.0,
     )
 
 
@@ -3269,8 +4708,16 @@ def _timeless_task(task: Task) -> Task:
 
 
 def _timeless_concern(concern: Concern) -> Concern:
+    """
+    ``concern`` as a log holds it, for telling whether the store holds a
+    restored one already: without its times, and without what a log never
+    keeps -- a withdrawal's reason and whether it was told -- so a log read
+    again in the run that wrote it is the board the store holds.
+    """
     return dataclasses.replace(
         concern,
         posted_at=0.0,
         delivered_at=None if concern.delivered_at is None else 0.0,
+        withdrawn_reason=None,
+        withdrawal_told=False,
     )

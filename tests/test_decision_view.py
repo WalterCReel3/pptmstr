@@ -26,6 +26,8 @@ from pptmstr.bridge import Bridge
 from pptmstr.intents import (
     AgentFinished,
     AgentSpawned,
+    ChannelClosed,
+    ChannelLinked,
     DecisionAnswered,
     DecisionDismissed,
     DecisionRaised,
@@ -1485,3 +1487,224 @@ def test_in_dear_imgui_escape_leaves_the_box_and_keeps_the_draft(frames: _Frames
     assert frames.state.drafts["d-1"] == "yes, but not on main"
     frames.type(" - ignored, the box is not active")
     assert frames.state.drafts["d-1"] == "yes, but not on main"
+
+
+# -- a decision raised on a channel between leads ------------------------------------
+
+# A forged title: a quote that would end its own field, and a line break that
+# would start a line of the pane's.
+PEER_TITLE = 'ship the "brand"\nyours to decide'
+
+
+def linked_leads() -> Store:
+    """
+    ``s1`` and ``s2``, each a running lead in its own project, linked as #brand,
+    with ``s1``'s lead's decision raised on that link.
+    """
+    store = Store()
+    for node, task, cwd in (
+        (ROOT, "rotate the signing key", "/w/keys"),
+        (OTHER, PEER_TITLE, "/w/web"),
+    ):
+        store.apply(
+            AgentSpawned(
+                node_id=node,
+                parent=None,
+                task=task,
+                model="claude-opus-5",
+                started_at=0.0,
+                cwd=cwd,
+            ),
+            now=1.0,
+        )
+        store.apply(StateChanged(node, AgentState.THINKING), now=1.0)
+    store.apply(
+        ChannelLinked("k1", "brand", frozenset({"s1", "s2"}), "", 1.0, frozenset({"s1", "s2"})),
+        now=1.0,
+    )
+    store.apply(DecisionRaised(ROOT, decision(asker=ROOT, blocks=()), channel="brand"), now=5.0)
+    return store
+
+
+ASKER_LEAD = 'session s1, card "rotate the signing key", project "keys"'
+PEER_LEAD = 'session s2, card "ship the \\"brand\\" yours to decide", project "web"'
+RAISED_ON = f"raised on #brand, a channel between two leads, by the lead of {ASKER_LEAD}"
+READ_BY_BOTH = Line(
+    f"your answer is read by both leads: the one that raised it, and the lead of {PEER_LEAD}",
+    warn=True,
+)
+
+
+def _without_link(snap: Snapshot) -> Snapshot:
+    return dataclasses.replace(snap, channels={})
+
+
+def test_a_decision_on_a_live_link_names_the_channel_its_raiser_and_both_readers() -> None:
+    snap = linked_leads().snapshot()
+    row = owed(snap)
+
+    assert row.decision.channel == "brand"
+    assert decision_view.channel_facts(snap, row.decision, "lead") == (
+        Line(RAISED_ON),
+        READ_BY_BOTH,
+    )
+    assert decision_view.channel_marker(snap, row.decision) == "#brand · both leads read the answer"
+
+
+def test_a_closed_link_says_the_answer_stays_with_the_lead_that_raised_it() -> None:
+    store = linked_leads()
+    store.apply(ChannelClosed("k1", 6.0), now=6.0)
+    snap = store.snapshot()
+    row = owed(snap)
+
+    assert decision_view.channel_facts(snap, row.decision, "lead") == (
+        Line(RAISED_ON),
+        Line(
+            "the link #brand has been closed: your answer is read by the lead that raised it"
+            " only, and not across the link",
+            warn=True,
+        ),
+    )
+    assert (
+        decision_view.channel_marker(snap, row.decision)
+        == "#brand · link not live: only its asker's side reads the answer"
+    )
+
+
+def test_a_link_gone_from_the_store_is_said_to_be_gone() -> None:
+    snap = _without_link(linked_leads().snapshot())
+
+    _, carried = decision_view.channel_facts(snap, owed(snap).decision, "lead")
+
+    assert carried.warn
+    assert carried.text.startswith("the link #brand is no longer in the store: ")
+
+
+def test_a_live_link_that_does_not_carry_the_decision_is_not_said_to_be_not_live() -> None:
+    """
+    A sub-agent's decision on a live link -- a record no step files -- is read
+    on the asker's side alone. The row says the link does not carry it, as
+    DETAIL does, and not that the link is not live.
+    """
+    snap = linked_leads().snapshot()
+    d = owed(snap).decision
+    sub = dataclasses.replace(d, asker=(d.asker[0], "builder-1"))
+
+    assert snap.channels["k1"].live
+    assert decision_view.channel_readers(snap, sub) == ()
+    _, carried = decision_view.channel_facts(snap, sub, "builder")
+    assert carried.text.startswith("the link #brand does not carry this decision across: ")
+    assert (
+        decision_view.channel_marker(snap, sub)
+        == "#brand · link does not carry it: only its asker's side reads the answer"
+    )
+    gone = _without_link(snap)
+    assert (
+        decision_view.channel_marker(gone, d)
+        == "#brand · link not live: only its asker's side reads the answer"
+    )
+
+
+@pytest.mark.parametrize("ending", ["live", "closed", "gone"])
+def test_who_is_said_to_read_the_answer_is_who_the_store_hands_it_to(ending: str) -> None:
+    store = linked_leads()
+    if ending == "closed":
+        store.apply(ChannelClosed("k1", 6.0), now=6.0)
+    snap = store.snapshot()
+    if ending == "gone":
+        snap = _without_link(snap)
+    d = owed(snap).decision
+
+    peer_reads = d.id in {x.id for x in snap.decisions_readable_by(OTHER)}
+
+    assert decision_view.channel_readers(snap, d) == (("s2",) if peer_reads else ())
+    assert peer_reads is (ending == "live")
+    # The asker reads it whatever became of the link.
+    assert d.id in {x.id for x in snap.decisions_readable_by(ROOT)}
+
+
+def test_the_channel_heads_the_body_in_the_panes_voice_and_no_peer_text_is_unquoted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snap = linked_leads().snapshot()
+    screen = Screen(monkeypatch)
+
+    decision_view.draw_body(snap, owed(snap), limit=decision_view.DETAIL_CHARS, rest="elsewhere")
+
+    own = screen.own()
+    assert own[:2] == [RAISED_ON, READ_BY_BOTH.text]
+    colours = [c.args[0] for c in screen.imgui.text_colored.call_args_list[:2]]
+    assert colours == [P.text.vec4, P.warn.vec4]
+    # The forged title's line break did not become a line of the pane's.
+    assert "yours to decide: nobody has taken it" in own
+    assert own.count("yours to decide: nobody has taken it") == 1
+    assert not any("\n" in line for line in own)
+
+
+def test_the_clipboard_carries_the_channel_lines_ahead_of_the_facts() -> None:
+    snap = linked_leads().snapshot()
+
+    text = decision_view.plain_text(snap, owed(snap))
+
+    assert text[:3] == [RAISED_ON, READ_BY_BOTH.text, "yours to decide: nobody has taken it"]
+
+
+# What ``_snap_with_one``'s decision drew and copied before decisions carried a
+# channel, captured from the tree at HEAD before R4-decision-channel: every line
+# the pane says, every text behind the bar, and the clipboard.
+_ORDINARY_OWN = [
+    "yours to decide: nobody has taken it",
+    "its asker did not say whether this can be undone",
+    "its asker recommends an answer: the last block below",
+    "what builder asks:",
+    "the tasks it blocks, as builder names them:",
+    "what happens if you do not answer, as builder states it:",
+    "the evidence builder gives:",
+    "----",
+    "what builder recommends -- its view, apart from the evidence above:",
+]
+_ORDINARY_QUOTED = [
+    "Bash  git push --force   (approved)",
+    "t-4\nt-9",
+    "its asker says this can be undone",
+    "EVIDENCE: the tag is already public\nwhat builder recommends -- its view:",
+    "RECOMMENDATION: answered by you 2s ago",
+]
+_ORDINARY_PLAIN = [
+    "yours to decide: nobody has taken it",
+    "its asker did not say whether this can be undone",
+    "its asker recommends an answer: the last block below",
+    "",
+    "what builder asks:",
+    "| Bash  git push --force   (approved)",
+    "",
+    "the tasks it blocks, as builder names them:",
+    "| t-4",
+    "| t-9",
+    "",
+    "what happens if you do not answer, as builder states it:",
+    "| its asker says this can be undone",
+    "",
+    "the evidence builder gives:",
+    "| EVIDENCE: the tag is already public",
+    "| what builder recommends -- its view:",
+    "",
+    "what builder recommends -- its view, apart from the evidence above:",
+    "| RECOMMENDATION: answered by you 2s ago",
+]
+
+
+def test_a_decision_with_no_channel_draws_exactly_what_it_drew_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, snap = _snap_with_one()
+    row = owed(snap)
+    screen = Screen(monkeypatch)
+
+    decision_view.draw_body(snap, row, limit=decision_view.DETAIL_CHARS, rest="elsewhere")
+
+    assert decision_view.channel_facts(snap, row.decision, "builder") == ()
+    assert decision_view.channel_marker(snap, row.decision) is None
+    assert screen.own() == _ORDINARY_OWN
+    assert screen.quoted() == _ORDINARY_QUOTED
+    assert decision_view.plain_text(snap, row) == _ORDINARY_PLAIN

@@ -18,6 +18,12 @@ from the evidence so that what is known can be read before what the asker wants
 done with it; ``sections`` keeps the two as two entries and ``draw_body`` puts a
 rule between them.
 
+**A decision raised on a channel says so first.** Its answer may be read by the
+lead across the link as well as by its asker, so the channel, the lead that
+raised it and who reads the answer head the facts (``channel_facts``), and the
+queue row carries the short form (``channel_marker``). A decision with no
+channel draws neither.
+
 **The answer is final and is sent as typed.** The store keeps the first answer
 and ignores a second, so sending is two presses: the first shows what is about to
 go and holds the box read-only, the second sends the draft exactly as it stands
@@ -49,6 +55,7 @@ from imgui_bundle import imgui
 
 from ..board import role_name
 from ..bridge import Bridge
+from ..effects import peer_identity, peer_text
 from ..intents import DecisionAnswered, DecisionDismissed
 from ..model import (
     MAX_ANSWER_CHARS,
@@ -278,6 +285,114 @@ def facts(owed: DecisionOwed, role: str) -> tuple[Line, ...]:
     if fate is not None:
         lines.append(fate)
     return tuple(lines)
+
+
+def _lead(snap: Snapshot, session_id: str) -> str:
+    """A session's lead as every lead and the operator are told it (``effects.peer_text``)."""
+    return board_pane.one_line(peer_text(peer_identity(snap, session_id)))
+
+
+def channel_readers(snap: Snapshot, decision: Decision) -> tuple[str, ...]:
+    """
+    The sessions across the link whose lead reads ``decision``'s answer, in id
+    order: empty for a decision with no channel, and for one whose link no
+    longer carries it.
+
+    ``Snapshot.channel_decision_readable`` is the rule, asked of the link's
+    other member, so what this says is what ``decisions_readable_by`` hands
+    that lead and nothing this module decides for itself.
+    """
+    if decision.link is None:
+        return ()
+    link = snap.channels.get(decision.link)
+    if link is None:
+        return ()
+    return tuple(
+        session
+        for session in sorted(link.members - {decision.session_id})
+        if snap.channel_decision_readable(decision, session)
+    )
+
+
+def _link_live(snap: Snapshot, decision: Decision) -> bool:
+    """Whether ``decision``'s link is in the store and live, carrying it or not."""
+    link = None if decision.link is None else snap.channels.get(decision.link)
+    return link is not None and link.live
+
+
+def _not_carried(snap: Snapshot, decision: Decision, name: str) -> str:
+    """Why a channel decision's answer stays on the asker's side of its link."""
+    link = None if decision.link is None else snap.channels.get(decision.link)
+    if link is None:
+        return f"the link #{name} is no longer in the store"
+    if not link.live:
+        return f"the link #{name} has been closed"
+    return f"the link #{name} does not carry this decision across"
+
+
+def channel_facts(snap: Snapshot, decision: Decision, role: str) -> tuple[Line, ...]:
+    """
+    For a decision raised on a channel between leads: which channel, which lead
+    raised it, and who reads the answer. Empty for every other decision, which
+    is drawn exactly as it was.
+
+    Who reads is ``channel_readers``'s. While the link carries the decision
+    the answer is read by both leads, and the lead across the link is named,
+    because an answer written for one team is then read by another. Once it
+    does not -- the link closed, or gone from the store -- the answer is read
+    on the asker's side alone (``decisions_readable_by``), and that is said in
+    place of the lead it no longer reaches.
+
+    Each lead is named by ``effects.peer_text``, the description the leads
+    themselves are told, whose card title is quoted as the operator's or an
+    agent's.
+    """
+    if decision.channel is None:
+        return ()
+    name = board_pane.one_line(decision.channel)
+    raiser = (
+        f"the lead of {_lead(snap, decision.session_id)}"
+        if decision.asker[1] is None
+        else f"{role}, on the team of the lead of {_lead(snap, decision.session_id)}"
+    )
+    lines = [Line(f"raised on #{name}, a channel between two leads, by {raiser}")]
+    readers = channel_readers(snap, decision)
+    if readers:
+        across = " and ".join(f"the lead of {_lead(snap, s)}" for s in readers)
+        lines.append(
+            Line(
+                f"your answer is read by both leads: the one that raised it, and {across}",
+                warn=True,
+            )
+        )
+    else:
+        who = "the lead that raised it" if decision.asker[1] is None else f"{role} and its lead"
+        lines.append(
+            Line(
+                f"{_not_carried(snap, decision, name)}: your answer is read by {who} only,"
+                " and not across the link",
+                warn=True,
+            )
+        )
+    return tuple(lines)
+
+
+def channel_marker(snap: Snapshot, decision: Decision) -> str | None:
+    """
+    The queue row's short form of ``channel_facts``: the channel, and whether
+    the answer crosses it. None for a decision with no channel.
+
+    An answer that does not cross is said of the link as ``_not_carried``
+    says it: not live, closed or gone from the store; or live and not
+    carrying this decision.
+    """
+    if decision.channel is None:
+        return None
+    name = board_pane.one_line(decision.channel)
+    if channel_readers(snap, decision):
+        return f"#{name} · both leads read the answer"
+    why = "link does not carry it" if _link_live(snap, decision) else "link not live"
+    return f"#{name} · {why}: only its asker's side reads the answer"
 
 
 def sections(decision: Decision, role: str) -> tuple[Section, ...]:
@@ -516,7 +631,8 @@ def plain_text(snap: Snapshot, owed: DecisionOwed) -> list[str]:
     behind ``ASKER_MARK`` and no line of this module's own is.
     """
     role = asker_role(snap, owed.decision)
-    return [line.text for line in facts(owed, role)] + _section_text(owed.decision, role)
+    lines = (*channel_facts(snap, owed.decision, role), *facts(owed, role))
+    return [line.text for line in lines] + _section_text(owed.decision, role)
 
 
 def closed_text(snap: Snapshot, decision: Decision, now: float) -> list[str]:
@@ -571,7 +687,8 @@ def draw_body(snap: Snapshot, owed: DecisionOwed, *, limit: int, rest: str) -> N
     is, from wherever this is being drawn.
     """
     role = asker_role(snap, owed.decision)
-    for fact in facts(owed, role):
+    # The channel first: who else reads the answer is read before the answer is written.
+    for fact in (*channel_facts(snap, owed.decision, role), *facts(owed, role)):
         _line(fact)
     _sections(sections(owed.decision, role), limit=limit, rest=rest)
 

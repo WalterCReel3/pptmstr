@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from typing import cast
 
 import pytest
 
@@ -80,7 +81,7 @@ def test_emit_from_the_loop_reaches_the_ui_thread(bridge: Bridge) -> None:
 
     bridge.submit(work()).result(timeout=TIMEOUT)
     drained = bridge.drain()
-    assert [i.topic for i in drained] == ["step 0", "step 1", "step 2"]
+    assert [cast(TopicChanged, i).topic for i in drained] == ["step 0", "step 1", "step 2"]
 
 
 def test_drain_preserves_order_across_threads(bridge: Bridge) -> None:
@@ -95,7 +96,7 @@ def test_drain_preserves_order_across_threads(bridge: Bridge) -> None:
             bridge.emit(TopicChanged(NODE, str(i)))
 
     bridge.submit(work()).result(timeout=TIMEOUT)
-    assert [i.topic for i in bridge.drain()] == [str(i) for i in range(n)]
+    assert [cast(TopicChanged, i).topic for i in bridge.drain()] == [str(i) for i in range(n)]
 
 
 def test_drain_is_empty_when_nothing_happened(bridge: Bridge) -> None:

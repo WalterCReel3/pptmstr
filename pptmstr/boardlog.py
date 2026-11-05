@@ -29,8 +29,8 @@ written before it is a fact restored out of order.
 has its own store, so each reducer grants what the other would refuse, and a record
 does not say which window wrote it. ``restore`` therefore applies a record only
 where one reducer could have appended it after the ones before: from the first that
-could not have been, the task or concern is ``contested``, stands as it stood, and
-every later record about it is kept unapplied. What that cannot see is two writers
+could not have been, the task, concern or decision is ``contested``, stands as it
+stood, and every later record about it is kept unapplied. What that cannot see is two writers
 whose records are each allowed in turn -- one window amends, the other, still
 holding the old text, claims and finishes -- and such a task restores as one
 history with nothing marking it. Closing that needs the writer in the record.
@@ -65,10 +65,16 @@ board ``short`` and is not damage, and a build older than a field ignores the ke
 ``boardfacts.outcomes`` that derives it. mypy points at the fold when the arm is
 missing, and ``tests/test_boardlog.py`` fails when its generator does not produce
 the new kind. A fact with no record kind persists nothing and
-every existing test still passes, which is why the test counts kinds. Two are
-expected and deliberately not guessed at: a decision raised and answered, and a
-reference to an inter-session request. Until this build defines them, a record of
-either kind is carried as ``Unrecognised`` rather than dropped or treated as damage.
+every existing test still passes, which is why the test counts kinds. One is
+expected and deliberately not guessed at: a reference to an inter-session request.
+Until a build defines it, a record of that kind is carried as ``Unrecognised``
+rather than dropped or treated as damage.
+
+**A decision is filed in its asker's log** (``Raised`` and the records after it),
+and a decision is not a task or a concern: it has no declarer and no sender, so
+the session it belongs to is its asker's (``model.Decision.session_id``). A
+build older than these kinds reads them as ``Unrecognised`` and its board is
+``short``.
 
 **One kind is not a board fact.** ``RecordingStopped`` is the writer's statement
 about the log itself -- records stopped being appended here, and why -- so no
@@ -76,10 +82,11 @@ intent derives it and it is a member of ``Record`` beside ``Known`` and not of i
 It is the difference between a log that ends because the board did and one that
 ends because writing did, which the records before it cannot say.
 
-**A field added to ``model.Task`` or ``model.Concern`` is a board fact too**, and
+**A field added to ``model.Task``, ``model.Concern`` or ``model.Decision`` is a
+board fact too**, and
 it needs no new kind to be lost: it rides an existing one or it is not written.
 Nothing in the type system connects the two, so ``tests/test_boardlog.py`` walks
-the fields of both records and fails on one that no record restores and no list
+the fields of all three records and fails on one that no record restores and no list
 there names as deliberately left out. A field added to a record carries a default
 that claims nothing, because a log written before the field existed has no key
 for it and reads as that default.
@@ -112,6 +119,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, assert_never, get_args, get_type_hints
 
+from . import model
 from .board import ROOT_NAMES
 from .model import (
     ApprovedWrites,
@@ -141,8 +149,10 @@ _RECORD = re.compile(r"^([0-9]{8}|[1-9][0-9]{8,})\.json$")
 MAX_RECORD_BYTES = 1 << 20
 
 # Text at the boundary: an address, a basis, an id. Every field of every record is
-# one of these shapes, which is what lets one codec serve all of them.
-_FIELD_TYPES: tuple[Any, ...] = (str, str | None, float, int, bool, tuple[str, ...])
+# one of these shapes, which is what lets one codec serve all of them. ``bool |
+# None`` is a three-valued statement -- yes, no, not said -- which is a different
+# thing from a flag whose False claims nothing (``Raised.reversible``).
+_FIELD_TYPES: tuple[Any, ...] = (str, str | None, float, int, bool, bool | None, tuple[str, ...])
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +187,22 @@ class Declared:
     # this: one string is the root of that session, two are a session and the
     # agent id of one of its sub-agents, and none is "not recorded".
     declared_by_id: tuple[str, ...] = ()
+    # ``model.Task.provenance``, flattened: the channel the request arrived on, or
+    # None for a declaration with no provenance -- which is also what a record
+    # with no such key reads as -- and beside it the message it answers and the
+    # declarer's charter mark, a ``model.Charter`` value. The mark is text and not
+    # a bool, for the reason ``basis`` is: a word this build does not know reads
+    # as unstated, where a value of another type would make the record unreadable
+    # and end the log at it. ``re`` and ``inside_charter`` say nothing without a
+    # channel, and the store refuses a task whose record sets either without one.
+    #
+    # Fields of this kind and not a kind of their own. A build older than them
+    # ignores the keys and restores the task without its provenance, which loses
+    # a statement about the request and nothing about the work; a separate kind
+    # would make that build's board ``short`` for every peer-requested task.
+    channel: str | None = None
+    re: str | None = None
+    inside_charter: str | None = None
     # The declarer named ``model.ALL_WRITERS``: the task waits on every writer on
     # its board (``model.Task.after_all_writers``). The word itself is not in
     # ``depends_on``. False is what a record written before the field reads as.
@@ -403,6 +429,47 @@ class Posted:
 
 
 @dataclass(frozen=True, slots=True)
+class PeerPosted:
+    """
+    A message between leads as it was filed: a concern with a channel.
+
+    Its own kind and not a ``Posted`` with a channel field. A build older than
+    peer messages ignores a key it does not know, so a widened ``Posted`` would
+    restore there as team mail, be handed over by that build's ``read_inbox`` and
+    marked delivered, and the reader it was meant for would never see it. A kind
+    that build does not define is ``Unrecognised`` there, and the board is
+    ``short``. ``tests/test_peer_concerns.py`` pins the kind against the list a
+    build before this one decodes.
+
+    The edits, withdrawals and deliveries of a peer message are the same records
+    as a concern's, keyed on the same id. Its sender's withdrawal after delivery
+    is a kind of its own (``PeerRetracted``).
+    """
+
+    KIND: ClassVar[str] = "peer-posted"
+
+    at: float
+    concern_id: str
+    sender: str
+    recipient: str
+    subject: str
+    body: str
+    channel: str
+    # The id of the link it was sent over (``model.Concern.link``). Required: a
+    # peer message without its link could be handed over by no link, or by one
+    # that later took the name, and no build ever wrote one.
+    link: str
+    task_id: str | None = None
+    basis: str | None = None
+    incident: bool = False
+    sender_id: tuple[str, ...] = ()
+    recipient_id: tuple[str, ...] = ()
+    needs_answer: bool = False
+    re: str | None = None
+    quiet: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class Edited:
     """The operator rewrote a concern before it was delivered."""
 
@@ -418,6 +485,30 @@ class Withdrawn:
     """The operator stopped a concern from being delivered."""
 
     KIND: ClassVar[str] = "concern-withdrawn"
+
+    at: float
+    concern_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PeerRetracted:
+    """
+    A peer message's sender withdrew it after its lead was handed it
+    (``bus.withdraw_peer_message``). Filed in the sender's log, where the
+    message and its delivery are.
+
+    **A kind of its own, not a ``concern-withdrawn``.** That record stops a
+    concern still waiting, and every build restores a ``concern-withdrawn``
+    after a ``concern-delivered`` as two writers' disagreement (``restore``).
+    A field on it would be ignored by an older build, which would then read
+    exactly that. A build older than this kind reads it as ``Unrecognised``
+    instead, its board is ``short``, and the message stands there as delivered.
+
+    The withdrawer's reason is not carried: it is the sender's words to a lead
+    that read the message, and the log does not keep them.
+    """
+
+    KIND: ClassVar[str] = "peer-retracted"
 
     at: float
     concern_id: str
@@ -440,15 +531,109 @@ class Delivered:
 
 
 @dataclass(frozen=True, slots=True)
+class Raised:
+    """
+    A decision as the store filed it: ``model.Decision`` with no outcome, every
+    text the asker's as the reducer kept it.
+
+    ``at`` is ``Decision.raised_at``. ``standing`` is text for the reason
+    ``Declared.basis`` is. ``reversible`` keeps its three values, and a record
+    with no such key reads as None, "not said", which is the one of them that
+    puts nothing in the asker's mouth.
+    """
+
+    KIND: ClassVar[str] = "decision-raised"
+
+    at: float
+    decision_id: str
+    asker: str
+    question: str
+    standing: str
+    blocks: tuple[str, ...] = ()
+    if_unanswered: str = ""
+    evidence: str = ""
+    recommendation: str = ""
+    reversible: bool | None = None
+    asker_id: tuple[str, ...] = ()
+    # The channel the decision was raised on, or None for one inside a team.
+    channel: str | None = None
+    # The id of the link ``channel`` named when it was raised
+    # (``model.Decision.link``), or None.
+    link: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Answered:
+    """
+    The operator answered a decision. ``answer`` is what they typed, byte for
+    byte, as ``model.Answered.text`` holds it.
+
+    That text is held verbatim and not drawable (``store._VERBATIM``), so it is
+    the one text a log may carry a NUL or a lone surrogate in. JSON's escapes
+    carry both, and a restore does not refuse a decision for them.
+    """
+
+    KIND: ClassVar[str] = "decision-answered"
+
+    at: float
+    decision_id: str
+    answer: str
+
+
+@dataclass(frozen=True, slots=True)
+class Dismissed:
+    """
+    The operator closed a decision without answering it.
+    """
+
+    KIND: ClassVar[str] = "decision-dismissed"
+
+    at: float
+    decision_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class Retracted:
+    """
+    The asker withdrew its decision.
+
+    Names no party. Only the asker may withdraw, and the asker is on ``Raised``,
+    so a withdrawer field could only repeat it or contradict it.
+    """
+
+    KIND: ClassVar[str] = "decision-withdrawn"
+
+    at: float
+    decision_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerDelivered:
+    """
+    The asker was first handed the operator's answer or dismissal:
+    ``model.Decision.first_delivered_at``.
+
+    Its own kind because the stamp is set by a read, which is neither the
+    raise nor the operator's act, and a decision restored without it would
+    tell the pane that an answer the asker has read was never read.
+    """
+
+    KIND: ClassVar[str] = "decision-delivered"
+
+    at: float
+    decision_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class RecordingStopped:
     """
     The writer of this log stopped appending to it here: a record after the ones
     before this did not land, and nothing was appended behind the hole.
 
-    Not a fact about a task or a concern. It is what makes the records before it
-    read as a prefix rather than as the board: without it a log that ends because
-    a completion could not be written is indistinguishable from one where the
-    task was never finished. ``restore`` lists it in ``Board.stopped``, which
+    Not a fact about a task, a concern or a decision. It is what makes the records
+    before it read as a prefix rather than as the board: without it a log that
+    ends because a completion could not be written is indistinguishable from one
+    where the task was never finished. ``restore`` lists it in ``Board.stopped``, which
     makes the board ``short``, and applies whatever follows it as it would
     anywhere -- a later process that restored the prefix and carried on is one
     history from that prefix, and the board it leaves is still short one fact or
@@ -487,9 +672,8 @@ class Unrecognised:
     text: str
 
 
-# The closed vocabulary of board facts: what a reducer step can yield. A decision
-# raised or answered, and a reference to an inter-session request, join here when
-# the tasks that define them land.
+# The closed vocabulary of board facts: what a reducer step can yield. A reference
+# to an inter-session request joins here when the task that defines it lands.
 Known = (
     Declared
     | Claimed
@@ -502,9 +686,16 @@ Known = (
     | Amended
     | WritesAccrued
     | Posted
+    | PeerPosted
     | Edited
     | Withdrawn
+    | PeerRetracted
     | Delivered
+    | Raised
+    | Answered
+    | Dismissed
+    | Retracted
+    | AnswerDelivered
 )
 Record = Known | RecordingStopped | Unrecognised
 
@@ -623,6 +814,10 @@ def _as(value: Any, hint: Any) -> Any:
         return value
     if hint is str:
         return value if isinstance(value, str) else Malformed("not text")
+    if hint == bool | None:
+        if value is None or isinstance(value, bool):
+            return value
+        return Malformed("not true, false or null")
     if isinstance(hint, types.UnionType):
         return value if value is None or isinstance(value, str) else Malformed("not text or null")
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
@@ -958,21 +1153,30 @@ def _named(record: Record) -> tuple[tuple[str | None, tuple[str, ...]], ...]:
             return ((record.by, record.by_id),)
         case Reclaimed():
             return ((record.by, record.by_id), (record.holder, record.holder_id))
-        case Posted():
+        case Posted() | PeerPosted():
             return (
                 (record.sender, record.sender_id),
                 (record.recipient, record.recipient_id),
             )
+        case Raised():
+            return ((record.asker, record.asker_id),)
         case (
             Closed()
             | WritesAccrued()
             | Edited()
             | Withdrawn()
+            | PeerRetracted()
             | Delivered()
+            | Answered()
+            | Dismissed()
+            | Retracted()
+            | AnswerDelivered()
             | RecordingStopped()
             | Unrecognised()
         ):
-            # A close is the operator's, who is no party of a board.
+            # A close, an answer and a dismissal are the operator's, who is no
+            # party of a board; a withdrawal and a delivery are the asker's,
+            # whom ``Raised`` names.
             return ()
         case _:
             assert_never(record)
@@ -1045,6 +1249,12 @@ class RestoredTask:
     # The operator closed it: finished with no holder, and ``result`` is the
     # closing words and the operator's reason. ``model.Task.closed_by_operator``.
     closed_by_operator: bool = False
+    # ``model.Task.provenance`` as ``Declared`` carries it, field by field: the
+    # store puts the three together and refuses a task that sets ``re`` or
+    # ``inside_charter`` with no channel, which this fold does not judge.
+    channel: str | None = None
+    re: str | None = None
+    inside_charter: str | None = None
     # Its declarer withdrew it: finished with no holder, and ``result`` is the
     # withdrawal's words and the declarer's reason. ``model.Task.withdrawn``.
     withdrawn: bool = False
@@ -1115,8 +1325,44 @@ class RestoredConcern:
     edited: bool = False
     delivered_at: float | None = None
     incident: bool = False
+    # ``model.Concern``'s peer-message fields. Set only from a ``PeerPosted``;
+    # a ``Posted`` is mail inside a team and leaves them as they are here.
+    channel: str | None = None
+    needs_answer: bool = False
+    re: str | None = None
+    quiet: bool = False
+    link: str | None = None
     # As on ``RestoredTask``: the concern is as the records before the first
     # impossible one left it, and the rest are in ``Board.contested``.
+    contested: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RestoredDecision:
+    """
+    A decision and what became of it, named as ``model.Decision`` names its
+    fields.
+
+    ``outcome`` is ``model.DecisionOutcome`` with its time on the wall clock,
+    like every time here. ``standing`` is the logged text, which the store reads
+    as the member it names.
+    """
+
+    id: str
+    asker: Party
+    question: str
+    blocks: tuple[str, ...]
+    if_unanswered: str
+    evidence: str
+    recommendation: str
+    standing: str
+    reversible: bool | None
+    raised_at: float
+    outcome: model.DecisionOutcome | None = None
+    first_delivered_at: float | None = None
+    channel: str | None = None
+    link: str | None = None
+    # As on ``RestoredTask``.
     contested: bool = False
 
 
@@ -1124,15 +1370,16 @@ class RestoredConcern:
 class Board:
     """
     What a log says a board held. Tasks in declaration order, concerns in the order
-    they were posted -- the log's order, which is the one ordering here that no
-    clock can disturb.
+    they were posted, decisions in the order they were raised -- the log's order,
+    which is the one ordering here that no clock can disturb.
 
-    ``stray`` holds every record that named a task or concern the log never
-    introduced. ``contested`` holds every record about one it did introduce that
-    one reducer could not have appended after the records before it -- a second
-    declaration, a claim on a task somebody holds, a completion by a party that
-    does not hold it, an edit of a concern already handed over -- and every later
-    record about the same task or concern. Neither kind changes the thing it could
+    ``stray`` holds every record that named a task, concern or decision the log
+    never introduced. ``contested`` holds every record about one it did introduce
+    that one reducer could not have appended after the records before it -- a
+    second declaration, a claim on a task somebody holds, a completion by a party
+    that does not hold it, an edit of a concern already handed over, an answer to
+    a decision that had already ended -- and every later record about the same
+    task, concern or decision. Neither kind changes the thing it could
     not be applied to and both are kept, because a board restored short with
     nothing saying so is the failure a log of outcomes exists to rule out. One
     record can be in either and still have been applied elsewhere: a delivery
@@ -1140,7 +1387,7 @@ class Board:
 
     ``stopped`` holds every ``RecordingStopped`` the log carries: each is a point
     where a writer gave up appending, so at least one fact the board once held is
-    not in these tasks and concerns, and no record says which. A log whose writer
+    not in these tasks, concerns and decisions, and no record says which. A log whose writer
     stopped and could not write even that -- the disk was full, the directory was
     gone, the process was killed with records still queued -- carries nothing,
     and restores as though it were whole. That case is not detectable from the
@@ -1156,8 +1403,8 @@ class Board:
     it, and neither is a party the log knows by address alone.
 
     **Ask** ``short`` **before treating this as the board.** It is the one answer
-    to "did the board hold more than these tasks and concerns do", over all five
-    places that can say so.
+    to "did the board hold more than these tasks, concerns and decisions do", over
+    all five places that can say so.
 
     **A restart reads as a contest unless the claim was given up.** A task that
     was held when a process ended, then claimed and finished by another agent in
@@ -1170,6 +1417,7 @@ class Board:
 
     tasks: tuple[RestoredTask, ...] = ()
     concerns: tuple[RestoredConcern, ...] = ()
+    decisions: tuple[RestoredDecision, ...] = ()
     stray: tuple[Record, ...] = ()
     unrecognised: tuple[Unrecognised, ...] = ()
     contested: tuple[Record, ...] = ()
@@ -1180,9 +1428,9 @@ class Board:
     @property
     def short(self) -> bool:
         """
-        Whether the board held anything these tasks and concerns do not show: a
-        record past a break, about something never introduced, of a kind this
-        build does not define, or withheld as contested -- or a fact that was
+        Whether the board held anything these tasks, concerns and decisions do not
+        show: a record past a break, about something never introduced, of a kind
+        this build does not define, or withheld as contested -- or a fact that was
         never written, because the log's writer stopped.
 
         True is not an error to clear. It is what an operator is owed before the
@@ -1222,10 +1470,12 @@ def restore(records: Iterable[Record]) -> Board:
     window held: a live claim carrying somebody else's result. So each record is
     asked the one thing ``store._apply`` guards -- ``_one_writers`` lists them for
     a task; an edit, a withdrawal and a delivery need a concern not yet handed
-    over or stopped; a thing is introduced once. A record that fails marks its
-    task or concern ``contested``. From there the log has two histories of it and
-    no record says which it belongs to, so the thing stands as it stood and every
-    later record about it goes to ``Board.contested`` with the first. This is not
+    over or stopped, and a peer message's retraction one handed over and not
+    stopped; ``_decision_one_writers`` lists them for a decision; a thing
+    is introduced once. A record that fails marks its task, concern or decision
+    ``contested``. From there the log has two histories of it and no record says
+    which it belongs to, so the thing stands as it stood and every later record
+    about it goes to ``Board.contested`` with the first. This is not
     a second reducer: nothing is refused that one writer could have logged, and
     what two writers logged in an order one could have is applied as one history
     (the module docstring says what that misses).
@@ -1245,6 +1495,7 @@ def restore(records: Iterable[Record]) -> Board:
     """
     tasks: dict[str, RestoredTask] = {}
     concerns: dict[str, RestoredConcern] = {}
+    decisions: dict[str, RestoredDecision] = {}
     stray: list[Record] = []
     unrecognised: list[Unrecognised] = []
     contested: list[Record] = []
@@ -1279,6 +1530,9 @@ def restore(records: Iterable[Record]) -> Board:
                     ),
                     depends_on=record.depends_on,
                     touches=record.touches,
+                    channel=record.channel,
+                    re=record.re,
+                    inside_charter=record.inside_charter,
                     after_all_writers=record.after_all_writers,
                 )
             case (
@@ -1301,23 +1555,13 @@ def restore(records: Iterable[Record]) -> Board:
                     tasks[record.task_id] = dataclasses.replace(task, contested=True)
                     continue
                 tasks[record.task_id] = _task_after(task, record)
-            case Posted():
+            case Posted() | PeerPosted():
                 reposted = concerns.get(record.concern_id)
                 if reposted is not None:
                     contested.append(record)
                     concerns[record.concern_id] = dataclasses.replace(reposted, contested=True)
                     continue
-                concerns[record.concern_id] = RestoredConcern(
-                    id=record.concern_id,
-                    sender=_party(record.sender, record.sender_id),
-                    recipient=_party(record.recipient, record.recipient_id),
-                    subject=record.subject,
-                    body=record.body,
-                    posted_at=record.at,
-                    task_id=record.task_id,
-                    basis=record.basis,
-                    incident=record.incident,
-                )
+                concerns[record.concern_id] = _posted(record)
             case Edited():
                 concern = concerns.get(record.concern_id)
                 if concern is None:
@@ -1336,6 +1580,25 @@ def restore(records: Iterable[Record]) -> Board:
                     stray.append(record)
                     continue
                 if not _waiting(concern):
+                    contested.append(record)
+                    concerns[record.concern_id] = dataclasses.replace(concern, contested=True)
+                    continue
+                concerns[record.concern_id] = dataclasses.replace(
+                    concern, state=ConcernState.WITHDRAWN
+                )
+            case PeerRetracted():
+                # The one record about a concern already handed over: one
+                # reducer files it only for a peer message, after its delivery,
+                # and only once.
+                concern = concerns.get(record.concern_id)
+                if concern is None:
+                    stray.append(record)
+                    continue
+                if (
+                    concern.channel is None
+                    or concern.state is not ConcernState.DELIVERED
+                    or concern.contested
+                ):
                     contested.append(record)
                     concerns[record.concern_id] = dataclasses.replace(concern, contested=True)
                     continue
@@ -1365,6 +1628,25 @@ def restore(records: Iterable[Record]) -> Board:
                     )
                 if disputed:
                     contested.append(record)
+            case Raised():
+                again_raised = decisions.get(record.decision_id)
+                if again_raised is not None:
+                    contested.append(record)
+                    decisions[record.decision_id] = dataclasses.replace(
+                        again_raised, contested=True
+                    )
+                    continue
+                decisions[record.decision_id] = _raised(record)
+            case Answered() | Dismissed() | Retracted() | AnswerDelivered():
+                decision = decisions.get(record.decision_id)
+                if decision is None:
+                    stray.append(record)
+                    continue
+                if decision.contested or not _decision_one_writers(decision, record):
+                    contested.append(record)
+                    decisions[record.decision_id] = dataclasses.replace(decision, contested=True)
+                    continue
+                decisions[record.decision_id] = _decision_after(decision, record)
             case RecordingStopped():
                 stopped.append(record)
             case Unrecognised():
@@ -1375,6 +1657,7 @@ def restore(records: Iterable[Record]) -> Board:
     return Board(
         tasks=tuple(tasks.values()),
         concerns=tuple(concerns.values()),
+        decisions=tuple(decisions.values()),
         stray=tuple(stray),
         unrecognised=tuple(unrecognised),
         contested=tuple(contested),
@@ -1449,6 +1732,98 @@ def _one_writers(task: RestoredTask, record: _TaskRecord) -> bool:
         case Amended():
             amender = _amender(record)
             return amender is None or (amender == task.declared_by and amender not in task.held_by)
+        case _:
+            assert_never(record)
+
+
+def _posted(record: Posted | PeerPosted) -> RestoredConcern:
+    """
+    The concern a posting record introduces, before anything became of it.
+    """
+    concern = RestoredConcern(
+        id=record.concern_id,
+        sender=_party(record.sender, record.sender_id),
+        recipient=_party(record.recipient, record.recipient_id),
+        subject=record.subject,
+        body=record.body,
+        posted_at=record.at,
+        task_id=record.task_id,
+        basis=record.basis,
+        incident=record.incident,
+    )
+    match record:
+        case Posted():
+            return concern
+        case PeerPosted():
+            return dataclasses.replace(
+                concern,
+                channel=record.channel,
+                needs_answer=record.needs_answer,
+                re=record.re,
+                quiet=record.quiet,
+                link=record.link,
+            )
+        case _:
+            assert_never(record)
+
+
+def _raised(record: Raised) -> RestoredDecision:
+    """
+    The decision a ``Raised`` introduces, before anything became of it.
+    """
+    return RestoredDecision(
+        id=record.decision_id,
+        asker=_party(record.asker, record.asker_id),
+        question=record.question,
+        blocks=record.blocks,
+        if_unanswered=record.if_unanswered,
+        evidence=record.evidence,
+        recommendation=record.recommendation,
+        standing=record.standing,
+        reversible=record.reversible,
+        raised_at=record.at,
+        channel=record.channel,
+        link=record.link,
+    )
+
+
+_DecisionRecord = Answered | Dismissed | Retracted | AnswerDelivered
+
+
+def _decision_one_writers(decision: RestoredDecision, record: _DecisionRecord) -> bool:
+    """
+    Whether one reducer could have appended ``record`` to the records that left
+    ``decision`` as it is. The guards are ``store._apply``'s: an answer, a
+    dismissal and a withdrawal end an open decision and nothing replaces an
+    ending; the first delivery is of an answer or a dismissal, and is first once.
+    """
+    match record:
+        case Answered() | Dismissed() | Retracted():
+            return decision.outcome is None
+        case AnswerDelivered():
+            return (
+                isinstance(decision.outcome, model.Answered | model.Dismissed)
+                and decision.first_delivered_at is None
+            )
+        case _:
+            assert_never(record)
+
+
+def _decision_after(decision: RestoredDecision, record: _DecisionRecord) -> RestoredDecision:
+    """
+    ``decision`` with one more fact about it applied.
+    """
+    match record:
+        case Answered():
+            return dataclasses.replace(
+                decision, outcome=model.Answered(text=record.answer, at=record.at)
+            )
+        case Dismissed():
+            return dataclasses.replace(decision, outcome=model.Dismissed(at=record.at))
+        case Retracted():
+            return dataclasses.replace(decision, outcome=model.Withdrawn(at=record.at))
+        case AnswerDelivered():
+            return dataclasses.replace(decision, first_delivered_at=record.at)
         case _:
             assert_never(record)
 

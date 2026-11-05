@@ -14,6 +14,7 @@ import concurrent.futures
 import dataclasses
 import functools
 import gc
+import math
 import os
 import queue
 import signal
@@ -21,6 +22,7 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, fields
@@ -35,6 +37,7 @@ from . import (
     boardlog,
     boardsync,
     bus,
+    channels,
     cli_version,
     commandfile,
     commandrun,
@@ -72,21 +75,29 @@ from .figures import host as figure_host
 from .figures import render as figure_render
 from .intents import (
     BoardRestored,
+    ChannelClosed,
+    ChannelLinked,
+    ChannelsRestored,
     CommandApproved,
     CommandEnded,
     CommandRefused,
     CommandsRestored,
     CommandStopAsked,
+    DecisionWakeSent,
     FailedSessionClosed,
     FailureAcknowledged,
     Intent,
+    PeerQuestionAged,
+    PeerWakeSent,
     SessionDetached,
+    SessionSettled,
 )
 from .log import LOG
 from .model import (
     MAX_COMMAND_REFUSAL_CHARS,
     AgentRecord,
     AgentState,
+    ConcernId,
     DetachRefusal,
     LaunchSpec,
     NodeId,
@@ -109,6 +120,7 @@ from .ui import (
     health,
     inbox,
     launcher,
+    link_form,
     main_menu,
     rail,
     resume_form,
@@ -887,6 +899,8 @@ class AppState:
     # Every session's resume form, and which one is up. Its own modal and not
     # the launcher's: see ``ui/resume_form``.
     resume: resume_form.ResumeForms = field(default_factory=resume_form.ResumeForms)
+    # The link form a card's "Link leads…" opens (``ui/link_form``).
+    link: link_form.LinkForms = field(default_factory=link_form.LinkForms)
     # Which models the launcher offers. Probed once on a worker at startup and the list
     # in code until that answers, so it is readable from the first frame and there is no
     # "not yet known" state for a caller to draw.
@@ -950,6 +964,14 @@ class AppState:
     # is the whole of the switch -- with no writer nothing is loaded, submitted
     # or created. See ``_record_board``.
     board_writer: boardsync.BoardWriter | None = None
+    # The one appender of channel logs, or None where no board is recorded: a
+    # link between leads is only made between sessions being recorded, so with
+    # no board writer there is nothing it could record. See ``_record_channels``.
+    channel_writer: channels.ChannelWriter | None = None
+    # Why startup could not look at the channel logs, or None when it could.
+    # Every link is refused while it is set: a link there may be live under the
+    # name asked for, and "could not look" is not "none" (``link_leads``).
+    channels_unlisted: str | None = None
     # Why ``settings.board_log`` is off when that is not what the file says: what
     # ``settings.read`` could not read at startup. None for a clean read. It is
     # the reason the pane gives for an unrecorded board, and what ``_save`` hands
@@ -1010,6 +1032,13 @@ class AppState:
     # Written by ``apply_intents`` alone.
     wakes: dict[str, list[effects.SessionWoken]] = field(default_factory=dict)
     wake_due: dict[str, float] = field(default_factory=dict)
+    # One timer per question between leads that is owed an answer
+    # (``Snapshot.awaiting_answer``): when it is due, on the store's clock, or
+    # ``math.inf`` once its ``PeerQuestionAged`` is sent. ``question_seq`` is
+    # the store's ``seq`` they were last armed against. Written by
+    # ``apply_intents`` alone (``_age_questions``).
+    question_due: dict[ConcernId, float] = field(default_factory=dict)
+    question_seq: int = -1
     # The fleet observer's last failure, so one that fails on every step is said
     # once. See ``_record_fleet``.
     fleet_observer_failed: str | None = None
@@ -1096,8 +1125,11 @@ def apply_intents(state: AppState) -> None:
             continue
         state.bridge.settle(effect)
     _send_wakes(state)
+    _age_questions(state)
     if writer is not None:
         _read_board_reports(state, writer.drain())
+    if state.channel_writer is not None:
+        _read_channel_reports(state.channel_writer.drain(), state)
     _read_fleet_reports(state.fleet_writer.drain())
     _read_command_reports(state)
 
@@ -1135,28 +1167,196 @@ def _send_wakes(state: AppState) -> None:
     closed (a card recalled from its file), off the fleet, or done, cancelled
     or failed is sent nothing, and its wakes are let go of: the panes still
     show what was answered, and a session resumed later reads it with
-    ``read_decisions`` or ``read_commands``. The pool sends nothing either to
-    a session with no connected client, and writes nothing for it.
+    ``read_decisions`` or ``read_commands``, and is woken for its peer mail
+    once its restore is in the store (``intents.SessionSettled``). The pool
+    sends nothing either to a session with no connected client, and writes
+    nothing for it.
+
+    **A session still starting is waited for**, its wakes kept to a later
+    frame: its client may not be connected yet, and a wake the pool drops for
+    that would leave the store holding a peer wake as pending that nobody
+    sent.
+
+    **A peer message's wake that has nothing left to read is not sent**: its
+    lead read the channel between the order and now, and a line saying "0
+    unread" would cost it a turn for nothing.
+
+    **Every peer wake let go of is said** (``intents.PeerWakeSent``), sent or
+    dropped, with the mail a sent line counted: the store keeps its session
+    pending on the link until then, and coalesces only between the order and
+    this. **The channel decisions a sent message names as answered or
+    dismissed are said** (``intents.DecisionWakeSent``), and those of a
+    dropped one are not: the store names those again at the session's next
+    resume.
+
+    **Sent means handed to the pool** (``Bridge.submit`` returned), and both
+    words are said only after that, so neither can mark as told what was never
+    handed over. With no pool the wakes are dropped. A submit the bridge
+    refuses (its loop not running) keeps them for a later frame, unsaid.
     """
     due = [sid for sid, at in state.wake_due.items() if at <= state.frame_now]
     if not due:
         return
     snap = state.store.snapshot()
     for session_id in due:
-        held = state.wakes.pop(session_id, [])
-        del state.wake_due[session_id]
         root: NodeId = (session_id, None)
         record = snap.get(root)
-        if (
-            record is None
-            or record.recalled is not None
-            or record.state in _UNWAKEABLE
-            or snap.off_fleet(session_id)
-        ):
+        if record is not None and record.state is AgentState.SPAWNING:
             continue
-        _session_action(
-            state, functools.partial(_wake, root=root, text=bus.wake_message(snap, held))
-        )
+        held = state.wakes.pop(session_id, [])
+        del state.wake_due[session_id]
+        sendable = _sendable(snap, session_id)
+        owed = [wake for wake in held if sendable and _still_to_read(snap, wake)]
+        pool = state.pool
+        if not owed or pool is None:
+            # Nothing goes, so every peer wake is said dropped and no decision
+            # is said named.
+            _say_peer_wakes_spent(state, snap, held, [])
+            continue
+        try:
+            state.bridge.submit(_wake(pool, root=root, text=bus.wake_message(snap, owed)))
+        except RuntimeError as exc:
+            # The bridge's loop is not running, so nothing was handed over: the
+            # wakes are kept for a later frame, as a starting session's are, and
+            # nothing is said of them yet.
+            LOG.warn("app", f"wake for {session_id} not handed to the pool, kept: {exc}")
+            state.wakes[session_id] = [*held, *state.wakes.get(session_id, [])]
+            state.wake_due[session_id] = state.frame_now + WAKE_WINDOW_S
+            continue
+        _say_peer_wakes_spent(state, snap, held, owed)
+        _say_decisions_named(state, snap, session_id, owed)
+
+
+def _sendable(snap: Snapshot, session_id: str) -> bool:
+    """
+    Whether ``session_id`` is there to be sent a wake: a root in the store, not
+    a card recalled from its file, not done, cancelled or failed, and on the
+    fleet.
+
+    Must agree with the store's ``store._wakeable``, which asks it to never
+    leave a peer wake pending that this would drop. Were this to refuse a
+    session the store would wake, each drop is said (``intents.PeerWakeSent``)
+    with nothing covered, the store asks a counted wake again, and the link's
+    chain climbs one a wake window until it is held, for a lead nobody could
+    wake. They agree because off the fleet implies a root in a final state
+    (``Snapshot.detach_refusal``), which the store refuses already.
+    """
+    record = snap.get((session_id, None))
+    return not (
+        record is None
+        or record.recalled is not None
+        or record.state in _UNWAKEABLE
+        or snap.off_fleet(session_id)
+    )
+
+
+def _say_peer_wakes_spent(
+    state: AppState,
+    snap: Snapshot,
+    held: list[effects.SessionWoken],
+    sent: list[effects.SessionWoken],
+) -> None:
+    """
+    Tell the store of each link whose peer wake ``held`` let go of: once per
+    link, with the mail the line counted and the decisions it named when it is
+    among ``sent``, and none when it was dropped.
+    """
+    links = {w.subject_id: w for w in held if w.reason is effects.WakeReason.PEER_MESSAGE}
+    going = {w.subject_id for w in sent if w.reason is effects.WakeReason.PEER_MESSAGE}
+    for link_id, wake in links.items():
+        link = snap.channels.get(link_id)
+        if link is None or link_id not in going:
+            state.bridge.emit(PeerWakeSent(wake.session_id, link_id))
+            continue
+        covered = frozenset(c.id for c in snap.peer_unread(wake.session_id, link))
+        told = frozenset(snap.peer_untold(wake.session_id, link))
+        state.bridge.emit(PeerWakeSent(wake.session_id, link_id, covered, told))
+
+
+def _say_decisions_named(
+    state: AppState, snap: Snapshot, session_id: str, sent: list[effects.SessionWoken]
+) -> None:
+    """
+    Tell the store which decisions raised on a channel the message ``sent``
+    to ``session_id`` names as answered or dismissed, those folded past
+    ``bus.WAKE_DECISIONS_NAMED`` included, as the folded ids of a peer line
+    count as told: the store marks them told to its lead
+    (``PeerWakes.heard``). Called only once the send is handed to the pool
+    (``_send_wakes``), so a session whose client is gone by then is taken as
+    told, as a peer wake's ``told`` is.
+    """
+    named = frozenset(
+        w.subject_id
+        for w in sent
+        if w.reason in (effects.WakeReason.DECISION_ANSWERED, effects.WakeReason.DECISION_DISMISSED)
+        and (decision := snap.decisions.get(w.subject_id)) is not None
+        and decision.link is not None
+    )
+    if named:
+        state.bridge.emit(DecisionWakeSent(session_id, named))
+
+
+def _still_to_read(snap: Snapshot, wake: effects.SessionWoken) -> bool:
+    """
+    Whether ``wake`` still names something to wake for: every wake does but a
+    peer message's, whose link may have been read, or closed, since it was
+    ordered, whose messages that are not quiet may have been withdrawn,
+    whose decisions may have ended, and whose questions owed an answer
+    (``Snapshot.peer_owing``) may have been answered. Quiet mail alone wakes nobody, here as in
+    the store (``store._still_owed``).
+    """
+    if wake.reason is not effects.WakeReason.PEER_MESSAGE:
+        return True
+    link = snap.channels.get(wake.subject_id)
+    return link is not None and bool(
+        any(not c.quiet for c in snap.peer_unread(wake.session_id, link))
+        or snap.peer_untold(wake.session_id, link)
+        or snap.peer_owing(wake.session_id, link)
+    )
+
+
+def _age_questions(state: AppState) -> None:
+    """
+    Tell the store of each question between leads that has gone unanswered
+    for ``Settings.peer_answer_age_s`` since its lead was handed it
+    (``intents.PeerQuestionAged``, Decided 11): a one-shot timer each, so the
+    row reaches NEEDS YOU on time while every session is idle and nothing
+    else is applied.
+
+    **Armed from the store, not from an event.** A question is armed when the
+    store first shows it owed an answer: when its lead reads it, and when a
+    restore brings back one handed over in an earlier run, whose
+    ``delivered_at`` the restore put on this run's clock, so the age still
+    runs from delivery and one already past it fires at once. A timer whose
+    question is no longer owed (answered, its link closed, or already
+    surfaced) is let go of, so an answer withdrawn later arms it again.
+
+    The store is asked again only when it has moved (``Snapshot.seq``); between
+    moves, this compares the frame's clock with what is armed. The age is read
+    when a question is armed: a changed setting reaches the questions armed
+    after it.
+    """
+    snap = state.store.snapshot()
+    if snap.seq != state.question_seq:
+        state.question_seq = snap.seq
+        owed = {
+            c.id: c.delivered_at or 0.0
+            for c in snap.awaiting_answer()
+            if c.id not in snap.questions_aged
+        }
+        for gone in [cid for cid in state.question_due if cid not in owed]:
+            del state.question_due[gone]
+        for cid, delivered in owed.items():
+            # One whose word went and that is owed and not aged again was let go
+            # of and owed anew within one batch (an answer applied and withdrawn
+            # around the word): it is armed again, as one let go of across two
+            # batches would be.
+            if state.question_due.get(cid, math.inf) == math.inf:
+                state.question_due[cid] = delivered + state.settings.peer_answer_age_s
+    for cid, due in state.question_due.items():
+        if due <= state.frame_now:
+            state.bridge.emit(PeerQuestionAged(cid))
+            state.question_due[cid] = math.inf
 
 
 async def _wake(pool: SessionPool, *, root: NodeId, text: str) -> None:
@@ -1203,16 +1403,359 @@ def _observer(state: AppState, writer: boardsync.BoardWriter | None) -> Observer
     could not be.
     """
     board = None if writer is None else _record_board(state, writer)
+    linked = _record_channels(state)
     fleet = _record_fleet(state)
     commands = _record_commands(state)
 
     def observe(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> None:
         if board is not None:
             board(before, intent, after, now)
+        linked(before, intent, after, now)
         fleet(before, intent, after, now)
         commands(before, intent, after, now)
 
     return observe
+
+
+def _record_channels(state: AppState) -> Observer:
+    """
+    The channel logs' half of the observer: each applied link or close, as the
+    fact ``channels.outcomes`` reads off the store, queued for the channel
+    writer; and a link the store refused, said with the reason.
+
+    The refusal is worked out from the snapshot the act met
+    (``Snapshot.link_refusal``), the same derivation the reducer refused it by,
+    so no effect carries it.
+
+    **It does not raise**, for ``_record_board``'s reason; a failure to derive
+    is a fact missing from a channel log, and is said.
+    """
+
+    def observe(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> None:
+        try:
+            if isinstance(intent, ChannelLinked) and intent.channel_id not in after.channels:
+                refusal = before.link_refusal(
+                    intent.channel_id, intent.name, intent.members, intent.recording
+                )
+                if refusal is not None:
+                    LOG.warn("channel", f"the leads were not linked: {refusal.value}")
+                    # The form asked the same question of the frame it was
+                    # submitted on, so this is a link that was good then and
+                    # not when it was applied; the form has closed.
+                    _not_done(state, f"#{intent.name}: the leads were not linked: {refusal.value}")
+            writer = state.channel_writer
+            if writer is None:
+                return
+            for link, fact in channels.outcomes(before, intent, after):
+                writer.submit(link, fact)
+        except Exception as exc:  # noqa: BLE001 - see the docstring: this must not raise
+            LOG.error(
+                "channel",
+                f"a channel fact could not be derived ({type(exc).__name__}: {exc}); its log"
+                " is short that fact",
+            )
+            LOG.debug("channel", traceback.format_exc())
+
+    return observe
+
+
+def _read_channel_reports(
+    reports: tuple[channels.Report, ...], state: AppState | None = None
+) -> None:
+    """
+    Say each link fact that did not reach its log, and what each relink's
+    sweep did, on the draw thread. The next start reads a link as its log was
+    left: not live, where the stop marker landed.
+
+    **Put in front of the operator as well**, with ``state``
+    (``_not_done``): a link or a close the operator made that holds for this
+    run only is an act of theirs that did not take, and a line in LOG is in a
+    pane that is not resident. So is a sweep that left an earlier link it
+    could not close, or could not list the name's links: an earlier link may
+    then read live at the next start. Not at shutdown, which passes no state:
+    there is no frame left to show it in. What each notice says is
+    ``_not_written``'s and ``_sweep_notices``'.
+    """
+    for report in reports:
+        match report:
+            case channels.Outcome():
+                _read_outcome(report, state)
+            case channels.Swept():
+                _read_sweep(report, state)
+            case _:
+                assert_never(report)
+
+
+def _read_outcome(report: channels.Outcome, state: AppState | None) -> None:
+    """Say a submitted fact that did not reach its log; one that did is not said."""
+    if not isinstance(report.result, channels.NotAppended):
+        return
+    if state is not None:
+        _not_done(state, _not_written(report.link, type(report.fact), report.result.reason))
+    LOG.error(
+        "channel",
+        f"{report.link}: a {type(report.fact).__name__} did not reach the link's"
+        f" log: {report.result.reason}{_stopped(report.marker)}",
+    )
+
+
+def _stopped(marker: channels.Appended | channels.NotAppended | None) -> str:
+    """What a failed fact's report adds for the stop marker tried after it."""
+    match marker:
+        case None:
+            return ""
+        case channels.Appended():
+            return "; its log says recording stopped"
+        case channels.NotAppended():
+            return f"; nor could its log be marked as stopped ({marker.reason})"
+        case _:
+            assert_never(marker)
+
+
+def _read_sweep(report: channels.Swept, state: AppState | None) -> None:
+    """
+    Say what the sweep for ``report.made`` did: the earlier links it closed, in
+    LOG, and each it could not close, or that it could list none, in LOG and in
+    front of the operator. Every line names the earlier link or says none was
+    tried; none says ``made``'s own close failed, since nothing closed it.
+    """
+    made, name = report.made, report.made.name
+    if state is not None:
+        for notice in _sweep_notices(report):
+            _not_done(state, notice)
+    closes = report.closes
+    if isinstance(closes, channels.Unlisted):
+        LOG.error(
+            "channel",
+            f"{made}: was linked, and no earlier link under #{name} was checked or closed:"
+            f" the links under #{name} could not be listed ({closes.reason})",
+        )
+        return
+    closed = [str(c.link) for c in closes if isinstance(c.result, channels.Appended)]
+    if closed:
+        LOG.info(
+            "channel",
+            f"{made}: was linked, and closed the earlier link{'s' if len(closed) > 1 else ''}"
+            f" under #{name} that could read live again: {', '.join(closed)}",
+        )
+    for close in closes:
+        if isinstance(close.result, channels.NotAppended):
+            LOG.error(
+                "channel",
+                f"{close.link}: the close owed it when {made} was linked did not reach its"
+                f" log: {close.result.reason}{_stopped(close.marker)}",
+            )
+
+
+# What an earlier link a sweep did not close may do at the next start, said
+# without the new link's state, which the report does not know (``_sweep_notices``).
+_LEFT_LIVE = (
+    "{what} may read live at the next start, and if the link just made reads live"
+    " then too, the next start withholds every live link under #{name}"
+)
+
+
+def _sweep_notices(report: channels.Swept) -> list[str]:
+    """
+    What the operator is told of a sweep: one notice when the name's links
+    could not be listed, one per earlier link it could not close, and nothing
+    for a close that landed.
+
+    Read off the report alone, never the store, and so worded to be true
+    whatever became of the link just made by the time it drains: the operator
+    may have closed it, and its own creation may not have reached its log
+    (``_not_written``, the next report drained). Each says what the earlier
+    links may do at the next start and leaves the new link's state alone:
+
+    - Unlisted: whether any earlier link needed closing is unknown, so one
+      left live may read live at the next start. Several live links under a
+      name are all withheld, so that is said as conditional on the new link
+      still reading live then, which it does not once closed or never written.
+    - An earlier link's close that did not land: the notice names the link by
+      when it was made and says it is not the one just linked, since the two
+      share a name. When its stop marker did not land either, it may read
+      live at the next start, on the same terms.
+    """
+    name = report.made.name
+    closes = report.closes
+    if isinstance(closes, channels.Unlisted):
+        return [
+            f"#{name} was linked, but the earlier links under #{name} could not be listed"
+            f" ({drawable.text(closes.reason)}), so none was checked or closed; until #{name}"
+            f" is linked again, {_LEFT_LIVE.format(what='any of them left live', name=name)}"
+        ]
+    said: list[str] = []
+    for close in closes:
+        if not isinstance(close.result, channels.NotAppended):
+            continue
+        made = (
+            "its creation unreadable"
+            if close.created_at is None
+            else f"made {time.strftime('%Y-%m-%d %H:%M', time.localtime(close.created_at))}"
+        )
+        notice = (
+            f"an earlier link under #{name} ({made}, not the one just linked) could not be"
+            f" closed: {drawable.text(close.result.reason)}"
+        )
+        if not isinstance(close.marker, channels.Appended):
+            notice += (
+                f"; nor could it be marked as stopped, so until #{name} is linked again,"
+                f" {_LEFT_LIVE.format(what='it', name=name)}"
+            )
+        said.append(notice)
+    return said
+
+
+def _not_written(link: channels.LinkKey, kind: type, reason: str) -> str:
+    """
+    What the operator is told of a link fact that did not reach its log: one
+    sentence for a close refused before it was queued (``close_channel``) and
+    for one the writer reported, so the two read as one thing said.
+    """
+    what = drawable.text(reason)
+    if kind is channels.LinkClosed:
+        return (
+            f"#{link.name}: closed for this run only; the close did not reach the link's"
+            f" log ({what}), and the next start reads the link as its log left it"
+        )
+    if kind is channels.LinkCreated:
+        return (
+            f"#{link.name}: linked for this run only; the link did not reach its log"
+            f" ({what}), and the next start does not restore it"
+        )
+    return f"#{link.name}: a {kind.__name__} did not reach the link's log ({what})"
+
+
+def _link_pressed(state: AppState, name: str, members: frozenset[str], charter: str) -> str | None:
+    """
+    The link form's submit (``link_form.Link``): ``link_leads``, and why it
+    emitted nothing, or None when it emitted the link.
+    """
+    linked = link_leads(state, name, members, charter)
+    return linked.reason if isinstance(linked, channels.Refused) else None
+
+
+def _recording(state: AppState) -> frozenset[str]:
+    """The sessions whose boards are being recorded, as ``link_leads`` reads them."""
+    return frozenset(sid for sid, entry in state.board_logs.items() if entry.recording)
+
+
+def link_leads(
+    state: AppState, name: str, members: frozenset[str], charter: str
+) -> ChannelLinked | channels.Refused:
+    """
+    Emit the operator's link of ``members`` as a channel called ``name``, and
+    return it; or emit nothing, say why, and return the refusal.
+
+    What only the shell has goes in here: a fresh uuid, the wall-clock time,
+    and which of the members ``board_logs`` shows recording. The store refuses
+    what ``Snapshot.link_refusal`` refuses, and ``_record_channels`` says why.
+
+    The link gets a log of its own under the fresh id, so a name whose earlier
+    links were closed, or were lost to a log that could not be read, is linked
+    afresh. **Two refusals live here, not in the store**, because only the
+    shell knows of them:
+
+    - a charter longer than ``channels.CHARTER_CHARS``, whose first fact would
+      come close to the size a record may be, and fail to land;
+    - any link while startup could not list the channel logs
+      (``AppState.channels_unlisted``): a live link under ``name`` may be in
+      what it could not see.
+    """
+    refused: str | None = None
+    if len(charter) > channels.CHARTER_CHARS:
+        refused = (
+            f"the charter is {len(charter)} characters, over the"
+            f" {channels.CHARTER_CHARS} a link's charter may be"
+        )
+    elif state.channels_unlisted is not None:
+        refused = (
+            "the channel logs could not be listed at startup"
+            f" ({state.channels_unlisted}), so a live link under the name may be unseen"
+        )
+    if refused is not None:
+        LOG.warn("channel", f"#{name}: the leads were not linked: {refused}")
+        return channels.Refused(refused)
+    linked = ChannelLinked(
+        channel_id=str(uuid.uuid4()),
+        name=name,
+        members=members,
+        charter=charter,
+        at=time.time(),
+        recording=members & _recording(state),
+    )
+    state.bridge.emit(linked)
+    return linked
+
+
+def close_channel(state: AppState, channel_id: str) -> str | None:
+    """
+    Emit the operator's close of the channel ``channel_id``, now, and return
+    why the close cannot reach the channel's log, or None.
+
+    The close is emitted either way: it only takes a link out of view. One
+    whose log stopped being recorded in this process cannot be written, so it
+    holds for this run alone, and that is said here -- in LOG and in front of
+    the operator (``_not_done``) -- and returned rather than left for the
+    writer's report to imply. A log whose stop marker landed restores the link
+    not live; one whose marker did not land as well reads as it was left.
+
+    **A close the writer fails to append later** is said by the frame that
+    drains its report (``_read_channel_reports``), in the same words. This
+    does not wait for the append: it is called on the draw thread, and the
+    append is a durable flush that a hung mount would hold the frame on.
+    """
+    held = state.store.snapshot().channels.get(channel_id)
+    writer = state.channel_writer
+    state.bridge.emit(ChannelClosed(channel_id=channel_id, at=time.time()))
+    if held is None or not held.live or writer is None:
+        return None
+    link = channels.LinkKey(held.name, held.id)
+    refused = writer.refusal(link)
+    if refused is not None:
+        LOG.warn(
+            "channel",
+            f"{link}: closed for this run only; the close cannot be written to its"
+            f" log ({refused}), and the next start reads the link as its log left it",
+        )
+        _not_done(state, _not_written(link, channels.LinkClosed, refused))
+    return refused
+
+
+def _restore_channels() -> tuple[channels.Restored, ...] | channels.Unlisted:
+    """
+    Read every link's log, once, and say each link withheld from the store and
+    why: a log short or stopped, or several links live under one name. A
+    withheld link is never live (``channels.restore_all``); its log is still
+    there to read.
+
+    ``Unlisted`` -- the logs could not be listed -- is said too, and is not
+    "no links": ``_start`` keeps the reason, and every link is refused for the
+    run (``link_leads``).
+
+    **Synchronous, in the startup slot where board logs are migrated**: before
+    any writer exists and before any session can start, so the links are the
+    first thing the store applies and nothing is ordered against them.
+    Unbounded on a mount that hangs, like the migration, so the line before the
+    read is what a start that stops here is attributed to.
+    """
+    LOG.info(
+        "channel",
+        f"reading channel logs under {channels.root()}"
+        " (a start that stops here is waiting on that directory)",
+    )
+    restored = channels.restore_all(channels.FileChannels())
+    if isinstance(restored, channels.Unlisted):
+        LOG.error(
+            "channel",
+            f"the channel logs could not be listed, so no link is restored and none can be"
+            f" made this run: {restored.reason}",
+        )
+        return restored
+    for each in restored:
+        if each.withheld is not None:
+            LOG.warn("channel", f"{each.link}: restored as not live: {each.withheld}")
+    return restored
 
 
 def _record_fleet(state: AppState) -> Observer:
@@ -1480,8 +2023,6 @@ def begin_frame(state: AppState) -> None:
     and the frame then renders torn state.
     """
     state.frame += 1
-    state.frame_now = time.monotonic()
-    state.frame_wall = time.time()
 
     _apply_theme_if_dirty(state)
     # Between frames: the only place the atlas is added to, and the only moment
@@ -1491,7 +2032,9 @@ def begin_frame(state: AppState) -> None:
     # Every frame, figure or none on screen: the render process's timeout is
     # enforced here, and laid-out diagrams arrive here, between frames.
     figure_host.pump()
-    _keep_gc_settled(state.frame_now)
+    # Its own reading, not ``frame_now``: that one is taken straight before the
+    # apply, below, so a collection here cannot fall between it and the apply.
+    _keep_gc_settled(time.monotonic())
     if state.pending_layout is not None:
         hello_imgui.switch_layout(state.pending_layout)
         state.pending_layout = None
@@ -1501,6 +2044,13 @@ def begin_frame(state: AppState) -> None:
             # After the switch above, so the name is looked up in the layout that
             # is now current. A name that layout does not have is left alone.
             state.runner.docking_params.focus_dockable_window(pane)
+    # Read after the theme, atlas and layout work and straight before the apply,
+    # because the frame's instant is also the reducer's ``now``: a link is live
+    # since that reading (``Snapshot.channel_since``), and a reading taken
+    # before work the frame does first would date it earlier than any agent
+    # could have seen it.
+    state.frame_now = time.monotonic()
+    state.frame_wall = time.time()
     apply_intents(state)
     state.frame_snap = state.store.snapshot()
     state.cards.prune(state.frame_snap)
@@ -2641,6 +3191,23 @@ def _launch(
             _open_board_log(state, session.session_id, logged)
         except Exception as exc:  # noqa: BLE001 - the session runs; say its board is unrecorded
             _board_log_unopened(state, session.session_id, exc)
+        # Straight behind the restore on the same queue, and so applied after it:
+        # peer mail already waiting wakes the session only once its board is in
+        # the store (``intents.SessionSettled``). Emitted whether or not a board
+        # was restored or is recorded, since mail waits in its sender's log if
+        # that session was recording its board when it was sent.
+        #
+        # And behind the session's own announce. A session the pool holds
+        # behind a run still ending under its id is not announced yet, and the
+        # root in the store is that run's: settled now, it would be woken
+        # through the held session, which has no client, or found ended and
+        # owed nothing. So it is settled when the pool announces it, which is
+        # after that run's end and after the restore emitted above.
+        settled = SessionSettled(session.session_id)
+        if session.announced:
+            state.bridge.emit(settled)
+        else:
+            session.on_announced = functools.partial(state.bridge.emit, settled)
         # Behind the pool's answer, so that the log says a launch happened only for
         # one the pool took: a refusal by the version check, by the pool, or by an
         # exception out of either has returned or raised above this line. Which of
@@ -2813,6 +3380,7 @@ def _form_up(state: AppState, but: str | None = None) -> bool:
         or cards.details.node is not None
         or cards.confirming is not None
         or cards.gating is not None
+        or state.link.busy
         or state.settings_dialog.is_open
     )
 
@@ -3292,6 +3860,46 @@ def _show_health(state: AppState, node: NodeId) -> None:
     state.pending_pane = "HEALTH"
 
 
+def _go_to_session(state: AppState, node: NodeId) -> None:
+    """
+    Bring a session to the front from a row that names it: the cursor on that
+    session, through the call a click on its card makes, FOCUS, whose main
+    space is the session's conversation (``_focus_layout``), and SESSION in
+    front of whatever the operator has docked beside it there. A session that
+    owes something puts the cursor on what it owes, as that click would, and
+    the conversation follows the cursor.
+    """
+    snap = state.frame_snap
+    if snap is None:
+        return
+    state.focus.to_node(snap, (node[0], None), scope=focus_mod.Scope.SESSION)
+    if hello_imgui.current_layout_name() != FOCUS:
+        state.pending_layout = FOCUS
+    state.pending_pane = "SESSION"
+
+
+def _show_thread(state: AppState) -> None:
+    """
+    Bring DETAIL in front after a click on a card's channel line, which has
+    already pointed the cursor at the link (``rail._tail``): DETAIL draws the
+    link's thread, and in FOCUS it shares its space with HEALTH. The layout is
+    left as it is, since both layouts dock DETAIL.
+    """
+    state.pending_pane = "DETAIL"
+
+
+def _resume_session(state: AppState, node: NodeId) -> None:
+    """
+    Open the resume form for the session a row names, as its card's
+    "Resume…" does (``_open_resume``). Nothing for a session the store holds
+    no root for: there is no card to resume from.
+    """
+    snap = state.frame_snap
+    rec = None if snap is None else snap.get((node[0], None))
+    if rec is not None:
+        _open_resume(state, rec)
+
+
 def _card_actions(state: AppState) -> session_menu.Actions:
     """
     What a card's menu calls: the functions the other surfaces are handed.
@@ -3308,7 +3916,14 @@ def _card_actions(state: AppState) -> session_menu.Actions:
         detach=lambda node: _detach(state, node),
         resume_as=lambda rec, rung: _open_resume(state, rec, rung),
         set_policy=lambda node, rung: _set_policy(state, node, rung),
+        link=lambda rec: state.link.open_for(rec.node_id[0]),
+        close_channel=lambda channel_id: _close_channel_pressed(state, channel_id),
     )
+
+
+def _close_channel_pressed(state: AppState, channel_id: str) -> None:
+    """A card's "Close channel #name": ``close_channel``, which says any refusal."""
+    close_channel(state, channel_id)
 
 
 def _card_wiring(state: AppState) -> session_menu.Wiring:
@@ -3334,6 +3949,7 @@ def _card_wiring(state: AppState) -> session_menu.Wiring:
         snap=state.frame_snap,
         running=lambda node: pool is not None and pool.has_run(node),
         contained=contained,
+        recording=_recording(state),
     )
 
 
@@ -3380,6 +3996,14 @@ def _draw_card_overlays(state: AppState) -> None:
         return
     cards = state.cards
     session_menu.draw_confirm(cards, snap, _card_actions(state))
+    link_form.draw(
+        state.link,
+        snap,
+        _recording(state),
+        link=lambda name, members, charter: _link_pressed(state, name, members, charter),
+        charter_cap=channels.CHARTER_CHARS,
+        wrap=state.settings.wrap_inputs,
+    )
     details = cards.details
     node = details.node
     if node is None:
@@ -3596,7 +4220,7 @@ def _perform(state: AppState, act: main_menu.Act) -> None:
                     window.is_visible = visible
         case main_menu.ShowStatusBar(visible=visible):
             hello_imgui.get_runner_params().imgui_window_params.show_status_bar = visible
-        case main_menu.CardChoice(node=node, action=action, rung=rung):
+        case main_menu.CardChoice(node=node, action=action, rung=rung, channel=channel):
             record = state.frame_snap.get(node) if state.frame_snap is not None else None
             if record is None:
                 return
@@ -3608,6 +4232,7 @@ def _perform(state: AppState, act: main_menu.Act) -> None:
                 state.cards,
                 wiring.actions,
                 rung=rung,
+                channel=channel,
                 facts=wiring.facts(node),
             )
         case main_menu.ShowEndedSubagents(shown=shown):
@@ -4187,6 +4812,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 hide_ended=state.settings.hide_ended_subagents,
                 now_wall=state.frame_wall,
                 new_task=lambda: _perform(state, main_menu.NewTask()),
+                link_opened=lambda: _show_thread(state),
             )
 
     def inbox_pane() -> None:
@@ -4204,6 +4830,8 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 close=lambda node: _close(state, node),
                 dismiss=lambda node: _dismiss(state, node),
                 relaunch=lambda spec: _relaunch(state, spec),
+                go_to=lambda node: _go_to_session(state, node),
+                resume=lambda node: _resume_session(state, node),
             ),
             state.frame_now,
             wrap=state.settings.wrap_inputs,
@@ -4566,6 +5194,7 @@ def _shut_down(state: AppState) -> None:
     try:
         figure_render.shutdown()
         _close_board_log(state)
+        _close_channel_log(state)
         _close_fleet(state)
         _close_commands(state)
         if state.driver is not None:
@@ -4578,6 +5207,21 @@ def _shut_down(state: AppState) -> None:
             )
     finally:
         state.bridge.stop()
+
+
+def _close_channel_log(state: AppState) -> None:
+    """
+    Let the channel writer finish what is queued, for at most
+    ``channels.CLOSE_TIMEOUT``, and log every fact that did not reach its log.
+    Beside ``_close_board_log`` and for its reasons; it raises nothing.
+    """
+    writer = state.channel_writer
+    if writer is None:
+        return
+    try:
+        _read_channel_reports(writer.close())
+    except Exception as exc:  # noqa: BLE001 - the shutdown behind this must still run
+        LOG.error("channel", f"the channel logs could not be closed: {type(exc).__name__}: {exc}")
 
 
 def _close_board_log(state: AppState) -> None:
@@ -5209,6 +5853,8 @@ def _start(
 
     1. The board logs are moved, where a board is to be recorded, before any
        writer exists and before anything can be resumed (``_migrate_board_logs``).
+       Then every channel log is read (``_restore_channels``), and the links
+       are the first intent queued, once the bridge exists.
     2. The state and its writers are built. Neither writer touches the disk
        until it is handed something.
     3. The recall worker is started, last: it emits into a bridge that exists
@@ -5234,6 +5880,7 @@ def _start(
 
     recorded = loaded.board_log and not args.fake
     migration = _migrate_board_logs() if recorded else None
+    restored = _restore_channels() if recorded else None
 
     state = AppState(
         store=Store(),
@@ -5247,6 +5894,20 @@ def _start(
     if recorded:
         # Builds nothing on disk: a session's directory is made by its first record.
         state.board_writer = boardsync.BoardWriter()
+        state.channel_writer = channels.ChannelWriter(channels.FileChannels())
+    if isinstance(restored, channels.Unlisted):
+        state.channels_unlisted = restored.reason
+    elif restored is not None:
+        # First in the queue: ahead of every recalled card and every launch.
+        state.bridge.emit(
+            ChannelsRestored(
+                channels=tuple(
+                    each.channel
+                    for each in restored
+                    if each.channel is not None and each.withheld is None
+                )
+            )
+        )
     state.pending_layout = args.layout
     state.command_host = _command_host()
     if state.command_host.no_shell is not None:

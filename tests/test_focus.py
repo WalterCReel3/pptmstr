@@ -834,3 +834,115 @@ def test_rows_that_are_not_commands_still_follow_one_another() -> None:
     focus.settle(snap)
 
     assert _on(focus, snap) == "approval:p2" and focus.departed is None
+
+
+# -- a link's thread -------------------------------------------------------------
+
+
+def _linked() -> Store:
+    """``loaded``, with ROOT's and OTHER's sessions linked as ``brand``."""
+    from pptmstr.intents import ChannelLinked
+
+    store = loaded()
+    pair = frozenset({ROOT[0], OTHER[0]})
+    store.apply(ChannelLinked("k1", "brand", pair, "", 2.0, pair), now=4.0)
+    return store
+
+
+def test_a_channel_line_points_at_its_link_and_keeps_the_card_it_was_read_from() -> None:
+    store = _linked()
+    snap = store.snapshot()
+    focus = FocusState()
+    focus.settle(snap)
+
+    focus.to_link(snap.channels["k1"], OTHER)
+
+    assert focus.link(snap) is snap.channels["k1"]
+    # No obligation is under it, so no approve key answers for anything.
+    assert focus.obligation(snap) is None
+    assert focus.index(snap) is None
+    # The panes that follow a session stay on the card it was read from.
+    assert focus.node(snap) == OTHER
+
+
+def test_a_link_being_read_holds_while_work_arrives() -> None:
+    """A pin, as a clicked idle card is: the queue does not take the cursor off it."""
+    store = _linked()
+    focus = FocusState()
+    focus.to_link(store.snapshot().channels["k1"], ROOT)
+    store.apply(ApprovalRequested(OTHER, pending(OTHER, "p4", at=5.0)), now=5.0)
+
+    snap = store.snapshot()
+    focus.settle(snap)
+
+    assert focus.link(snap) is snap.channels["k1"]
+    assert focus.node(snap) == ROOT
+
+
+def test_a_closed_link_is_still_read() -> None:
+    from pptmstr.intents import ChannelClosed
+
+    store = _linked()
+    focus = FocusState()
+    focus.to_link(store.snapshot().channels["k1"], ROOT)
+    store.apply(ChannelClosed("k1", 6.0), now=6.0)
+
+    snap = store.snapshot()
+    focus.settle(snap)
+
+    assert focus.link(snap) is snap.channels["k1"]
+    assert focus.link_gone(snap) is None
+
+
+def test_a_link_the_store_no_longer_holds_is_said_gone_and_nothing_takes_its_place() -> None:
+    import dataclasses
+    from types import MappingProxyType
+
+    store = _linked()
+    focus = FocusState()
+    focus.to_link(store.snapshot().channels["k1"], ROOT)
+    snap = dataclasses.replace(store.snapshot(), channels=MappingProxyType({}))
+
+    focus.settle(snap)
+
+    gone = focus.link_gone(snap)
+    assert gone is not None and gone.name == "brand"
+    assert focus.link(snap) is None
+    assert focus.obligation(snap) is None
+    # An act of the operator's leaves it.
+    focus.move(snap, 1)
+    assert isinstance(focus.target, OnObligation)
+    assert focus.link_gone(snap) is None
+
+
+def test_a_step_from_a_link_lands_on_the_queue() -> None:
+    store = _linked()
+    snap = store.snapshot()
+    focus = FocusState()
+    focus.to_link(snap.channels["k1"], ROOT)
+
+    focus.move(snap, 1)
+
+    assert focus.link(snap) is None
+    assert focus.obligation(snap) is snap.needs_you[0]
+
+
+def test_a_link_read_from_a_card_since_removed_names_no_node() -> None:
+    from pptmstr.intents import ChannelLinked, SessionDetached
+
+    store = Store()
+    store.apply(spawn(ROOT), now=0.0)
+    store.apply(spawn(OTHER), now=0.0)
+    pair = frozenset({ROOT[0], OTHER[0]})
+    store.apply(ChannelLinked("k1", "brand", pair, "", 2.0, pair), now=4.0)
+    focus = FocusState()
+    focus.to_link(store.snapshot().channels["k1"], OTHER)
+    store.apply(AgentFinished(OTHER, AgentState.DONE, ended_at=7.0), now=7.0)
+    store.apply(SessionDetached(OTHER[0]), now=7.0)
+
+    snap = store.snapshot()
+    focus.settle(snap)
+
+    assert snap.off_fleet(OTHER[0])
+    assert focus.node(snap) is None
+    assert focus.link(snap) is snap.channels["k1"]

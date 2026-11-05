@@ -37,6 +37,9 @@ from pptmstr.intents import (
     ApprovalResolved,
     BoardRead,
     BoardRestored,
+    ChannelClosed,
+    ChannelLinked,
+    ChannelsRestored,
     CommandApproved,
     CommandEnded,
     CommandRefused,
@@ -54,14 +57,22 @@ from pptmstr.intents import (
     DecisionDismissed,
     DecisionRaised,
     DecisionsRead,
+    DecisionWakeSent,
     DecisionWithdrawn,
     DigestRead,
     FailedSessionClosed,
     FailureAcknowledged,
+    HeldMailDismissed,
     InboxRead,
     Intent,
+    PeerInboxRead,
+    PeerQuestionAged,
+    PeerQuestionDismissed,
+    PeerSent,
+    PeerWakeSent,
     SessionDetached,
     SessionRecalled,
+    SessionSettled,
     StateChanged,
     SubagentDelivered,
     SubagentProgress,
@@ -75,8 +86,10 @@ from pptmstr.intents import (
     TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
+    WakeChainReleased,
 )
 from pptmstr.model import (
+    EVERY_CHANNEL,
     AgentState,
     Concern,
     ContextSnapshot,
@@ -84,6 +97,7 @@ from pptmstr.model import (
     EndedHow,
     LaunchSpec,
     NodeId,
+    PeerQuestionUnanswered,
     PendingApproval,
     Recalled,
     Snapshot,
@@ -208,6 +222,7 @@ def _concern(r: random.Random, now: float) -> Concern:
         subject="subject",
         body="body",
         posted_at=now,
+        channel=None,
     )
 
 
@@ -251,6 +266,10 @@ _MAKERS: dict[type, Maker] = {
     AgentRemoved: lambda r, s, now: AgentRemoved(r.choice(SUBS)),
     ConcernPosted: lambda r, s, now: ConcernPosted(_who(r), _concern(r, now)),
     InboxRead: lambda r, s, now: InboxRead(_who(r), "rq", now),
+    PeerSent: lambda r, s, now: PeerSent(
+        _who(r), "rq", f"c-{r.randrange(6)}", "brand", "s", "b", now
+    ),
+    PeerInboxRead: lambda r, s, now: PeerInboxRead(_who(r), "rq", now, EVERY_CHANNEL),
     ConcernEdited: lambda r, s, now: ConcernEdited(f"c-{r.randrange(6)}", "rewritten"),
     ConcernWithdrawn: lambda r, s, now: ConcernWithdrawn(f"c-{r.randrange(6)}"),
     TaskAmended: lambda r, s, now: TaskAmended(f"t-{r.randrange(4)}", "amended"),
@@ -298,6 +317,39 @@ _MAKERS: dict[type, Maker] = {
     SessionDetached: lambda r, s, now: SessionDetached(r.choice((A, B, C))),
     FailedSessionClosed: lambda r, s, now: FailedSessionClosed(
         (r.choice((A, B, C)), None), run_held=r.random() < 0.3
+    ),
+    # A link is nothing about a run.
+    ChannelLinked: lambda r, s, now: ChannelLinked(
+        r.choice(("k1", "k2")), "brand", frozenset({A, B}), "charter", now, frozenset({A, B})
+    ),
+    ChannelClosed: lambda r, s, now: ChannelClosed(r.choice(("k1", "k2")), now),
+    ChannelsRestored: lambda r, s, now: ChannelsRestored(()),
+    # Waking is nothing about a run.
+    SessionSettled: lambda r, s, now: SessionSettled(r.choice((A, B, C))),
+    WakeChainReleased: lambda r, s, now: WakeChainReleased(r.choice(("k1", "k2"))),
+    PeerWakeSent: lambda r, s, now: PeerWakeSent(r.choice((A, B, C)), r.choice(("k1", "k2"))),
+    DecisionWakeSent: lambda r, s, now: DecisionWakeSent(
+        r.choice((A, B, C)), frozenset(d for d in sorted(s.decisions) if r.random() < 0.5)
+    ),
+    # Nor is what the operator is shown about two teams.
+    PeerQuestionAged: lambda r, s, now: PeerQuestionAged(
+        r.choice([c.id for c in s.awaiting_answer()] or sorted(s.concerns) or ["c-0"])
+    ),
+    HeldMailDismissed: lambda r, s, now: HeldMailDismissed(
+        frozenset(c.id for c in s.peer_held() if r.random() < 0.5)
+    ),
+    PeerQuestionDismissed: lambda r, s, now: PeerQuestionDismissed(
+        *(
+            r.choice(rows)
+            if (
+                rows := [
+                    (o.question, o.running)
+                    for o in s.needs_you
+                    if isinstance(o, PeerQuestionUnanswered)
+                ]
+            )
+            else (r.choice(sorted(s.concerns) or ["c-0"]), False)
+        )
     ),
 }
 

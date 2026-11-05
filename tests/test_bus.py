@@ -20,7 +20,7 @@ import pytest
 from pptmstr import boardlog
 from pptmstr import bus as bus_mod
 from pptmstr.bridge import Bridge
-from pptmstr.bus import _QUOTE_LEGEND, FROM_KEY, build_server
+from pptmstr.bus import _QUOTE_LEGEND, CALLED_AT_KEY, FROM_KEY, MAX_ID_CHARS, build_server
 from pptmstr.effects import BoardDelivered, ClaimSettled, InboxDelivered, TaskWriteSettled
 from pptmstr.intents import (
     BoardRead,
@@ -39,10 +39,13 @@ from pptmstr.intents import (
 )
 from pptmstr.model import (
     BEFORE_RESTART,
+    MAX_CHANNEL_CHARS,
+    Charter,
     ClaimRefusal,
     Concern,
     ConcernState,
     NodeId,
+    Provenance,
     Task,
     TaskRefusal,
     TaskState,
@@ -79,6 +82,7 @@ def concern(
         subject="regression",
         body=body,
         posted_at=at,
+        channel=None,
     )
 
 
@@ -179,7 +183,11 @@ class _Bus:
         pending = self.bridge.submit(
             # The gate's stamp, as the CLI delivers it: a list, because the
             # arguments survive a JSON round trip and JSON has no tuples.
-            call_tool(self.server, name, {**args, FROM_KEY: list(sender)})
+            call_tool(
+                self.server,
+                name,
+                {**args, FROM_KEY: list(sender), CALLED_AT_KEY: time.monotonic()},
+            )
         )
         deadline = time.monotonic() + timeout
         while not pending.done():
@@ -1103,23 +1111,33 @@ def test_the_gate_and_the_bus_agree_on_tool_names() -> None:
     keeps the two copies honest.
     """
     from pptmstr import approval
-    from pptmstr.bus import BUS_TOOLS, COMMAND_TOOLS, offered_tools, qualified
+    from pptmstr.bus import BUS_TOOLS, COMMAND_TOOLS, PEER_TOOLS, offered_tools, qualified
 
     assert approval._BUS_POST == qualified("post_concern")
     assert approval._BUS_DECLARE == qualified("declare_task")
     assert approval._BUS_AMEND == qualified("amend_task")
+    assert approval._BUS_PEER == qualified("send_to_peer")
     assert approval._BUS_WITHDRAW == qualified("withdraw_task")
     reviewed = {
         approval._BUS_POST,
         approval._BUS_DECLARE,
         approval._BUS_AMEND,
+        approval._BUS_PEER,
         approval._BUS_WITHDRAW,
     }
     # Every name a server can have, which is a contained session's list: the gate's
     # policy is not told which session is asking and names the command tools for
     # all of them.
     assert approval._BUS_AUTO | reviewed == set(offered_tools(True))
-    assert approval._BUS_AUTO - set(BUS_TOOLS) == set(COMMAND_TOOLS)
+    assert approval._BUS_AUTO - set(BUS_TOOLS) == set(COMMAND_TOOLS) | {
+        qualified("read_peer_messages"),
+        qualified("withdraw_peer_message"),
+    }
+    assert PEER_TOOLS == {
+        qualified("send_to_peer"),
+        qualified("read_peer_messages"),
+        qualified("withdraw_peer_message"),
+    }
     assert {qualified(f"{verb}_decision") for verb in ("raise", "withdraw")} <= approval._BUS_AUTO
     assert qualified("read_decisions") in approval._BUS_AUTO
     assert reviewed <= approval._REVIEW and not reviewed & approval._BUS_AUTO
@@ -1134,12 +1152,12 @@ def test_every_tool_the_server_offers_is_one_the_gate_stamps(contained: bool) ->
     unstamped and raises on every call. Held for both kinds of session, since the
     two have different servers.
     """
-    from pptmstr.bus import BUS_TOOLS, offered_tools, qualified
+    from pptmstr.bus import BUS_TOOLS, PEER_TOOLS, offered_tools, qualified
 
     announced = {qualified(name) for name in _announced_schemas(contained)}
 
     assert announced == set(offered_tools(contained))
-    assert offered_tools(False) == BUS_TOOLS
+    assert offered_tools(False) == BUS_TOOLS | PEER_TOOLS
 
 
 def test_a_message_between_agents_is_reviewed() -> None:
@@ -1375,6 +1393,13 @@ DOCUMENTED_CALLS: dict[str, dict[str, object]] = {
     # "Omit it for every decision you have raised."
     "read_decisions": {},
     "withdraw_decision": {"decision_id": "dq-1"},
+    # "needs_answer ... re ... quiet" are each for a message that has one, so
+    # what is left is the channel and what is said on it.
+    "send_to_peer": {"channel": "brand", "subject": "the hero image", "body": "ready?"},
+    # "Omit it to read every channel."
+    "read_peer_messages": {},
+    # Both required: the id send_to_peer gave, and the reason quoted to the lead.
+    "withdraw_peer_message": {"message_id": "c-0123456789ab", "reason": "the wrong lead"},
 }
 
 
@@ -1400,9 +1425,9 @@ def test_the_wire_lists_every_tool_the_gate_stamps() -> None:
     installed: what ``tools/list`` answers over the SDK's bridge is the set
     ``BUS_TOOLS`` names, so a helper that silently listed nothing could not pass.
     """
-    from pptmstr.bus import BUS_TOOLS, qualified
+    from pptmstr.bus import BUS_TOOLS, PEER_TOOLS, qualified
 
-    assert {qualified(name) for name in _announced_schemas()} == BUS_TOOLS
+    assert {qualified(name) for name in _announced_schemas()} == BUS_TOOLS | PEER_TOOLS
 
 
 def test_a_run_says_which_mcp_and_sdk_it_ran_against() -> None:
@@ -1452,6 +1477,10 @@ def test_an_argument_a_tool_cannot_work_without_is_still_required() -> None:
         ("raise_decision", "question"),
         ("raise_decision", "standing"),
         ("withdraw_decision", "decision_id"),
+        ("send_to_peer", "channel"),
+        ("send_to_peer", "subject"),
+        ("send_to_peer", "body"),
+        ("withdraw_peer_message", "message_id"),
     ):
         args = dict(documented[name])
         del args[needed]
@@ -2009,6 +2038,7 @@ def _about(
         body=body,
         posted_at=1.0,
         task_id=tid,
+        channel=None,
     )
 
 
@@ -3995,6 +4025,7 @@ def _incident(store: Store, cid: str, *, about: str | None, token: str) -> None:
                 posted_at=5.0,
                 task_id=about,
                 incident=True,
+                channel=None,
             ),
         )
     )
@@ -5765,8 +5796,9 @@ def test_a_sub_agent_raises_a_decision_and_is_told_its_lead_is_woken_and_it_is_n
         f'read_decisions(decision_id="{mine.id}") '
         f"when you reach what this blocks and again before you finish. It returns the "
         f"operator's answer every time you ask. {bus_mod.WAKE_SAID_SUBAGENT} "
-        f"withdraw_decision takes the decision back if it stops mattering, and it is not "
-        f"kept across a restart of pptmstr."
+        f"withdraw_decision takes the decision back if it stops mattering. It is kept in "
+        f"your session's log, and is back after a restart of pptmstr once your session is "
+        f"resumed."
     )
     assert bus_mod.WAKE_SAID in lead and bus_mod.WAKE_SAID_SUBAGENT not in lead
     assert theirs.asker == LEAD
@@ -6024,7 +6056,7 @@ def test_only_the_asker_is_handed_the_answer_and_it_is_handed_it_whole_every_tim
 
     for text in sibling:
         assert "Keep it" not in text and "AAAA" not in text and "> " not in text
-    assert sibling[0].startswith(f"No decision {made} is recorded for you;")
+    assert sibling[0].startswith(f"No decision {made} is recorded for you. ")
     assert sibling[1].startswith("No decision is recorded for you.")
     # Neither somebody else's read nor the asker's own list is a delivery.
     assert unstamped is None and stamped is not None
@@ -6230,9 +6262,10 @@ def test_a_long_question_is_one_cut_line_in_the_list_and_whole_by_id() -> None:
 
 def test_an_id_the_store_does_not_hold_is_answered_in_words_about_the_restart() -> None:
     """
-    Decisions are not in the board log. An agent resumed after a restart has a
-    transcript saying it is waiting on one, and an empty list would tell it only
-    that nothing is there.
+    A decision is back after a restart only once its session is resumed, so an
+    agent's transcript can name one this run does not hold, and an empty list
+    would tell it only that nothing is there. Said without "raise it again": a
+    lead reading the other lead's decision by id never owned it.
     """
     store = Store()
     _team(store)
@@ -6244,17 +6277,26 @@ def test_an_id_the_store_does_not_hold_is_answered_in_words_about_the_restart() 
         lead_none = bus.call(store, "read_decisions", {}, sender=LEAD)
 
     assert said == (
-        "No decision dq-gone is recorded for you; decisions do not survive a restart of "
-        "pptmstr -- if it still matters, raise it again. A decision another agent raised "
-        "is shown to that agent and to the session's lead, and never here."
+        "No decision dq-gone is recorded for you. One you raised is kept in your session's "
+        "log and is back after a restart of pptmstr once your session is resumed. A "
+        "decision another agent raised is shown to that agent and to the session's lead, "
+        "and never here."
     )
-    assert none.startswith("No decision is recorded for you. Decisions do not survive a restart")
+    assert none == (
+        "No decision is recorded for you. A decision is kept in its asker's session log, "
+        "and one raised before a restart of pptmstr is back once that session is resumed."
+    )
     assert lead == (
-        "No decision dq-gone is recorded in your session; decisions do not survive a "
-        "restart of pptmstr -- if it still matters, raise it again. read_decisions with "
-        "no id lists every decision raised in your session."
+        "No decision dq-gone is shown to you. A decision raised in your session is kept in "
+        "its log and is back after a restart of pptmstr once your session is resumed; "
+        "read_decisions with no id lists every one shown to you. One the lead on the other "
+        "end of a channel raised is shown only while the link it was raised on is live "
+        "and the session that raised it is resumed in this run."
     )
-    assert lead_none.startswith("No decision is recorded in your session. Decisions do not")
+    assert lead_none.startswith("No decision is recorded in your session. A decision is kept")
+    # Decisions survive a restart once their session is resumed: nothing says otherwise.
+    for text in (said, none, lead, lead_none):
+        assert "do not survive" not in text and "raise it again" not in text
 
 
 def test_a_read_records_as_delivered_only_the_answer_it_shows() -> None:
@@ -6281,7 +6323,7 @@ def test_a_read_records_as_delivered_only_the_answer_it_shows() -> None:
 
     held = store.snapshot().decisions
     assert none_yet == [None, None, None]
-    assert missed.startswith("No decision dq-typo is recorded for you;") and "ANSWER" not in missed
+    assert missed.startswith("No decision dq-typo is recorded for you. ") and "ANSWER" not in missed
     assert "ANSWER ONE" not in listed and "ANSWER TWO" not in listed
     assert listed.count("THE OPERATOR HAS ANSWERED and you have not read the answer") == 2
     assert "> ANSWER ONE" in first and "ANSWER TWO" not in first
@@ -6458,10 +6500,11 @@ def test_only_the_asker_withdraws_a_decision_and_only_while_it_is_open() -> None
     # The lead is shown every decision of its session, so it is told which
     # mistake it made and what it can do instead.
     assert lead == (
-        f"Decision {made} was NOT withdrawn. Another agent of your session raised it, and "
-        f"only the agent that raised a decision withdraws it. read_decisions shows whose "
-        f"it is; send that agent a concern if it should be taken back. The operator can "
-        f"dismiss it from their own pane."
+        f"Decision {made} was NOT withdrawn. Another agent raised it -- one of your "
+        f"session, or the lead on the other end of a channel -- and only the agent that "
+        f"raised a decision withdraws it. read_decisions shows whose it is; send that "
+        f"agent a concern, or the other lead a message, if it should be taken back. The "
+        f"operator can dismiss it from their own pane."
     )
     assert still
     assert mine == (
@@ -6546,7 +6589,11 @@ def test_a_digest_says_a_decision_was_asked_and_not_that_its_asker_is_waiting() 
 def test_the_decision_tools_say_what_they_are_for_and_who_gets_the_answer() -> None:
     described = {name: " ".join(text.split()) for name, text in _announced_descriptions().items()}
 
-    assert "keep working: nothing is parked" in described["raise_decision"]
+    assert "keep working: nothing waits on the answer" in described["raise_decision"]
+    # RV5b 7: what waits for approval on a channel is the call, not the answer, and
+    # nothing claims that nothing is parked.
+    assert "nothing is parked" not in described["raise_decision"]
+    assert "the call itself is held for the operator's approval" in described["raise_decision"]
     assert "post a concern instead" in described["raise_decision"]
     assert "handed to you, the agent that asked" in described["raise_decision"]
     assert "your session's lead can read it too, and no other agent can" in (
@@ -6579,6 +6626,7 @@ def _noted(store: Store, cid: str, body: str, task_id: str = "t1") -> None:
                 body=body,
                 posted_at=3.0,
                 task_id=task_id,
+                channel=None,
             ),
         )
     )
@@ -8102,6 +8150,325 @@ def test_a_task_read_changes_nothing() -> None:
     # A note read off a task is not a message collected: the recipient's inbox
     # still owes it to them.
     assert after.concerns == before.concerns
+
+
+# -- where a declaration's request came from --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "given",
+    [{}, {"channel": "", "re": "", "inside_charter": ""}, {"channel": "  ", "re": " "}],
+    ids=["absent", "empty", "blank"],
+)
+def test_a_declaration_with_no_provenance_lands_and_reads_as_it_did_before_provenance(
+    given: dict[str, object],
+) -> None:
+    """
+    The property this change may not break. Absent and blank are both "not
+    given", the task carries None, and the reply is the one a declaration got
+    before any of these arguments existed.
+    """
+    store = Store()
+    _team(store)
+    with _live_bus() as bus:
+        said = bus.call(
+            store, "declare_task", {"task_id": "t0", "title": "x", **given}, sender=LEAD
+        )
+
+    assert said == "Task t0 is on the board."
+    assert store.snapshot().tasks["t0"].provenance is None
+
+
+_MSG = "c-0123456789ab"
+
+
+@pytest.mark.parametrize(
+    ("given", "stored"),
+    [
+        (
+            {"channel": " brand ", "re": f" {_MSG} ", "inside_charter": "YES"},
+            Provenance("brand", _MSG, Charter.YES),
+        ),
+        ({"channel": "brand", "inside_charter": False}, Provenance("brand", None, Charter.NO)),
+        ({"channel": "brand", "inside_charter": "outside"}, Provenance("brand", None, Charter.NO)),
+        ({"channel": "brand", "re": _MSG}, Provenance("brand", _MSG, Charter.UNSTATED)),
+        (
+            {"channel": "brand", "inside_charter": "unstated"},
+            Provenance("brand", None, Charter.UNSTATED),
+        ),
+    ],
+    ids=["whole", "bool-no", "outside", "unmarked", "said-unstated"],
+)
+def test_a_declarations_provenance_is_stored_as_its_declarer_gave_it(
+    given: dict[str, object], stored: Provenance
+) -> None:
+    store = Store()
+    _team(store)
+    with _live_bus() as bus:
+        said = bus.call(
+            store, "declare_task", {"task_id": "t0", "title": "x", **given}, sender=LEAD
+        )
+
+    assert said == "Task t0 is on the board."
+    assert store.snapshot().tasks["t0"].provenance == stored
+
+
+@pytest.mark.parametrize(
+    ("given", "why"),
+    [
+        ({"re": _MSG}, "no channel was named"),
+        ({"inside_charter": "yes"}, "no channel was named"),
+        ({"channel": "brand", "inside_charter": "mostly"}, "'mostly' is not one of yes, no"),
+        ({"channel": "brand", "inside_charter": "none"}, "'none' is not one of yes, no"),
+        ({"channel": "b" * (MAX_CHANNEL_CHARS + 1)}, f"the limit is {MAX_CHANNEL_CHARS}"),
+        ({"channel": "a/b"}, "not a name a channel can have"),
+        ({"channel": "brand", "re": "c" * (MAX_ID_CHARS + 1)}, "re is not a message id"),
+        ({"channel": "brand", "re": "c-7"}, "re is not a message id"),
+    ],
+    ids=[
+        "re-alone",
+        "mark-alone",
+        "unknown-mark",
+        "none-is-not-no",
+        "long-channel",
+        "path-channel",
+        "long-re",
+        "short-re",
+    ],
+)
+def test_a_provenance_that_cannot_be_read_as_one_keeps_the_task_off_the_board(
+    given: dict[str, object], why: str
+) -> None:
+    """
+    Shapes only: nothing here is checked against a link. What is refused is a
+    provenance with nothing to have arrived on, a mark that is none of the
+    three -- "none" among them, which a two-valued flag would read as no and
+    this would then file as "outside the charter" -- a channel that is no
+    directory name or longer than 64, and an ``re`` that is not a concern
+    id. A name of the wrong type is the schema's to refuse, before this
+    handler runs.
+    """
+    store = Store()
+    _team(store)
+    with _live_bus() as bus:
+        said = bus.call(
+            store, "declare_task", {"task_id": "t0", "title": "x", **given}, sender=LEAD
+        )
+
+    assert said.startswith("Task t0 is NOT on the board.") and why in said, said
+    assert "t0" not in store.snapshot().tasks
+
+
+def test_an_unknown_charter_mark_is_not_echoed_back_whole() -> None:
+    store = Store()
+    _team(store)
+    asked: dict[str, object] = {
+        "task_id": "t0",
+        "title": "x",
+        "channel": "brand",
+        "inside_charter": "x" * 100_000,
+    }
+    with _live_bus() as bus:
+        said = bus.call(store, "declare_task", asked, sender=LEAD)
+
+    assert said == (
+        "Task t0 is NOT on the board. inside_charter (a value of 100000 characters, not "
+        "repeated here) is not one of yes, no or unstated. Say yes or no, or omit it."
+    )
+
+
+def test_a_message_the_bus_gives_an_id_is_one_a_declaration_can_answer() -> None:
+    """
+    ``re`` is read by the shape the bus mints a concern's id in, so the two are
+    pinned together here: a minted id that stopped being read as one would
+    refuse every declaration that answers a real message.
+    """
+    from pptmstr.model import is_concern_id
+
+    store = Store()
+    _team(store)
+    with _live_bus() as bus:
+        said = bus.call(
+            store, "post_concern", {"to": "lead", "subject": "s", "body": "b"}, sender=DEV
+        )
+        bus.pump(store)
+
+    (minted,) = store.snapshot().concerns
+    assert said == "Concern delivered to lead.", said
+    assert is_concern_id(minted)
+
+
+_CHARTER_UNKEPT = (
+    " Your inside_charter mark was not kept: the operator edited this declaration "
+    "before approving it, and the mark is your statement about the request as you "
+    "sent it. The board shows it as unstated."
+)
+_BASIS_UNKEPT = (
+    " The basis you gave was not kept: the operator edited this declaration before "
+    "approving it, and a basis is your statement about the text as you wrote it. The "
+    "board shows the specification as basis unstated."
+)
+
+
+@pytest.mark.parametrize("basis", [None, "read"], ids=["no-basis", "with-basis"])
+def test_a_declaration_the_operator_rewrote_keeps_its_channel_and_not_its_charter_mark(
+    basis: str | None,
+) -> None:
+    """
+    The mark is the declarer's statement, as a basis is, and the gate's stamp
+    does not say which arguments changed: so it goes as the basis goes. The
+    channel and the message are what the operator approved and stay. The reply
+    gives the reason in its own sentence whether or not a basis went with it.
+    """
+    from pptmstr.bus import EDITED_KEY
+
+    store = Store()
+    _team(store)
+    asked: dict[str, object] = {
+        "title": "x",
+        "channel": "brand",
+        "re": _MSG,
+        "inside_charter": "yes",
+    }
+    if basis is not None:
+        asked["basis"] = basis
+    with _live_bus() as bus:
+        kept = bus.call(
+            store, "declare_task", {"task_id": "t0", **asked, EDITED_KEY: False}, sender=LEAD
+        )
+        said = bus.call(
+            store, "declare_task", {"task_id": "t1", **asked, EDITED_KEY: True}, sender=LEAD
+        )
+
+    tasks = store.snapshot().tasks
+    assert tasks["t0"].provenance == Provenance("brand", _MSG, Charter.YES)
+    assert kept == "Task t0 is on the board."
+    assert tasks["t1"].provenance == Provenance("brand", _MSG, Charter.UNSTATED)
+    unkept = ("" if basis is None else _BASIS_UNKEPT) + _CHARTER_UNKEPT
+    assert said == "Task t1 is on the board." + unkept
+
+
+@pytest.mark.parametrize("basis", [None, "read"], ids=["no-basis", "with-basis"])
+def test_a_dry_run_the_operator_rewrote_says_what_the_declaration_would_not_keep(
+    basis: str | None,
+) -> None:
+    """
+    A dry run spelled any way but a JSON true parks, so the operator can edit
+    it as they can a declaration. Its reply then says the same sentences the
+    real reply would, as what that reply would say, and a dry run nobody
+    edited says none.
+    """
+    from pptmstr.bus import EDITED_KEY
+
+    store = Store()
+    _team(store)
+    asked: dict[str, object] = {
+        "title": "x",
+        "channel": "brand",
+        "re": _MSG,
+        "inside_charter": "yes",
+        "dry_run": "true",
+    }
+    if basis is not None:
+        asked["basis"] = basis
+    with _live_bus() as bus:
+        kept = bus.call(
+            store, "declare_task", {"task_id": "t0", **asked, EDITED_KEY: False}, sender=LEAD
+        )
+        said = bus.call(
+            store, "declare_task", {"task_id": "t1", **asked, EDITED_KEY: True}, sender=LEAD
+        )
+
+    assert store.snapshot().tasks.keys().isdisjoint({"t0", "t1"})
+    assert kept.startswith("DRY RUN: nothing was declared") and "not kept" not in kept
+    unkept = ("" if basis is None else _BASIS_UNKEPT) + _CHARTER_UNKEPT
+    assert said.startswith("DRY RUN: nothing was declared")
+    assert said.endswith("\nThe real reply would say:" + unkept)
+    assert said.count("not kept") == (2 if basis else 1)
+
+
+def test_a_parked_dry_run_carrying_provenance_shows_both_on_its_row() -> None:
+    """
+    The row an operator approves a parked dry run from leads with the dry run,
+    and still carries where the request came from beside the standing.
+    """
+    from pptmstr.approval import summarize
+
+    row = summarize(
+        "mcp__pptmstr__declare_task",
+        {
+            "title": "probe it",
+            "dry_run": "true",
+            "basis": "read",
+            "channel": "brand",
+            "re": _MSG,
+            "inside_charter": "yes",
+        },
+    )
+
+    assert row == "DRY RUN, declares nothing: declare (says: read; charter: yes on #brand) probe it"
+
+
+@pytest.mark.parametrize(
+    "channel",
+    ["bra\x00nd", "bra\ud800nd", "bra​nd", "\x1b[31mbrand"],
+    ids=["nul", "lone-surrogate", "zero-width", "ansi"],
+)
+def test_a_declaration_naming_an_undrawable_channel_is_refused_through_the_tool(
+    channel: str,
+) -> None:
+    """
+    End to end, through the server: a channel that would not draw as it reads
+    never reaches the board, and the refusal does not repeat the name.
+    """
+    store = Store()
+    _team(store)
+    with _live_bus() as bus:
+        said = bus.call(
+            store,
+            "declare_task",
+            {"task_id": "t0", "title": "x", "channel": channel, "re": _MSG},
+            sender=LEAD,
+        )
+
+    assert said.startswith("Task t0 is NOT on the board."), said
+    assert "not a name a channel can have" in said
+    assert channel not in said
+    assert "t0" not in store.snapshot().tasks
+
+
+def test_a_board_read_and_a_task_read_say_where_a_task_came_from() -> None:
+    """
+    A task another lead asked for says so on the row, with the message it
+    answers and the charter mark, and that all three are the declarer's word.
+    A task with no provenance says nothing of one.
+    """
+    store = Store()
+    _team(store)
+    with _live_bus() as bus:
+        bus.call(
+            store,
+            "declare_task",
+            {
+                "task_id": "t0",
+                "title": "asked for",
+                "channel": "brand",
+                "re": _MSG,
+                "inside_charter": "yes",
+            },
+            sender=LEAD,
+        )
+        bus.call(store, "declare_task", {"task_id": "t1", "title": "ours"}, sender=LEAD)
+        board = bus.call(store, "read_board", {}, sender=DEV)
+        one = bus.call(store, "read_task", {"task_id": "t0"}, sender=DEV)
+        ours = bus.call(store, "read_task", {"task_id": "t1"}, sender=DEV)
+
+    said = f"requested on #brand, re {_MSG}, inside charter: yes (as its declarer stated it)"
+    (row,) = [line for line in board.splitlines() if line.startswith("- t0 ")]
+    assert said in row
+    assert not any("requested on" in line for line in board.splitlines() if "- t1 " in line)
+    assert said[:1].upper() + said[1:] in one.splitlines()
+    assert "requested on" not in ours
 
 
 # -- a gate on every writer -----------------------------------------------------------

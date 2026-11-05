@@ -81,26 +81,54 @@ from typing import Any, assert_never
 
 from imgui_bundle import imgui
 
-from ..approval import DiffText, command_shown, diff_line_kind
+from .. import drawable
+from ..approval import (
+    PEER_DECISION_TOOL,
+    PEER_MESSAGE_TOOL,
+    DiffText,
+    command_shown,
+    declared_provenance,
+    diff_line_kind,
+)
 from ..bridge import Bridge
 from ..command import CommandId
+from ..effects import peer_identity, peer_text
 from ..model import (
+    WITHDRAW_PEER_TOOL,
+    Answered,
     ApprovalNeeded,
+    Channel,
     CommandOwed,
+    ConcernState,
+    Decision,
     DecisionOwed,
+    Dismissed,
     NodeId,
     Obligation,
     ObligationKind,
+    PeerMailHeld,
+    PeerQuestionUnanswered,
     PendingApproval,
     QuestionPending,
     SessionFailed,
     Snapshot,
+    ThreadDecision,
+    ThreadMark,
+    ThreadMessage,
+    ThreadParked,
+    ThreadWakeHeld,
+    WakeChainHeld,
+    Withdrawn,
+    is_concern_id,
+    stated_flag,
 )
 from ..theme import OBLIGATION_GLYPH, Color, P
 from ..transcript import SegmentKind, Transcript
 from . import command_view, decision_view, inbox, review, rich_pane, typeset, widgets
 from .blocks import Block, BlockCursor
-from .focus import FocusState
+from .board_pane import author
+from .focus import FocusState, OnLink
+from .session_menu import whose_move_text
 from .widgets import format_elapsed
 
 # Bounds. Generous, because a truncating detail pane is a contradiction, and every
@@ -140,15 +168,40 @@ _EDITED_NOTICE = (
     "you have edited these arguments: everything below is the call as the agent "
     "made it, and approving sends YOUR EDIT instead"
 )
+_EDITED_UNPARSED = (
+    "you have edited these arguments: everything below is the call as the agent "
+    "made it, and YOUR EDIT is not a JSON object, so approving sends nothing until it parses"
+)
 _KIND_LABEL: dict[ObligationKind, str] = {
     ObligationKind.APPROVAL: "wants approval",
     ObligationKind.QUESTION: "is waiting on you",
     ObligationKind.FAILURE: "failed",
     ObligationKind.DECISION: "wants a decision",
     ObligationKind.COMMAND: "asks you to run a command",
+    ObligationKind.WAKE_CHAIN: "has a wake held",
+    ObligationKind.PEER_QUESTION: "has a peer question unanswered",
+    ObligationKind.PEER_HELD: "has peer mail held",
 }
 # A header tooltip's wrap width, in font heights.
 _TOOLTIP_EMS = 36.0
+# How many of a link's rows its thread draws, the newest kept; the rest are
+# counted in a line above them. Every row is wrapped text of no uniform height.
+_THREAD_ROWS = 200
+# How much of one message's body, or one decision's text, the thread draws.
+# A peer message's body is bounded where it is sent (``bus.MAX_TEXT_CHARS``);
+# this bounds what one frame lays out, and says what it left.
+_THREAD_BODY_CHARS = 24_000
+# A posted message its link will not hand over, in place of its mark.
+HELD_MARK = "posted; this link won't hand it over"
+# Where a row waiting on the operator is acted on: the thread draws no controls.
+PARKED_FROM_ROW = "approve or refuse it from its row in the inbox: nothing here acts"
+# An open decision's state in its thread row: the operator answers it in NEEDS
+# YOU, since nothing in the thread acts.
+DECISION_OPEN = "open, waiting on you; answer it in NEEDS YOU"
+WAKE_FROM_ROW = "release it from its row in the inbox: nothing here acts"
+# What a parked call across a link is, by the name the gate was handed. A
+# withdrawal is said with the message it names (``thread_parked_line``).
+_PARKED_KIND = {PEER_MESSAGE_TOOL: "a message", PEER_DECISION_TOOL: "a decision on this link"}
 
 _DIFF_COLOUR = {
     "add": "diff_add",
@@ -407,6 +460,19 @@ def draw(
         assert decisions is not None
         inbox.attend(snap, focus, state, decisions, commands)
 
+    link = focus.link(snap)
+    if link is not None:
+        if _begin_body("##thread", False):
+            imgui.push_text_wrap_pos(0.0)
+            thread(snap, link, now)
+            imgui.pop_text_wrap_pos()
+        imgui.end_child()
+        return
+    gone = focus.link_gone(snap)
+    if gone is not None:
+        _link_gone(gone)
+        return
+
     obligation = focus.obligation(snap)
     if obligation is None:
         _nothing_selected(snap, pane, focus)
@@ -433,10 +499,280 @@ def draw(
                 )
             case CommandOwed():
                 _command(snap, commands, obligation, acts, wrap=wrap)
+            case WakeChainHeld():
+                # Released from its row in NEEDS YOU (``inbox._expand_wake_chain``).
+                widgets.section("held wake")
+                imgui.text(obligation.summary)
+            case PeerQuestionUnanswered():
+                # Nothing acts on it, here or in NEEDS YOU: an answer ends it.
+                widgets.section("unanswered peer question")
+                imgui.text(obligation.summary)
+            case PeerMailHeld():
+                # Dismissed from its row in NEEDS YOU (``inbox._expand_peer_held``).
+                # The summary counts the mail; none of its text is drawn.
+                widgets.section("held peer mail")
+                imgui.text(obligation.summary)
             case _:
                 assert_never(obligation)
         imgui.pop_text_wrap_pos()
     imgui.end_child()
+
+
+def _link_gone(gone: OnLink) -> None:
+    """Where the cursor's link was, when the store no longer holds it."""
+    imgui.text_colored(P.text_dim.vec4, link_gone_text(gone))
+
+
+def link_gone_text(gone: OnLink) -> str:
+    """What DETAIL says for a link the cursor names and the store no longer holds."""
+    return (
+        f"the link #{drawable.text(gone.name)} is no longer in the store, so its thread"
+        " cannot be shown; nothing has taken its place here"
+    )
+
+
+def thread(snap: Snapshot, link: Channel, now: float) -> None:
+    """
+    A link between leads, read from both sides (``Snapshot.thread``): who is on
+    it, its charter and whose move it is, then every message sent over it,
+    every decision raised on it, every call parked on the operator that acts
+    across it and every wake its chain held, in store order. What the
+    whose-move line calls the operator's is a row here, and the rows that wait
+    on the operator say where to act on them: from their rows in the inbox,
+    since nothing here acts.
+
+    **Read-only.** Drawing a message hands nothing over and marks nothing read:
+    a lead is handed its mail by its own ``read_peer_messages``, and the
+    operator reading the thread here is not that.
+
+    **Everything an agent wrote is drawn through** ``board_pane.author``,
+    behind the bar this application draws beside nothing of its own: a
+    subject, a body, a withdrawal's reason, a decision's question. A lead is
+    named by ``effects.peer_text``, which quotes its card's title. The
+    charter, the operator's, goes behind the same bar. Every other line is
+    this pane speaking.
+    """
+    # The header's whose-move line and the thread's rows read this one index.
+    peers = snap.peer_index()
+    held = snap.thread(link, peers)
+    imgui.text_colored(P.text.vec4, f"link #{drawable.text(link.name)}")
+    if not link.live:
+        imgui.text_colored(
+            P.text_dim.vec4, "closed: nothing more is sent on it, and what was is kept"
+        )
+    for side in held.sides:
+        imgui.text_colored(P.text_dim.vec4, thread_side_text(snap, side.session, side.held))
+
+    widgets.section("charter, as the operator typed it")
+    if link.charter.strip():
+        author(link.charter)
+    else:
+        imgui.text_disabled("(no charter)")
+
+    widgets.section("whose move")
+    imgui.text_colored(P.text.vec4, whose_move_text(snap, snap.whose_move(link, peers), ""))
+
+    widgets.section("thread")
+    if not held.rows:
+        imgui.text_disabled("nothing has been sent on this link, and no decision raised on it")
+        return
+    rows = held.rows[-_THREAD_ROWS:]
+    if len(held.rows) > len(rows):
+        imgui.text_disabled(f"{len(held.rows) - len(rows)} earlier row(s) on this link not shown")
+    for row in rows:
+        imgui.spacing()
+        match row:
+            case ThreadMessage():
+                _thread_message(row, now)
+            case ThreadDecision():
+                _thread_decision(row.decision, now)
+            case ThreadParked():
+                _thread_parked(row.pending, now)
+            case ThreadWakeHeld():
+                imgui.text_colored(P.text.vec4, thread_wake_line(row, now))
+                imgui.text_disabled(WAKE_FROM_ROW)
+            case _:
+                assert_never(row)
+
+
+def thread_side_text(snap: Snapshot, session: str, held: bool) -> str:
+    """One member of a link as its thread's header names it."""
+    said = f"the lead of {peer_text(peer_identity(snap, session))}"
+    if not held:
+        said += (
+            "; what it sent and the decisions it raised in an earlier run are not in this"
+            " store: its log is read when its session is resumed"
+        )
+    return said
+
+
+def thread_message_line(row: ThreadMessage, now: float) -> str:
+    """The pane's own line heading one message in a thread: everything but its texts."""
+    c = row.message
+    said = [
+        f"message {drawable.text(c.id)}",
+        f"from session {_head(c.sender[0])} to session {_head(c.recipient[0])}",
+        f"{format_elapsed(max(0.0, now - c.posted_at))} ago",
+        HELD_MARK if row.held is not None else row.mark.value,
+    ]
+    if c.needs_answer:
+        said.append("needs an answer")
+    if c.quiet:
+        said.append("quiet")
+    if c.edited:
+        said.append("edited by you before it was sent")
+    return " · ".join(said)
+
+
+def thread_reference_lines(row: ThreadMessage) -> tuple[str, ...]:
+    """What one message answers and what answers it, as the thread says it."""
+    c = row.message
+    out: list[str] = []
+    if c.re is not None:
+        line = f"answers message {drawable.text(c.re)}"
+        if row.answers is None:
+            line += ", which this store does not hold"
+        elif row.answers.state is ConcernState.WITHDRAWN:
+            line += ", which its sender withdrew"
+        out.append(line)
+    if row.answered_by:
+        out.append("answered by message " + ", ".join(drawable.text(r) for r in row.answered_by))
+    return tuple(out)
+
+
+def _thread_message(row: ThreadMessage, now: float) -> None:
+    c = row.message
+    withdrawn = row.mark in (ThreadMark.WITHDRAWN_UNREAD, ThreadMark.WITHDRAWN_READ)
+    imgui.text_colored((P.text_dim if withdrawn else P.text).vec4, thread_message_line(row, now))
+    if row.held is not None:
+        imgui.text_colored(P.text_dim.vec4, thread_held_line(row.held))
+    for line in thread_reference_lines(row):
+        imgui.text_colored(P.text_dim.vec4, line)
+    _thread_text(c.subject, "")
+    _thread_text(c.body, "(no body)")
+    if withdrawn:
+        # None is a withdrawal restored from a log, which keeps no reason; ""
+        # is one in this run that gave none (``Concern.withdrawn_reason``).
+        reason = c.withdrawn_reason
+        if reason is None:
+            imgui.text_disabled("its reason is not kept across a restart")
+        elif not reason.strip():
+            imgui.text_disabled("its sender gave no reason")
+        else:
+            imgui.text_colored(P.text_dim.vec4, "its reason:")
+            _thread_text(reason, "")
+
+
+def thread_decision_line(decision: Decision, now: float) -> str:
+    """The pane's own line heading one decision in a thread."""
+    match decision.outcome:
+        case None:
+            state = DECISION_OPEN
+        case Answered():
+            state = "answered by you"
+        case Dismissed():
+            state = "dismissed by you"
+        case Withdrawn():
+            state = "withdrawn by its asker"
+        case _:
+            assert_never(decision.outcome)
+    return " · ".join(
+        (
+            f"decision {drawable.text(decision.id)}",
+            f"raised by session {_head(decision.asker[0])}",
+            f"{format_elapsed(max(0.0, now - decision.raised_at))} ago",
+            state,
+        )
+    )
+
+
+def _thread_decision(decision: Decision, now: float) -> None:
+    imgui.text_colored(P.text.vec4, thread_decision_line(decision, now))
+    _thread_text(decision.question, "(no question)")
+    if decision.answer is not None:
+        imgui.text_colored(P.text_dim.vec4, "your answer:")
+        _thread_text(decision.answer, "(empty)")
+
+
+def thread_held_line(why: str) -> str:
+    """Why a posted message's link will not hand it over, in NEEDS YOU's words."""
+    return f"the link {why}, so nothing hands it over"
+
+
+def thread_parked_line(pending: PendingApproval, now: float) -> str:
+    """
+    The pane's own line heading a call parked on the operator in a thread:
+    what kind of call, whose, and how long it has waited. A withdrawal names
+    the message it withdraws, an id the store holds and the caller sent
+    (``Snapshot.parked_link`` resolves no other).
+
+    A send carries the marks a message row's head does (``thread_message_line``)
+    as its arguments state them (``stated_flag``): "needs an answer", and the
+    message its ``re`` answers when that is a message id. Not ``quiet``, which
+    only decides whether it wakes. An argument the bus would refuse adds no
+    mark: approving that call sends nothing.
+    """
+    if pending.tool_name == WITHDRAW_PEER_TOOL:
+        named = str(pending.args.get("message_id") or "").strip()
+        what = f"withdrawing message {drawable.text(named)}"
+    else:
+        tool = pending.tool_name.rsplit("__", 1)[-1]
+        what = _PARKED_KIND.get(pending.tool_name, drawable.text(tool))
+    said = [
+        "waiting for your approval",
+        f"{what} from session {_head(pending.node[0])}",
+        f"{format_elapsed(max(0.0, now - pending.requested_at))} ago",
+    ]
+    if pending.tool_name == PEER_MESSAGE_TOOL:
+        if stated_flag(pending.args.get("needs_answer")) is True:
+            said.append("needs an answer")
+        cites = pending.args.get("re")
+        if isinstance(cites, str) and is_concern_id(cites.strip()):
+            said.append(f"answers message {drawable.text(cites.strip())}")
+    return " · ".join(said)
+
+
+def _thread_parked(pending: PendingApproval, now: float) -> None:
+    """A parked call, and what it would send if approved, behind the bar."""
+    imgui.text_colored(P.text.vec4, thread_parked_line(pending, now))
+    imgui.text_disabled(PARKED_FROM_ROW)
+    args = pending.args
+    for key in ("subject", "body", "question"):
+        value = args.get(key)
+        if value is not None:
+            _thread_text(str(value), "")
+    reason = args.get("reason")
+    if reason is not None and str(reason).strip():
+        imgui.text_colored(P.text_dim.vec4, "its reason:")
+        _thread_text(str(reason), "")
+
+
+def thread_wake_line(row: ThreadWakeHeld, now: float) -> str:
+    """The pane's own line for a member's wake the link's chain held."""
+    return " · ".join(
+        (
+            f"wake held for session {_head(row.session)}",
+            f"{format_elapsed(max(0.0, now - row.since))} ago",
+            "this link woke its leads too many times in a row without you acting on it",
+        )
+    )
+
+
+def _thread_text(text: str, empty: str) -> None:
+    """A text someone wrote, behind the bar, bounded, with the bound said."""
+    if not text:
+        if empty:
+            imgui.text_disabled(empty)
+        return
+    kept, dropped = clip(text, _THREAD_BODY_CHARS)
+    author(kept)
+    if dropped:
+        imgui.text_disabled(f"... {dropped} more character(s) not shown")
+
+
+def _head(session: str) -> str:
+    """A session id as a thread names it: its first eight characters, on one line."""
+    return drawable.text(" ".join(session[:8].splitlines()))
 
 
 def _command(
@@ -698,7 +1034,7 @@ def _header(
     The spawn marker comes from ``inbox`` for the same reason ``identity`` does: the
     row and this pane must not be able to disagree about how many sub-agents a yes
     here would make, and one function used twice is the only arrangement in which
-    they cannot.
+    they cannot. The channel marker likewise, for who reads a decision's answer.
     """
     colour = P.obligation(obligation.kind)
     title, qualifier = inbox.identity(snap, obligation)
@@ -719,6 +1055,9 @@ def _header(
     imgui.text_colored(P.text_dim.vec4, widgets.flat_line(qualifier))
     if marker is not None:
         imgui.text_colored(P.accent.vec4, marker)
+    channel = inbox.channel_marker(snap, obligation)
+    if channel is not None:
+        imgui.text_colored(P.warn.vec4, channel)
     imgui.pop_text_wrap_pos()
 
 
@@ -776,7 +1115,8 @@ def _approval(
     imgui.text_colored(P.accent.vec4, pending.tool_name)
     frame = int(imgui.get_frame_count())
     if bridge is not None and state.editing == pending.id:
-        # The draft, in ImGui's own input and all of it: nothing is unset.
+        # The draft, in ImGui's own input and all of it: nothing is unset. The
+        # editor says under it what the draft does to a declaration's provenance.
         inbox.editor(state, pending, wrap=wrap)
         state.body_shown(review.DETAIL, pending.id, 0, frame)
         inbox.approval_controls(state, bridge, pending, 0)
@@ -791,10 +1131,23 @@ def _approval(
 
     # Said under either renderer: "what you approve is not what is drawn" is the
     # one line this body may not lose.
-    if edit_differs(state, pending):
-        imgui.text_colored(P.warn.vec4, _EDITED_NOTICE)
+    edited = edit_differs(state, pending)
+    if edited:
+        parses = inbox.draft_parses(state.edits[pending.id])
+        imgui.text_colored(P.warn.vec4, _EDITED_NOTICE if parses else _EDITED_UNPARSED)
     if pending.shown_args is not None:
         imgui.text_colored(P.warn.vec4, review.ESCAPED)
+    # A declaration another lead asked for is judged on where it came from, so
+    # that line heads the body, above anything that scrolls. From the drawable
+    # twin, as every argument here is.
+    # Under an edit, the provenance drawn is the agent's and not the one the
+    # board will keep, and the line after it says what the board keeps.
+    asked = declared_provenance(pending.tool_name, pending.args)
+    if asked is not None:
+        imgui.text_colored(P.accent.vec4, asked)
+    dropped = inbox.edit_provenance(state, pending) if edited else None
+    if dropped is not None:
+        imgui.text_colored(P.warn.vec4, dropped)
     # A unified string of white space holds no row and is headed as no diff,
     # whoever would have drawn it.
     has_diff = bool(pending.diff and pending.diff.strip())
@@ -1296,11 +1649,11 @@ def edit_differs(state: review.ReviewState, pending: PendingApproval) -> bool:
     an open editor does not excuse it: the editor is in the row, and the diff here
     is still of the original while it is being typed in.
 
-    Serialises the arguments to compare, which for a whole-file Write is the file;
-    only reached while a draft exists.
+    Whether the draft differs is ``inbox.draft_is_edit``'s: ``approval.is_edit``,
+    the rule the gate stamps by.
     """
     draft = state.edits.get(pending.id)
-    return draft is not None and draft != review.pretty_args(pending)
+    return draft is not None and inbox.draft_is_edit(draft, pending)
 
 
 def refusals(texts: Sequence[DiffText] | None) -> tuple[str, ...]:
@@ -1372,6 +1725,8 @@ def plain_text(
             parts += command_view.command_text(
                 command, inbox.command_role(snap, command), restored=command.id in restored
             )
+        case WakeChainHeld() | PeerQuestionUnanswered() | PeerMailHeld():
+            parts.append(obligation.summary)
         case _:
             assert_never(obligation)
 

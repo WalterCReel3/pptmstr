@@ -128,6 +128,7 @@ def worked(given: str) -> tuple[Snapshot, list[Fact]]:
         subject=f"subject {given}",
         body=f"body {given}",
         posted_at=4.0,
+        channel=None,
     )
     return run(
         team(),

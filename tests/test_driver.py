@@ -1926,6 +1926,89 @@ def test_the_operators_edit_cannot_change_who_sent_it() -> None:
     assert spec["updatedInput"][FROM_KEY] == [session.session_id, "agent-qa"]
 
 
+def test_a_parked_call_is_stamped_with_when_it_was_made_not_when_it_was_approved() -> None:
+    """
+    ``CALLED_AT_KEY`` is the park's ``requested_at``: the instant the agent made
+    the call, before the operator's wait. The store binds a send to a link live
+    by then, so a stamp taken at the approval would let a link made during the
+    wait take the message. A forged stamp in the operator's edit is overwritten,
+    as a forged sender is.
+    """
+    import asyncio
+
+    from pptmstr.bridge import Bridge, Decision
+    from pptmstr.bus import CALLED_AT_KEY, qualified
+    from pptmstr.driver import AgentSession
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        session = AgentSession(bridge, task="lead")
+        # The hook as the CLI calls it, with no context: typed loosely, as a
+        # hook input built by hand is not the SDK's TypedDict.
+        gate: Any = session._pre_tool_use
+
+        async def drive() -> tuple[Any, float]:
+            call = asyncio.create_task(
+                gate(
+                    _gate_input(
+                        qualified("send_to_peer"),
+                        {"channel": "brand", "subject": "s", "body": "b", CALLED_AT_KEY: 1e12},
+                        None,
+                    ),
+                    None,
+                    None,
+                )
+            )
+            for _ in range(200):
+                await asyncio.sleep(0.005)
+                if bridge.parked_count:
+                    break
+            (pending,) = [i for i in bridge.drain() if hasattr(i, "pending")]
+            await asyncio.sleep(0.05)
+            bridge.resolve(
+                pending.pending.id,
+                Decision(
+                    approved=True,
+                    edited_args={
+                        "channel": "brand",
+                        "subject": "s",
+                        "body": "b",
+                        CALLED_AT_KEY: 1e12,
+                    },
+                ),
+            )
+            return await call, pending.pending.requested_at
+
+        out, requested_at = asyncio.run_coroutine_threadsafe(drive(), bridge.loop).result(
+            timeout=10
+        )
+    finally:
+        bridge.stop()
+
+    spec = _decision(out)
+    assert spec["permissionDecision"] == "allow"
+    assert spec["updatedInput"][CALLED_AT_KEY] == requested_at
+
+
+def test_an_unparked_bus_call_is_stamped_with_the_gates_time_over_a_forged_one() -> None:
+    import asyncio
+    import time
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.bus import CALLED_AT_KEY, qualified
+    from pptmstr.driver import AgentSession
+
+    gate: Any = AgentSession(Bridge(), task="lead")._pre_tool_use
+    before = time.monotonic()
+    out = asyncio.run(
+        gate(_gate_input(qualified("claim_task"), {CALLED_AT_KEY: 1e12}, None), None, None)
+    )
+
+    stamped = _decision(out)["updatedInput"][CALLED_AT_KEY]
+    assert before <= stamped <= time.monotonic()
+
+
 # -- work templates ---------------------------------------------------------------
 
 

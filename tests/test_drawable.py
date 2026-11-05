@@ -23,7 +23,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from claude_agent_sdk import SDKSessionInfo
@@ -31,7 +31,7 @@ from claude_agent_sdk import SDKSessionInfo
 from pptmstr import drawable, sessions, store
 from pptmstr.approval import DiffText
 from pptmstr.command import Command, End, Exited, Refused, Run
-from pptmstr.effects import CommandToRun, TaskWriteSettled
+from pptmstr.effects import CommandSettled, CommandToRun, TaskWriteSettled
 from pptmstr.intents import (
     AgentFinished,
     AgentSpawned,
@@ -339,6 +339,7 @@ def test_what_a_session_wrote_is_drawable_wherever_the_store_keeps_it() -> None:
                 subject=f"s{LOW}",
                 body=f"b{LOW}\x00",
                 posted_at=1.0,
+                channel=None,
             ),
         )
     )
@@ -485,7 +486,7 @@ def test_a_command_holding_a_nul_is_refused_and_not_written_into_one_that_is_not
     effects = held.apply(CommandRequested(CHILD, command, "rq", 1.0))
 
     assert held.snapshot().commands == {}
-    assert [getattr(e.refusal, "value", None) for e in effects] == [refusal]
+    assert [getattr(cast(CommandSettled, e).refusal, "value", None) for e in effects] == [refusal]
 
 
 def test_a_restored_command_says_what_was_asked_and_run_as_its_file_does() -> None:

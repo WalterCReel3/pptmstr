@@ -10,6 +10,7 @@ summary. The drawing itself needs pixels.
 from __future__ import annotations
 
 import dataclasses
+import json
 from types import MappingProxyType
 from typing import Any
 from unittest import mock
@@ -24,6 +25,8 @@ from pptmstr.model import (
     AgentRecord,
     AgentState,
     ApprovalNeeded,
+    Concern,
+    Decision,
     NodeId,
     PendingApproval,
     QuestionPending,
@@ -31,7 +34,7 @@ from pptmstr.model import (
     Snapshot,
 )
 from pptmstr.transcript import SegmentKind
-from pptmstr.ui import detail, inbox, review, typeset, widgets
+from pptmstr.ui import decision_view, detail, inbox, review, session_menu, typeset, widgets
 from pptmstr.ui.blocks import BlockKind
 from pptmstr.ui.focus import FocusState, Scope
 from tests import test_typeset_views as views_rig
@@ -1020,6 +1023,127 @@ def test_a_draft_that_differs_is_reported_even_with_its_editor_open() -> None:
     assert detail.edit_differs(state, pending)
 
 
+_CONCERN = {"to": "dev", "subject": "s", "body": "original"}
+
+
+_COUNTED = {**_CONCERN, "n": 1}
+
+
+@pytest.mark.parametrize(
+    ("called", "draft", "edited"),
+    [
+        (_CONCERN, json.dumps(_CONCERN), False),
+        (_CONCERN, json.dumps(dict(reversed(_CONCERN.items())), separators=(",", ":")), False),
+        (_CONCERN, json.dumps({**_CONCERN, "body": "narrowed"}), True),
+        (_CONCERN, json.dumps({**_CONCERN, "cc": None}), True),
+        (_COUNTED, json.dumps(_COUNTED, indent=7), False),
+        (_COUNTED, json.dumps({**_COUNTED, "n": True}), True),
+        (_COUNTED, json.dumps({**_COUNTED, "n": 1.0}), True),
+    ],
+    ids=[
+        "one-line",
+        "reordered-compact",
+        "changed-value",
+        "added-key",
+        "reindented",
+        "1-to-true",
+        "1-to-1.0",
+    ],
+)
+def test_the_panes_call_a_draft_edited_exactly_when_the_gate_stamps_it_edited(
+    called: dict[str, Any], draft: str, edited: bool
+) -> None:
+    """
+    A real gate parks a bus call, the operator's draft is approved through
+    ``review.resolve``, and the ``_edited`` the gate stamps on what it lets
+    through is what both panes said of the draft before ``a``. A draft that only
+    reflows the JSON is sent, and is not an edit to the gate, so neither pane may
+    say "YOUR EDIT" over it; one that changes only a value's type is sent
+    changed, and both say it is.
+    """
+    import asyncio
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.bus import EDITED_KEY, qualified
+    from pptmstr.driver import AgentSession
+    from tests.test_driver import _decision, _gate_input
+
+    bridge = Bridge()
+    bridge.start()
+    said: list[bool] = []
+    try:
+        session = AgentSession(bridge, task="lead")
+        gate: Any = session._pre_tool_use
+
+        async def drive() -> Any:
+            call = asyncio.create_task(
+                gate(_gate_input(qualified("post_concern"), dict(called), "agent-qa"), None, None)
+            )
+            for _ in range(200):
+                await asyncio.sleep(0.005)
+                if bridge.parked_count:
+                    break
+            (parked,) = [i for i in bridge.drain() if hasattr(i, "pending")]
+            pending = parked.pending
+            state = review.ReviewState()
+            state.edits[pending.id] = draft
+            said.extend((detail.edit_differs(state, pending), inbox.edit_withheld(state, pending)))
+            assert review.resolve(bridge, state, pending, approved=True, unread=True)
+            return await call
+
+        out = asyncio.run_coroutine_threadsafe(drive(), bridge.loop).result(timeout=10)
+    finally:
+        bridge.stop()
+
+    spec = _decision(out)
+    assert spec["permissionDecision"] == "allow"
+    assert spec["updatedInput"][EDITED_KEY] is edited
+    assert said == [edited, edited]
+    # What is sent is the draft, its type included.
+    assert json.dumps(spec["updatedInput"].get("n")) == json.dumps(json.loads(draft).get("n"))
+
+
+def test_a_draft_that_does_not_parse_is_said_to_differ_and_is_not_sent() -> None:
+    """
+    ``a`` sends nothing for it, so the call drawn is still not what ``a`` acts on.
+    """
+    pending = approval({"command": "ls"}).approval
+    state = review.ReviewState()
+    state.edits[pending.id] = '{"command": "ls"'
+
+    assert inbox.draft_is_edit(state.edits[pending.id], pending)
+    assert detail.edit_differs(state, pending) and inbox.edit_withheld(state, pending)
+    assert inbox.edit_provenance(state, pending) is None
+    assert not review.resolve(MagicMock(), state, pending, approved=True, unread=True)
+
+
+@pytest.mark.parametrize(
+    ("draft", "parses"),
+    [
+        ('{"command": "ls"', False),
+        ('["ls"]', False),
+        ('{"command": "ls -la"}', True),
+    ],
+    ids=["broken", "not-an-object", "object"],
+)
+def test_the_row_says_approve_sends_the_edit_only_when_resolve_would_send_it(
+    draft: str, parses: bool
+) -> None:
+    """
+    R4-leftovers 1: ``resolve`` refuses a draft that is not a JSON object, so
+    "approve sends YOUR EDIT" is said only of one it sends.
+    """
+    pending = approval({"command": "ls"}).approval
+    state = review.ReviewState()
+    state.edits[pending.id] = draft
+
+    sent = review.resolve(MagicMock(), state, pending, approved=True, unread=True)
+
+    assert inbox.draft_parses(draft) is parses is sent
+    assert inbox.withheld_notice(draft) == (inbox._WITHHELD if parses else inbox._WITHHELD_UNPARSED)
+    assert ("approve sends YOUR EDIT" in inbox.withheld_notice(draft)) is parses
+
+
 def test_refusals_are_each_reason_once_in_order() -> None:
     texts = (
         DiffText("a", "b", "x", will_not_apply="file not found"),
@@ -1127,7 +1251,7 @@ class Pane:
 
         monkeypatch.setattr(detail.widgets, "section", section)
 
-    def frame(self, snap: Snapshot) -> None:
+    def frame(self, snap: Snapshot, bridge: object = None) -> None:
         self.said.clear()
         self.widgets.clear()
         self.children.clear()
@@ -1139,7 +1263,17 @@ class Pane:
         im.set_next_window_size(im.ImVec2(self.width, 700.0))
         im.begin("##detail-test")
         try:
-            detail.draw(snap, self.focus, self.state, self.pane, 10.0)
+            # With a bridge, DETAIL acts: it needs a decisions state as well, and
+            # no queue row drawn this frame (``review.queue_on_screen``).
+            detail.draw(
+                snap,
+                self.focus,
+                self.state,
+                self.pane,
+                10.0,
+                decisions=None if bridge is None else decision_view.DecisionState(),
+                bridge=bridge,  # type: ignore[arg-type]
+            )
         finally:
             self.clicks.clear()
             im.end()
@@ -1249,7 +1383,7 @@ def test_a_call_with_no_diff_says_so_after_its_arguments(seam, monkeypatch) -> N
     assert rig.said[-3:] == ["section:arguments", "section:diff", "no diff for this call"]
 
 
-def _with_texts(obligation: ApprovalNeeded, **changes: object) -> ApprovalNeeded:
+def _with_texts(obligation: ApprovalNeeded, **changes: Any) -> ApprovalNeeded:
     return dataclasses.replace(
         obligation, approval=dataclasses.replace(obligation.approval, **changes)
     )
@@ -1368,6 +1502,170 @@ def test_the_native_body_keeps_both_warnings(imgui, monkeypatch) -> None:
     rig.frame(snap)
     assert rig.said.index(detail._EDITED_NOTICE) < heading + 1
     assert len(rig.pane.views) == 0
+
+
+_ASKED = {
+    "title": "regenerate the hero shot",
+    "channel": "brand",
+    "re": "c-0123456789ab",
+    "inside_charter": "yes",
+}
+
+
+@pytest.mark.parametrize("typeset_on", [False, True], ids=["native", "typeset"])
+def test_a_declaration_a_peer_asked_for_heads_its_body_with_where_it_came_from(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, typeset_on: bool
+) -> None:
+    """
+    DETAIL is where the operator reads the whole provenance, message id and all,
+    so the line is drawn above everything that scrolls, under either renderer.
+    Under an edit, the line drawn is the agent's, and the line after it says
+    what the board keeps of the draft's. A declaration with no provenance draws
+    neither.
+    """
+    typeset.configure(typeset=typeset_on)
+    asked = parked("mcp__pptmstr__declare_task", dict(_ASKED))
+    plain = parked("mcp__pptmstr__declare_task", {"title": "x"}, pid="p2")
+    line = "requested on #brand, re c-0123456789ab, inside charter: yes"
+    snap = snapshot(record(), needs_you=(asked, plain))
+    rig = Pane(seam, monkeypatch)
+    rig.focus.move(snap, 0)
+
+    rig.frame(snap)
+
+    assert line in rig.said and not [said for said in rig.said if "approving your edit" in said]
+    assert rig.said.index(line) < min(
+        (n for n, said in enumerate(rig.said) if said.startswith("section:")), default=len(rig.said)
+    )
+
+    rig.state.edits["p1"] = json.dumps({**_ASKED, "title": "regenerate the hero shot, smaller"})
+    rig.said.clear()
+    rig.frame(snap)
+
+    dropped = (
+        "approving your edit drops the charter mark (yes): the board keeps "
+        "requested on #brand, re c-0123456789ab, inside charter: unstated"
+    )
+    assert rig.said.index(detail._EDITED_NOTICE) < rig.said.index(line)
+    assert rig.said.index(dropped) == rig.said.index(line) + 1
+
+    rig.focus.move(snap, 1)
+    rig.said.clear()
+    rig.frame(snap)
+    assert not [said for said in rig.said if "requested on" in said or "charter" in said]
+
+
+@pytest.mark.parametrize(
+    ("original", "draft", "said"),
+    [
+        (
+            _ASKED,
+            '{"title": "regenerate the hero shot"}',
+            "approving your edit removes the provenance: the board keeps no channel, "
+            "message or charter mark for this task",
+        ),
+        (
+            {"title": "x", "channel": "brand"},
+            '{"title": "x", "channel": "brand", "inside_charter": "yes"}',
+            "approving your edit drops the charter mark (yes): the board keeps "
+            "requested on #brand, inside charter: unstated",
+        ),
+        (_ASKED, json.dumps(_ASKED, indent=7), None),
+        (_ASKED, '{"title": ', None),
+    ],
+    ids=["channel-removed", "mark-added", "reformatted", "unparsed"],
+)
+def test_what_an_edit_is_said_to_do_to_a_provenance_is_what_the_bus_will_store(
+    seam: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    original: dict[str, Any],
+    draft: str,
+    said: str | None,
+) -> None:
+    """
+    Read from the draft as ``review.resolve`` parses and sends it, and compared
+    as the gate compares it. A draft without the channel keeps no provenance,
+    not a mark kept as unstated. A mark the operator adds is dropped like the
+    agent's. A reformatted draft is no edit to the gate, so the mark is kept and
+    nothing is said of it; nor of a draft that does not parse, which is not sent.
+    """
+    typeset.configure(typeset=False)
+    snap = snapshot(record(), needs_you=(parked("mcp__pptmstr__declare_task", dict(original)),))
+    rig = Pane(seam, monkeypatch)
+    rig.focus.move(snap, 0)
+    rig.state.edits["p1"] = draft
+
+    rig.frame(snap)
+
+    assert [line for line in rig.said if line.startswith("approving your edit")] == (
+        [] if said is None else [said]
+    )
+
+
+@pytest.mark.parametrize(
+    ("original", "draft", "said"),
+    [
+        (
+            _ASKED,
+            {**_ASKED, "title": "smaller"},
+            "approving your edit drops the charter mark (yes): the board keeps "
+            "requested on #brand, re c-0123456789ab, inside charter: unstated",
+        ),
+        (
+            _ASKED,
+            {"title": "smaller"},
+            "approving your edit removes the provenance: the board keeps no channel, "
+            "message or charter mark for this task",
+        ),
+        (
+            {"title": "x", "channel": "a/b"},
+            {"title": "x"},
+            "approving your edit places the declaration with no provenance: the draft "
+            "names no channel, so the one the bus refuses is not sent",
+        ),
+    ],
+    ids=["mark-dropped", "channel-removed", "refused-then-removed"],
+)
+def test_the_edit_warning_is_drawn_under_the_editor_where_detail_acts(
+    seam: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    original: dict[str, Any],
+    draft: dict[str, Any],
+    said: str,
+) -> None:
+    """
+    Where the queue row is off screen DETAIL acts, and ``e`` opens the editor in
+    place of the body, with approve under it. That is the moment the operator
+    decides, so the line saying what the board keeps is drawn there, under the
+    draft and above approve.
+    """
+    typeset.configure(typeset=False)
+    snap = snapshot(record(), needs_you=(parked("mcp__pptmstr__declare_task", dict(original)),))
+    rig = Pane(seam, monkeypatch)
+    real_warning = inbox._warning
+
+    def warning(text: str) -> None:
+        rig.said.append(text)
+        real_warning(text)
+
+    monkeypatch.setattr(inbox, "_warning", warning)
+    rig.focus.move(snap, 0)
+    rig.state.editing = "p1"
+    rig.state.edits["p1"] = json.dumps(draft)
+
+    editing: list[str] = []
+    real_editor = inbox.editor
+
+    def editor(*a: Any, **k: Any) -> None:
+        editing.append("drawn")
+        real_editor(*a, **k)
+
+    monkeypatch.setattr(inbox, "editor", editor)
+
+    rig.frame(snap, bridge=_Sent())
+
+    assert editing == ["drawn"]
+    assert [line for line in rig.said if line.startswith("approving your edit")] == [said]
 
 
 def test_the_native_body_says_may_not_apply_for_a_call_with_no_diff(imgui, monkeypatch) -> None:
@@ -1623,6 +1921,21 @@ def test_a_held_edit_marks_the_diff_as_not_what_approving_sends(seam, monkeypatc
     # Said before the diff it qualifies, not under it.
     heading = next(n for n, line in enumerate(rig.said) if line.startswith("section:diff"))
     assert rig.said.index(detail._EDITED_NOTICE) < heading
+
+
+def test_a_held_edit_that_does_not_parse_says_approving_sends_nothing(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    obligation = parked("Write", {"file_path": "nowhere/new.py", "content": "a = 1\n"})
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(seam, monkeypatch)
+    rig.focus.move(snap, 0)
+
+    rig.state.edits["p1"] = '{"file_path": "nowhere/new.py"'
+    rig.frame(snap)
+
+    assert detail._EDITED_UNPARSED in rig.said
+    assert detail._EDITED_NOTICE not in rig.said
 
 
 def test_views_outlive_the_cursor_and_not_the_obligation(seam, monkeypatch) -> None:
@@ -3306,3 +3619,803 @@ def test_this_turns_text_follows_a_turn_opened_with_no_new_bytes() -> None:
     transcript.end_turn()
     assert pane.turn_text(ROOT, transcript) == ""
     assert list(pane.prose_blocks(ROOT, transcript)) == []
+
+
+# -- a link's thread: the projection ---------------------------------------------
+#
+# ``Snapshot.thread`` on its own, then DETAIL drawing it. The snapshots are the
+# store's own with the messages laid into its table the way the store files them:
+# a restore files one side's log whole, then the other's.
+
+LEAD_A: NodeId = ("sa", None)
+LEAD_B: NodeId = ("sb", None)
+
+
+def _linked_leads(*links: tuple[str, str]) -> Snapshot:
+    """Two running leads, ``sa`` and ``sb``, linked once for each ``(id, name)``."""
+    from pptmstr.intents import AgentSpawned, ChannelClosed, ChannelLinked, StateChanged
+    from pptmstr.store import Store
+
+    store = Store()
+    for node, task in ((LEAD_A, "brand pages"), (LEAD_B, "ops runbook")):
+        store.apply(
+            AgentSpawned(
+                node_id=node, parent=None, task=task, model="m", started_at=1.0, cwd="/w/proj"
+            )
+        )
+        store.apply(StateChanged(node, AgentState.THINKING))
+    pair = frozenset({LEAD_A[0], LEAD_B[0]})
+    for i, (channel_id, name) in enumerate(links):
+        if i:
+            store.apply(ChannelClosed(links[i - 1][0], 1.5))
+        store.apply(ChannelLinked(channel_id, name, pair, "keep the brand in step", 1.0, pair))
+    return store.snapshot()
+
+
+def _message(
+    n: int,
+    sender: NodeId,
+    at: float,
+    *,
+    link: str = "k1",
+    name: str = "brand",
+    **fields: Any,
+) -> Concern:
+
+    recipient = LEAD_B if sender == LEAD_A else LEAD_A
+    fields.setdefault("subject", f"subject {n}")
+    fields.setdefault("body", f"body {n}")
+    return Concern(
+        id=f"c-{n:012x}",
+        sender=sender,
+        recipient=recipient,
+        posted_at=at,
+        channel=name,
+        link=link,
+        **fields,
+    )
+
+
+def _with(snap: Snapshot, *concerns: Any, decisions: tuple[Any, ...] = ()) -> Snapshot:
+    return dataclasses.replace(
+        snap,
+        concerns=MappingProxyType({c.id: c for c in concerns}),
+        decisions=MappingProxyType({d.id: d for d in decisions}),
+    )
+
+
+def _decision(did: str, at: float, *, link: str = "k1", outcome: Any = None) -> Decision:
+    from pptmstr.model import Standing
+
+    return Decision(
+        id=did,
+        asker=LEAD_B,
+        question="ship the pages?",
+        blocks=(),
+        if_unanswered="",
+        evidence="",
+        recommendation="",
+        standing=Standing.OPERATORS,
+        reversible=None,
+        raised_at=at,
+        outcome=outcome,
+        channel="brand",
+        link=link,
+    )
+
+
+def _ids(snap: Snapshot, link: str = "k1") -> list[str]:
+    from pptmstr.model import ThreadDecision, ThreadMessage
+
+    out = []
+    for row in snap.thread(snap.channels[link]).rows:
+        if isinstance(row, ThreadMessage):
+            out.append(row.message.id)
+        else:
+            assert isinstance(row, ThreadDecision)
+            out.append(row.decision.id)
+    return out
+
+
+def test_a_thread_is_in_store_order_across_both_senders_logs() -> None:
+    """
+    The table holds A's log and then B's, as two restores file them. The thread
+    is the exchange as it happened, not as it was filed.
+    """
+    snap = _with(
+        _linked_leads(("k1", "brand")),
+        _message(1, LEAD_A, 1.0),
+        _message(3, LEAD_A, 3.0),
+        _message(2, LEAD_B, 2.0),
+        _message(4, LEAD_B, 4.0),
+        decisions=(_decision("d-1", 2.5),),
+    )
+    assert list(snap.concerns) == [f"c-{n:012x}" for n in (1, 3, 2, 4)]
+
+    assert _ids(snap) == [f"c-{1:012x}", f"c-{2:012x}", "d-1", f"c-{3:012x}", f"c-{4:012x}"]
+
+
+def test_one_instant_is_ordered_as_the_store_filed_it() -> None:
+    snap = _with(
+        _linked_leads(("k1", "brand")),
+        _message(9, LEAD_B, 2.0),
+        _message(1, LEAD_A, 2.0),
+        decisions=(_decision("d-1", 2.0),),
+    )
+    assert _ids(snap) == [f"c-{9:012x}", f"c-{1:012x}", "d-1"]
+
+
+def test_a_thread_holds_its_own_links_messages_and_nothing_of_another_of_its_name() -> None:
+    """An earlier, closed link named ``brand`` keeps its thread; team mail has none."""
+    from pptmstr.model import Concern
+
+    team = Concern(
+        id="c-team00000000",
+        sender=LEAD_A,
+        recipient=("sa", "builder"),
+        subject="s",
+        body="b",
+        posted_at=1.0,
+        channel=None,
+    )
+    snap = _with(
+        _linked_leads(("k0", "brand"), ("k1", "brand")),
+        _message(1, LEAD_A, 1.0, link="k0"),
+        _message(2, LEAD_B, 2.0),
+        team,
+        decisions=(_decision("d-0", 1.2, link="k0"), _decision("d-1", 2.2)),
+    )
+    assert _ids(snap, "k1") == [f"c-{2:012x}", "d-1"]
+    assert _ids(snap, "k0") == [f"c-{1:012x}", "d-0"]
+
+
+def test_each_message_is_marked_from_its_state_then_its_times() -> None:
+    """
+    Both withdrawals: one before it was read (no ``delivered_at``) and one read
+    and then withdrawn (``delivered_at`` set, WITHDRAWN). Neither is read off
+    the state alone or the time alone.
+    """
+    from pptmstr.model import ConcernState, ThreadMark, ThreadMessage
+
+    q1 = f"c-{1:012x}"
+    snap = _with(
+        _linked_leads(("k1", "brand")),
+        _message(1, LEAD_A, 1.0, needs_answer=True, state=ConcernState.DELIVERED, delivered_at=1.5),
+        _message(2, LEAD_B, 2.0, re=q1, state=ConcernState.DELIVERED, delivered_at=2.5),
+        _message(3, LEAD_A, 3.0),
+        _message(4, LEAD_A, 4.0, state=ConcernState.DELIVERED, delivered_at=4.5),
+        _message(5, LEAD_A, 5.0, state=ConcernState.WITHDRAWN),
+        _message(6, LEAD_A, 6.0, state=ConcernState.WITHDRAWN, delivered_at=6.5),
+    )
+    rows = snap.thread(snap.channels["k1"]).rows
+    assert all(isinstance(r, ThreadMessage) for r in rows)
+    marks = [r.mark for r in rows if isinstance(r, ThreadMessage)]
+    assert marks == [
+        ThreadMark.ANSWERED,
+        ThreadMark.READ,
+        ThreadMark.POSTED,
+        ThreadMark.READ,
+        ThreadMark.WITHDRAWN_UNREAD,
+        ThreadMark.WITHDRAWN_READ,
+    ]
+    first, reply = rows[0], rows[1]
+    assert isinstance(first, ThreadMessage) and isinstance(reply, ThreadMessage)
+    assert first.answered_by == (f"c-{2:012x}",)
+    assert reply.answers is first.message
+
+
+def test_a_withdrawn_reply_answers_nothing_and_a_reply_from_the_asker_is_not_an_answer() -> None:
+    from pptmstr.model import ConcernState, ThreadMark, ThreadMessage
+
+    q1 = f"c-{1:012x}"
+    snap = _with(
+        _linked_leads(("k1", "brand")),
+        _message(1, LEAD_A, 1.0, needs_answer=True, state=ConcernState.DELIVERED, delivered_at=1.5),
+        _message(2, LEAD_B, 2.0, re=q1, state=ConcernState.WITHDRAWN, delivered_at=2.5),
+        # The asker's own follow-up cites its question; it answers nothing.
+        _message(3, LEAD_A, 3.0, re=q1),
+    )
+    rows = [r for r in snap.thread(snap.channels["k1"]).rows if isinstance(r, ThreadMessage)]
+    assert rows[0].mark is ThreadMark.READ
+    assert rows[0].answered_by == ()
+    assert rows[1].mark is ThreadMark.WITHDRAWN_READ
+
+
+def test_a_withdrawn_question_stays_withdrawn_when_a_reply_cites_it() -> None:
+    from pptmstr.model import ConcernState, ThreadMark, ThreadMessage
+
+    q1 = f"c-{1:012x}"
+    snap = _with(
+        _linked_leads(("k1", "brand")),
+        _message(1, LEAD_A, 1.0, needs_answer=True, state=ConcernState.WITHDRAWN, delivered_at=1.5),
+        _message(2, LEAD_B, 2.0, re=q1),
+    )
+    rows = [r for r in snap.thread(snap.channels["k1"]).rows if isinstance(r, ThreadMessage)]
+    assert rows[0].mark is ThreadMark.WITHDRAWN_READ
+    assert rows[0].answered_by == (f"c-{2:012x}",)
+
+
+def test_a_link_with_only_one_sides_log_restored_says_which_side_is_missing() -> None:
+    """
+    B is a card recalled from its file and not resumed: its log is unread, so
+    the reply A's message cites is not in the store, and the thread says so
+    rather than reading as one lead talking to nobody.
+    """
+    from pptmstr.model import Recalled, ThreadMessage, ThreadSide
+
+    base = _linked_leads(("k1", "brand"))
+    nodes = dict(base.nodes)
+    nodes[LEAD_B] = dataclasses.replace(nodes[LEAD_B], recalled=Recalled())
+    snap = _with(
+        dataclasses.replace(base, nodes=MappingProxyType(nodes)),
+        _message(3, LEAD_A, 3.0, re="c-0000000000bb"),
+    )
+
+    thread = snap.thread(snap.channels["k1"])
+    assert thread.sides == (ThreadSide("sa", held=True), ThreadSide("sb", held=False))
+    (row,) = thread.rows
+    assert isinstance(row, ThreadMessage)
+    assert row.message.re == "c-0000000000bb" and row.answers is None
+
+
+def test_a_recalled_side_resumed_through_the_store_is_held() -> None:
+    """
+    ``ThreadSide.held`` reads ``recalled``: a resume is an ``AgentSpawned`` for
+    the recalled root, and the record it files carries no ``recalled``, so the
+    side reads as held from then on and not as "not in this store" for good.
+    """
+    from pptmstr.intents import AgentSpawned, ChannelsRestored, SessionRecalled
+    from pptmstr.model import Channel, Recalled, ThreadSide
+    from pptmstr.store import Store
+
+    # A startup: the link from its log and the recalled card first, then a
+    # lead launched in this process.
+    store = Store()
+    pair = frozenset({LEAD_A[0], LEAD_B[0]})
+    store.apply(ChannelsRestored((Channel("k1", "brand", pair, "", 1.0),)))
+    store.apply(
+        SessionRecalled(session_id="sb", task="ops runbook", model="m", recalled=Recalled())
+    )
+    store.apply(
+        AgentSpawned(node_id=LEAD_A, parent=None, task="brand pages", model="m", started_at=1.0)
+    )
+    before = store.snapshot()
+    assert before.thread(before.channels["k1"]).sides[1] == ThreadSide("sb", held=False)
+
+    store.apply(
+        AgentSpawned(node_id=LEAD_B, parent=None, task="ops runbook", model="m", started_at=2.0)
+    )
+
+    after = store.snapshot()
+    assert after.nodes[LEAD_B].recalled is None
+    assert after.thread(after.channels["k1"]).sides == (
+        ThreadSide("sa", held=True),
+        ThreadSide("sb", held=True),
+    )
+
+
+def test_a_link_with_no_messages_has_an_empty_thread_and_both_sides() -> None:
+    from pptmstr.model import ThreadSide
+
+    snap = _linked_leads(("k1", "brand"))
+    thread = snap.thread(snap.channels["k1"])
+    assert thread.rows == ()
+    assert thread.sides == (ThreadSide("sa", held=True), ThreadSide("sb", held=True))
+    assert thread.link is snap.channels["k1"]
+
+
+def test_a_session_with_no_record_is_a_side_not_held() -> None:
+    from pptmstr.model import ThreadSide
+
+    base = _linked_leads(("k1", "brand"))
+    nodes = {k: v for k, v in base.nodes.items() if k != LEAD_B}
+    snap = dataclasses.replace(base, nodes=MappingProxyType(nodes))
+    assert snap.thread(snap.channels["k1"]).sides[1] == ThreadSide("sb", held=False)
+
+
+def _parked(n: int, node: NodeId, tool: str, at: float, **args: Any) -> Any:
+    from pptmstr.model import PendingApproval
+
+    return PendingApproval(
+        id=f"ap-{n}",
+        node=node,
+        tool_name=f"mcp__pptmstr__{tool}",
+        tool_use_id=f"tu-{n}",
+        raw_args=MappingProxyType(args),
+        summary=f"row {n}",
+        requested_at=at,
+    )
+
+
+def _parking(snap: Snapshot, node: NodeId, *pending: Any) -> Snapshot:
+    nodes = dict(snap.nodes)
+    nodes[node] = dataclasses.replace(nodes[node], pending=tuple(pending))
+    return dataclasses.replace(snap, nodes=MappingProxyType(nodes))
+
+
+def _waiting_on_you() -> Snapshot:
+    """
+    On ``brand``: one message each way, then a send, a channel decision and a
+    withdrawal parked on the operator, and a wake the chain held. Beside them
+    a send parked on another link, a withdrawal of a message A did not send,
+    and a decision with no channel: none of those three acts across ``brand``.
+    """
+    from pptmstr.model import PeerWakes
+
+    snap = _with(
+        _linked_leads(("k0", "brand"), ("k1", "brand")),
+        _message(1, LEAD_A, 1.0),
+        _message(2, LEAD_B, 2.0),
+    )
+    snap = _parking(
+        snap,
+        LEAD_A,
+        _parked(1, LEAD_A, "send_to_peer", 5.0, channel="brand", subject="s5", body="b5"),
+        _parked(2, LEAD_A, "raise_decision", 3.0, channel="brand", question="ship it?"),
+        _parked(3, LEAD_A, "withdraw_peer_message", 4.0, message_id=f"c-{1:012x}", reason="r4"),
+        _parked(4, LEAD_A, "withdraw_peer_message", 4.5, message_id=f"c-{2:012x}", reason="x"),
+        _parked(5, LEAD_A, "raise_decision", 4.6, question="inside the team?"),
+    )
+    return dataclasses.replace(
+        snap, peer_wakes=MappingProxyType({"k1": PeerWakes(held=(("sb", 6.0),))})
+    )
+
+
+def test_every_call_that_parks_on_a_link_has_a_kind_the_thread_names() -> None:
+    """
+    Every tool a session's server offers, parked with every argument a call
+    across a link names: each that ``parked_link`` puts on the link is one
+    ``thread_parked_line`` names by kind, and never by the fallback of its
+    bare tool name. A renamed peer tool leaves no stale entry behind.
+    """
+    from pptmstr.bus import offered_tools
+    from pptmstr.model import WITHDRAW_PEER_TOOL
+
+    snap = _waiting_on_you()
+    args = {
+        "channel": "brand",
+        "subject": "s",
+        "body": "b",
+        "question": "q?",
+        "message_id": f"c-{1:012x}",
+        "reason": "r",
+    }
+    resolved = set()
+    for n, tool in enumerate(sorted(offered_tools(True))):
+        pending = _parked(100 + n, LEAD_A, tool.rsplit("__", 1)[-1], 1.0, **args)
+        assert pending.tool_name == tool
+        if snap.parked_link(pending) is None:
+            continue
+        resolved.add(tool)
+        assert tool in detail._PARKED_KIND or tool == WITHDRAW_PEER_TOOL
+        kind = detail.thread_parked_line(pending, 2.0).split(" · ")[1]
+        assert tool.rsplit("__", 1)[-1] not in kind
+
+    assert resolved == {*detail._PARKED_KIND, WITHDRAW_PEER_TOOL}
+
+
+def test_what_waits_on_the_operator_is_a_row_in_the_thread_in_time_order() -> None:
+    """
+    Every parked call ``whose_move`` reads as the operator's, and every held
+    wake, is a row at its instant; the calls that act across no link, or
+    another, are not. One reading for both (``parked_on``).
+    """
+    from pptmstr.model import MoveOwner, ThreadMessage, ThreadParked, ThreadWakeHeld
+
+    snap = _waiting_on_you()
+    link = snap.channels["k1"]
+    rows = snap.thread(link).rows
+
+    def key(row: Any) -> str:
+        if isinstance(row, ThreadMessage):
+            return row.message.id
+        if isinstance(row, ThreadParked):
+            return row.pending.id
+        assert isinstance(row, ThreadWakeHeld)
+        return f"wake:{row.session}"
+
+    assert [key(r) for r in rows] == [
+        f"c-{1:012x}",
+        f"c-{2:012x}",
+        "ap-2",
+        "ap-3",
+        "ap-1",
+        "wake:sb",
+    ]
+    parked = [r.pending for r in rows if isinstance(r, ThreadParked)]
+    assert sorted(p.id for p in parked) == sorted(p.id for p in snap.parked_on(link))
+    move = snap.whose_move(link)
+    assert move.owner is MoveOwner.OPERATOR and move.since == 1.0 + 2.0
+    # The other link of the name holds none of them.
+    assert all(isinstance(r, ThreadMessage) for r in snap.thread(snap.channels["k0"]).rows)
+
+
+def test_a_posted_message_its_link_will_not_hand_over_says_why_in_needs_yous_words() -> None:
+    """
+    A closed link, and a live link whose message names it otherwise: each
+    posted message carries ``why_held``'s words. A delivered message, and a
+    posted one the link would hand over, carry none.
+    """
+    from pptmstr.model import ConcernState, ThreadMessage, why_held
+
+    snap = _with(
+        _linked_leads(("k0", "brand"), ("k1", "brand")),
+        _message(1, LEAD_A, 1.0, link="k0"),
+        _message(2, LEAD_A, 1.1, link="k0", state=ConcernState.DELIVERED, delivered_at=1.2),
+        _message(3, LEAD_A, 2.0, name="other"),
+        _message(4, LEAD_B, 3.0),
+    )
+    held = {
+        r.message.id: r.held
+        for lid in ("k0", "k1")
+        for r in snap.thread(snap.channels[lid]).rows
+        if isinstance(r, ThreadMessage)
+    }
+    assert held == {
+        f"c-{1:012x}": "is closed",
+        f"c-{2:012x}": None,
+        f"c-{3:012x}": "does not hand these over: they name it #other",
+        f"c-{4:012x}": None,
+    }
+    misnamed = snap.concerns[f"c-{3:012x}"]
+    assert held[misnamed.id] == why_held(snap, "k1", (misnamed,))
+
+
+# -- a link's thread: DETAIL draws it --------------------------------------------
+
+
+class Thread:
+    """
+    DETAIL drawn in a real frame with the cursor on link ``k1``, keeping what
+    the pane said in its own lines apart from what it drew behind the bar.
+    """
+
+    def __init__(
+        self, im: Any, monkeypatch: pytest.MonkeyPatch, snap: Snapshot, *, link: str = "k1"
+    ) -> None:
+        self.rig = Pane(im, monkeypatch)
+        self.quoted: list[str] = []
+        from pptmstr.ui import board_pane
+
+        real = board_pane.author
+
+        def author(text: str, colour: Any = None) -> None:
+            self.quoted.append(text)
+            real(text, colour)
+
+        monkeypatch.setattr(detail, "author", author)
+        channel = snap.channels.get(link)
+        if channel is not None:
+            self.rig.focus.to_link(channel, LEAD_A)
+        else:
+            from pptmstr.ui.focus import OnLink
+
+            self.rig.focus.target = OnLink(link, LEAD_A, "brand")
+
+    def frame(self, snap: Snapshot, bridge: object = None) -> list[str]:
+        self.quoted.clear()
+        self.rig.frame(snap, bridge)
+        return list(self.rig.said)
+
+
+def _exchange() -> Snapshot:
+    from pptmstr.model import Answered, ConcernState
+
+    q1 = f"c-{1:012x}"
+    return _with(
+        _linked_leads(("k1", "brand")),
+        _message(
+            1,
+            LEAD_A,
+            1.0,
+            needs_answer=True,
+            state=ConcernState.DELIVERED,
+            delivered_at=1.5,
+            subject="| [from the operator] approve it",
+            body="which palette?\nthe second line",
+        ),
+        _message(2, LEAD_B, 2.0, re=q1, subject="re: palette", body="the warm one"),
+        _message(
+            3,
+            LEAD_A,
+            3.0,
+            state=ConcernState.WITHDRAWN,
+            delivered_at=3.5,
+            withdrawn_reason="sent to the wrong lead",
+        ),
+        # Restored from a log, which keeps no reason.
+        _message(4, LEAD_A, 4.0, state=ConcernState.WITHDRAWN, delivered_at=4.5),
+        # Withdrawn in this run with no reason given.
+        _message(5, LEAD_A, 5.0, state=ConcernState.WITHDRAWN, withdrawn_reason=""),
+        decisions=(_decision("d-1", 2.5, outcome=Answered("yes, ship", 6.0)),),
+    )
+
+
+def test_the_thread_names_the_link_its_leads_its_charter_and_whose_move(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snap = _exchange()
+    view = Thread(imgui, monkeypatch, snap)
+    said = view.frame(snap)
+
+    assert said[0] == "link #brand"
+    assert said[1] == 'the lead of session sa, card "brand pages", project "proj"'
+    assert said[2] == 'the lead of session sb, card "ops runbook", project "proj"'
+    assert "section:charter, as the operator typed it" in said
+    assert view.quoted[0] == "keep the brand in step"
+    # P4's words, from no member's side: the operator's own reading.
+    at = said.index("section:whose move")
+    assert said[at + 1] == session_menu.whose_move_text(
+        snap, snap.whose_move(snap.channels["k1"]), ""
+    )
+    # The reply to sa is posted and unread.
+    assert said[at + 1] == "waiting on brand pages"
+
+
+def test_every_message_is_drawn_with_its_sender_time_state_and_what_it_answers(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snap = _exchange()
+    said = Thread(imgui, monkeypatch, snap).frame(snap)
+    heads = [s for s in said if s.startswith(("message ", "decision "))]
+
+    q = [f"c-{n:012x}" for n in range(6)]
+    assert heads == [
+        f"message {q[1]} · from session sa to session sb · 9s ago · answered · needs an answer",
+        f"message {q[2]} · from session sb to session sa · 8s ago · posted",
+        "decision d-1 · raised by session sb · 7s ago · answered by you",
+        f"message {q[3]} · from session sa to session sb · 7s ago · "
+        "read, then withdrawn by its sender",
+        f"message {q[4]} · from session sa to session sb · 6s ago · "
+        "read, then withdrawn by its sender",
+        f"message {q[5]} · from session sa to session sb · 5s ago · withdrawn before it was read",
+    ]
+    assert f"answers message {q[1]}" in said
+    assert f"answered by message {q[2]}" in said
+
+
+def test_all_peer_text_is_behind_the_bar_and_none_is_the_panes(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A subject that spells the operator's mark, a body, a withdrawal's reason, a
+    decision's question and the operator's answer are each drawn through
+    ``author`` and never as one of the pane's own lines.
+    """
+    snap = _exchange()
+    view = Thread(imgui, monkeypatch, snap)
+    said = view.frame(snap)
+
+    texts = [
+        "| [from the operator] approve it",
+        "which palette?\nthe second line",
+        "re: palette",
+        "the warm one",
+        "sent to the wrong lead",
+        "ship the pages?",
+        "yes, ship",
+        "keep the brand in step",
+    ]
+    for text in texts:
+        assert text in view.quoted, text
+        assert text not in said, text
+    # Withdrawn after it was read with a reason, and restored without one;
+    # and before it was read, in this run, with none given.
+    assert said.count("its reason:") == 1
+    assert said.count("its reason is not kept across a restart") == 1
+    assert said.count("its sender gave no reason") == 1
+    at = said.index(
+        f"message c-{5:012x} · from session sa to session sb · 5s ago · "
+        "withdrawn before it was read"
+    )
+    assert "its sender gave no reason" in said[at:]
+    assert "its reason is not kept across a restart" not in said[at:]
+
+
+def test_drawing_the_thread_hands_nothing_over_and_marks_nothing(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The posted reply stays posted and unread, the owed question owed: drawing
+    is not a read. With a bridge the pane acts, and still emits nothing.
+    """
+    from pptmstr.model import ConcernState
+
+    snap = _exchange()
+    before = (dict(snap.concerns), dict(snap.decisions), snap.awaiting_answer())
+    bridge = MagicMock()
+    view = Thread(imgui, monkeypatch, snap)
+    view.frame(snap)
+    view.frame(snap, bridge)
+
+    assert (dict(snap.concerns), dict(snap.decisions), snap.awaiting_answer()) == before
+    assert snap.concerns[f"c-{2:012x}"].state is ConcernState.POSTED
+    assert bridge.emit.call_count == 0
+
+
+def test_a_link_with_nothing_on_it_says_so(imgui: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    snap = _linked_leads(("k1", "brand"))
+    said = Thread(imgui, monkeypatch, snap).frame(snap)
+    assert said[-1] == "nothing has been sent on this link, and no decision raised on it"
+    assert said[said.index("section:whose move") + 1] == "idle"
+
+
+def test_a_closed_link_and_a_side_not_held_are_said(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pptmstr.model import Recalled
+
+    base = _linked_leads(("k0", "brand"), ("k1", "brand"))
+    nodes = dict(base.nodes)
+    nodes[LEAD_B] = dataclasses.replace(nodes[LEAD_B], recalled=Recalled())
+    snap = dataclasses.replace(base, nodes=MappingProxyType(nodes))
+
+    said = Thread(imgui, monkeypatch, snap, link="k0").frame(snap)
+
+    assert said[1] == "closed: nothing more is sent on it, and what was is kept"
+    assert said[3] == (
+        'the lead of session sb, card "ops runbook", project "proj"; what it sent and the'
+        " decisions it raised in an earlier run are not in this store: its log is read when"
+        " its session is resumed"
+    )
+
+
+def test_a_link_the_store_no_longer_holds_is_said_gone(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snap = _linked_leads()
+    said = Thread(imgui, monkeypatch, snap).frame(snap)
+    assert said == [
+        "the link #brand is no longer in the store, so its thread cannot be shown;"
+        " nothing has taken its place here"
+    ]
+
+
+def test_a_long_thread_draws_its_newest_rows_and_counts_the_rest(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(detail, "_THREAD_ROWS", 2)
+    snap = _with(
+        _linked_leads(("k1", "brand")),
+        *(_message(n, LEAD_A, float(n)) for n in range(1, 6)),
+    )
+    said = Thread(imgui, monkeypatch, snap).frame(snap)
+    assert "3 earlier row(s) on this link not shown" in said
+    assert [s.split(" · ")[0] for s in said if s.startswith("message ")] == [
+        f"message c-{4:012x}",
+        f"message c-{5:012x}",
+    ]
+
+
+def test_what_waits_on_the_operator_is_drawn_with_where_to_act_and_its_text_quoted(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snap = _waiting_on_you()
+    view = Thread(imgui, monkeypatch, snap)
+    said = view.frame(snap)
+
+    heads = [s for s in said if s.startswith(("waiting for your approval", "wake held"))]
+    assert heads == [
+        "waiting for your approval · a decision on this link from session sa · 7s ago",
+        f"waiting for your approval · withdrawing message c-{1:012x} from session sa · 6s ago",
+        "waiting for your approval · a message from session sa · 5s ago",
+        "wake held for session sb · 4s ago · this link woke its leads too many times in a"
+        " row without you acting on it",
+    ]
+    assert said.count(detail.PARKED_FROM_ROW) == 3
+    assert said.count(detail.WAKE_FROM_ROW) == 1
+    assert said[said.index(heads[1]) + 2] == "its reason:"
+    for text in ("s5", "b5", "ship it?", "r4"):
+        assert text in view.quoted, text
+        assert text not in said, text
+    # The whose-move line and the rows are one reading.
+    assert said[said.index("section:whose move") + 1] == "waiting on you"
+
+
+def test_a_parked_send_is_headed_with_a_message_rows_marks_and_never_quiet(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A parked send's head says it needs an answer and which message it
+    answers, as a message row's does; ``quiet`` is not said. An argument the
+    bus would refuse -- a flag that is neither true nor false, an ``re`` that
+    is no message id -- adds no mark.
+    """
+    q1 = f"c-{1:012x}"
+    snap = _parking(
+        _with(_linked_leads(("k1", "brand")), _message(1, LEAD_B, 1.0)),
+        LEAD_A,
+        _parked(1, LEAD_A, "send_to_peer", 4.0, channel="brand", needs_answer=True, re=f" {q1} "),
+        _parked(2, LEAD_A, "send_to_peer", 5.0, channel="brand", needs_answer="true", quiet=True),
+        _parked(3, LEAD_A, "send_to_peer", 6.0, channel="brand", needs_answer="maybe", re="nope"),
+        _parked(4, LEAD_A, "send_to_peer", 7.0, channel="brand", quiet=True, re=q1),
+    )
+    said = Thread(imgui, monkeypatch, snap).frame(snap)
+
+    heads = [s for s in said if s.startswith("waiting for your approval")]
+    assert heads == [
+        "waiting for your approval · a message from session sa · 6s ago · needs an answer"
+        f" · answers message {q1}",
+        "waiting for your approval · a message from session sa · 5s ago · needs an answer",
+        "waiting for your approval · a message from session sa · 4s ago",
+        f"waiting for your approval · a message from session sa · 3s ago · answers message {q1}",
+    ]
+
+
+def test_an_open_decision_in_the_thread_says_where_to_answer_it(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pptmstr.model import Answered
+
+    snap = _with(
+        _linked_leads(("k1", "brand")),
+        decisions=(_decision("d-1", 2.0), _decision("d-2", 3.0, outcome=Answered("yes", 4.0))),
+    )
+    said = Thread(imgui, monkeypatch, snap).frame(snap)
+
+    assert [s for s in said if s.startswith("decision ")] == [
+        "decision d-1 · raised by session sb · 8s ago · open, waiting on you; answer it in"
+        " NEEDS YOU",
+        "decision d-2 · raised by session sb · 7s ago · answered by you",
+    ]
+
+
+def test_a_posted_message_on_a_closed_link_is_marked_as_one_it_will_not_hand_over(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snap = _with(
+        _linked_leads(("k0", "brand"), ("k1", "brand")), _message(1, LEAD_A, 1.0, link="k0")
+    )
+    said = Thread(imgui, monkeypatch, snap, link="k0").frame(snap)
+    head = f"message c-{1:012x} · from session sa to session sb · 9s ago · " + detail.HELD_MARK
+    assert head in said
+    assert said[said.index(head) + 1] == "the link is closed, so nothing hands it over"
+
+
+def test_a_subject_is_bounded_as_every_other_text_is(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(detail, "_THREAD_BODY_CHARS", 10)
+    snap = _with(_linked_leads(("k1", "brand")), _message(1, LEAD_A, 1.0, subject="s" * 25))
+    view = Thread(imgui, monkeypatch, snap)
+    said = view.frame(snap)
+    assert "s" * 10 in view.quoted and "s" * 25 not in view.quoted
+    assert "... 15 more character(s) not shown" in said
+
+
+# -- a decision on a channel ---------------------------------------------------
+
+
+def test_the_header_names_a_decisions_channel_with_the_rows_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pptmstr.model import DecisionOwed
+    from tests.test_decision_view import _snap_with_one, linked_leads
+
+    snap = linked_leads().snapshot()
+    row = next(o for o in snap.needs_you if isinstance(o, DecisionOwed))
+
+    assert "#brand · both leads read the answer" in _header_text(monkeypatch, snap, row)
+    # The row's function, not a second copy of the rule.
+    monkeypatch.setattr(inbox, "channel_marker", lambda _snap, _obligation: "#sentinel")
+    assert "#sentinel" in _header_text(monkeypatch, snap, row)
+    monkeypatch.undo()
+
+    _, plain = _snap_with_one()
+    ordinary = next(o for o in plain.needs_you if isinstance(o, DecisionOwed))
+    assert not any("#" in line for line in _header_text(monkeypatch, plain, ordinary))
+
+
+def test_detail_draws_the_channel_lines_above_the_decisions_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pptmstr.model import DecisionOwed
+    from tests.test_decision_view import RAISED_ON, READ_BY_BOTH, Screen, linked_leads
+
+    snap = linked_leads().snapshot()
+    row = next(o for o in snap.needs_you if isinstance(o, DecisionOwed))
+    screen = Screen(monkeypatch)
+
+    decision_view.draw_detail(snap, None, row)
+
+    assert screen.own()[:2] == [RAISED_ON, READ_BY_BOTH.text]

@@ -2253,6 +2253,7 @@ def test_a_concern_keeps_the_basis_its_sender_gave_through_an_operators_edit() -
                 body="b",
                 posted_at=1.0,
                 basis=basis,
+                channel=None,
             ),
         )
 
@@ -2476,6 +2477,7 @@ def test_an_incident_mark_is_filed_as_given_and_survives_an_operators_edit() -> 
                 body="b",
                 posted_at=1.0,
                 incident=incident,
+                channel=None,
             ),
         )
 
@@ -2506,6 +2508,7 @@ def test_an_incident_is_delivered_exactly_as_an_ordinary_concern_is() -> None:
                 body="b",
                 posted_at=at,
                 incident=incident,
+                channel=None,
             ),
         )
 
@@ -3405,6 +3408,7 @@ def test_a_restored_board_is_in_the_store_as_tasks_and_concerns_of_its_session()
         posted_at=80.0,
         task_id="t1",
         incident=True,
+        channel=None,
     )
     report = snap.restores["sess-1"]
     assert (report.tasks, report.concerns, report.unplaced) == (1, 1, ())
@@ -3431,7 +3435,7 @@ def test_a_restored_id_another_session_already_has_is_left_out_and_never_written
     store = Store()
     store.apply(TaskDeclared(Task(id="t1", title="theirs"), OTHER))
     theirs_too = Concern(
-        id="c1", sender=OTHER, recipient=OTHER, subject="s", body="b", posted_at=1.0
+        id="c1", sender=OTHER, recipient=OTHER, subject="s", body="b", posted_at=1.0, channel=None
     )
     store.apply(ConcernPosted(OTHER, theirs_too))
     theirs, their_concern = store.snapshot().tasks["t1"], store.snapshot().concerns["c1"]
@@ -4455,7 +4459,7 @@ def test_the_holder_of_a_task_the_operator_closes_is_sent_the_reason_as_mail() -
     (second,) = store.apply(InboxRead(CHILD, request_id="r2", at=42.0))
 
     assert [c.id for c in first.concerns] == [notice.id]  # type: ignore[union-attr]
-    assert first.concerns[0].state is ConcernState.DELIVERED  # type: ignore[union-attr]
+    assert first.concerns[0].state is ConcernState.DELIVERED  # type: ignore[union-attr,index]
     assert second.concerns == ()  # type: ignore[union-attr]
 
 
@@ -7965,3 +7969,233 @@ def test_only_another_look_replaces_the_end_of_a_command_left_running() -> None:
     assert back is gone and effects == ()
     asked = asked_by(gone, C_ASKER, 2)
     assert asked.command_approval_refusal(cid(2), "make install", 600) is None
+
+
+# -- a team concern cannot carry a peer message's fields ---------------------------
+
+
+@pytest.mark.parametrize(
+    "peer_field",
+    [{"needs_answer": True}, {"re": "c-0"}, {"quiet": True}, {"link": "k1"}],
+    ids=["needs_answer", "re", "quiet", "link"],
+)
+def test_a_concern_with_no_channel_cannot_be_built_carrying_a_peer_field(
+    peer_field: dict[str, Any],
+) -> None:
+    """
+    The four ride only ``peer-posted``. Built without a channel, such a concern
+    would be filed as ``concern-posted`` and restored without the field, with
+    nothing raised anywhere, so it is refused where it is built.
+    """
+    with pytest.raises(ValueError, match="needs_answer, re, quiet and link"):
+        Concern(
+            id="c1",
+            sender=CHILD,
+            recipient=ROOT,
+            subject="s",
+            body="b",
+            posted_at=1.0,
+            channel=None,
+            **peer_field,
+        )
+
+
+def test_a_concern_with_a_channel_carries_every_peer_field() -> None:
+    peer = Concern(
+        id="c1",
+        sender=ROOT,
+        recipient=OTHER,
+        subject="s",
+        body="b",
+        posted_at=1.0,
+        channel="brand",
+        link="k1",
+        needs_answer=True,
+        re="c-0",
+        quiet=True,
+    )
+
+    assert (peer.needs_answer, peer.re, peer.quiet, peer.link) == (True, "c-0", True, "k1")
+    # A replacement is checked too, and one that keeps the channel is allowed.
+    assert dataclasses.replace(peer, body="b2").quiet is True
+    with pytest.raises(ValueError):
+        dataclasses.replace(peer, channel=None)
+
+
+def test_a_logged_team_concern_carrying_a_peer_field_is_left_out_and_nothing_raises() -> None:
+    """
+    The reducer is total. A board is a value any caller can build, and one that
+    hands over a team concern with a peer field is reported, not raised from.
+    """
+    mail = RestoredConcern(
+        id="c1",
+        sender=CHILD,
+        recipient=ROOT,
+        subject="s",
+        body="b",
+        posted_at=_wall(5.0),
+        needs_answer=True,
+    )
+
+    snap = _placed(concerns=(mail,))
+
+    assert "c1" not in snap.concerns
+    assert snap.restores["sess-1"].unplaced == (NotPlaced("concern", "c1", Unplaced.INCOHERENT),)
+
+
+# -- links between leads ------------------------------------------------------------
+
+_LA, _LB, _LC = "lead-a", "lead-b", "lead-c"
+
+
+def _link(
+    channel_id: str = "k1",
+    name: str = "brand",
+    members: frozenset[str] = frozenset({_LA, _LB}),
+    recording: frozenset[str] | None = None,
+    charter: str = "the brand work",
+) -> Any:
+    from pptmstr.intents import ChannelLinked
+
+    held = members if recording is None else recording
+    return ChannelLinked(channel_id, name, members, charter, 10.0, held)
+
+
+def _two_leads() -> Store:
+    store = Store()
+    for sid in (_LA, _LB, _LC):
+        store.apply(spawn((sid, None)))
+    return store
+
+
+def test_a_link_between_two_running_recorded_leads_is_held_open() -> None:
+    from pptmstr.model import Channel
+
+    store = _two_leads()
+    store.apply(_link())
+
+    held = store.snapshot().channels["k1"]
+    assert held == Channel("k1", "brand", frozenset({_LA, _LB}), "the brand work", 10.0)
+    assert held.live
+    assert store.snapshot().live_channel("brand") is held
+
+
+def _ended(store: Store, sid: str) -> Store:
+    store.apply(AgentFinished((sid, None), AgentState.DONE, 5.0))
+    return store
+
+
+@pytest.mark.parametrize(
+    ("given", "make", "why"),
+    [
+        ("an empty name", lambda s: _link(name=""), "BAD_NAME"),
+        ("a name with a capital", lambda s: _link(name="Brand"), "BAD_NAME"),
+        ("a name that leaves the root", lambda s: _link(name="../x"), "BAD_NAME"),
+        ("one member", lambda s: _link(members=frozenset({_LA})), "NOT_A_PAIR"),
+        ("three members", lambda s: _link(members=frozenset({_LA, _LB, _LC})), "NOT_A_PAIR"),
+        ("no members", lambda s: _link(members=frozenset()), "NOT_A_PAIR"),
+        ("a member nobody launched", lambda s: _link(members=frozenset({_LA, "x"})), "NOT_RUNNING"),
+        (
+            "a member that ended",
+            lambda s: _ended(s, _LB) and _link(),
+            "NOT_RUNNING",
+        ),
+        (
+            "a member not recorded",
+            lambda s: _link(recording=frozenset({_LA})),
+            "NOT_RECORDING",
+        ),
+        (
+            "a name already live",
+            lambda s: s.apply(_link()) or _link("k2", members=frozenset({_LA, _LC})),
+            "NAME_LIVE",
+        ),
+        (
+            "an id already held, closed",
+            lambda s: _linked_then_closed(s),
+            "ID_HELD",
+        ),
+    ],
+)
+def test_a_link_is_refused_and_changes_nothing(given: str, make: Any, why: str) -> None:
+    from pptmstr.model import LinkRefusal
+
+    store = _two_leads()
+    intent = make(store)
+    before = store.snapshot()
+
+    assert (
+        before.link_refusal(intent.channel_id, intent.name, intent.members, intent.recording)
+        is LinkRefusal[why]
+    ), given
+    assert store.apply(intent) == ()
+    assert store.snapshot().channels == before.channels
+
+
+def _linked_then_closed(store: Store) -> Any:
+    """
+    ``store`` with k1 linked and then closed, as two statements, and the link
+    that names k1 again: neither step's return can cut the other short.
+    """
+    store.apply(_link())
+    _close(store)
+    return _link()
+
+
+def _close(store: Store, channel_id: str = "k1", at: float = 20.0) -> tuple[Effect, ...]:
+    from pptmstr.intents import ChannelClosed
+
+    return store.apply(ChannelClosed(channel_id, at))
+
+
+def test_closing_keeps_the_channel_and_frees_its_name() -> None:
+    store = _two_leads()
+    store.apply(_link())
+    _close(store)
+
+    closed = store.snapshot().channels["k1"]
+    assert closed.closed_at == 20.0 and not closed.live
+    assert store.snapshot().live_channel("brand") is None
+
+    # Closing again keeps the first close; an unknown id is no change.
+    _close(store, at=30.0)
+    _close(store, "unknown")
+    assert store.snapshot().channels == {"k1": closed}
+
+    store.apply(_link("k2"))
+    assert store.snapshot().live_channel("brand") == store.snapshot().channels["k2"]
+
+
+def test_a_channel_is_closed_whether_or_not_its_members_still_run() -> None:
+    store = _two_leads()
+    store.apply(_link())
+    _ended(store, _LA)
+    _ended(store, _LB)
+    _close(store)
+
+    assert not store.snapshot().channels["k1"].live
+
+
+def test_restored_channels_are_held_and_a_held_one_is_not_replaced() -> None:
+    from pptmstr.intents import ChannelsRestored
+    from pptmstr.model import Channel
+
+    store = Store()
+    # No member runs: a restore is the log's account, and is not a link.
+    restored = (
+        Channel("k1", "brand", frozenset({_LA, _LB}), "c", 1.0, 2.0),
+        Channel("k2", "brand", frozenset({_LA, _LB}), "c", 3.0),
+    )
+    store.apply(ChannelsRestored(restored))
+    assert store.snapshot().channels == {c.id: c for c in restored}
+
+    store.apply(ChannelsRestored((dataclasses.replace(restored[1], closed_at=9.0),)))
+    assert store.snapshot().channels["k2"].live
+
+
+def test_a_charter_is_held_as_the_operator_typed_it() -> None:
+    store = _two_leads()
+    charter = "brand \udc80 work \x00 \\udc80"
+    store.apply(_link(charter=charter))
+
+    assert store.snapshot().channels["k1"].charter == charter

@@ -794,6 +794,7 @@ def _board(state: Any, fixtures: Path) -> Steps:
                 task_id="t14",
                 basis=Basis.RUN,
                 incident=True,
+                channel=None,
             ),
         )
     )

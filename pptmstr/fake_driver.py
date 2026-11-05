@@ -1042,6 +1042,7 @@ class FakeDriver:
                         # One marked row, so the marker is drawn beside two
                         # that are not.
                         incident=cid == "fake-c3",
+                        channel=None,
                     ),
                 )
             )
@@ -1168,7 +1169,7 @@ class FakeDriver:
             about="t2",
         )
         # A task id that is on no board: the dangling reference the projection
-        # reports, on a concern the operator then stopped.
+        # reports, on a concern its sender then withdrew.
         post(
             "fake-c8",
             reviewer,
@@ -1177,7 +1178,7 @@ class FakeDriver:
             "Nobody has claimed `t12` and it blocks the release.",
             about="t12",
         )
-        self.bridge.emit(ConcernWithdrawn("fake-c8", reason="there is no t12", node_id=root))
+        self.bridge.emit(ConcernWithdrawn("fake-c8", reason="there is no t12", node_id=reviewer))
 
         # Parked by the two agents still running. The builder's are one message
         # with two tool calls in it, which is how one node comes to hold two.

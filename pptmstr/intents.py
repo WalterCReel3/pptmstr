@@ -35,6 +35,9 @@ from .command import Command, CommandId, End
 from .model import (
     AgentState,
     Basis,
+    Channel,
+    ChannelId,
+    ChannelScope,
     Concern,
     ConcernId,
     ContextSnapshot,
@@ -169,6 +172,12 @@ class ApprovalResolved:
     approved: bool
     reason: str | None = None
     edited_args: Mapping[str, object] | None = None
+    # Whether a human settled it, as on ``bridge.Decision``. False for a park
+    # nobody answered: one the CLI aborted at its hook timeout, one cancelled
+    # by its session's teardown, and one the host failed at shutdown. Those
+    # arrive as a refusal with a reason, like an operator's, and only this
+    # tells them apart (``store._moved`` counts only the operator's).
+    from_operator: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +335,79 @@ class InboxRead:
 
 
 @dataclass(frozen=True, slots=True)
+class PeerSent:
+    """
+    A lead sent the lead of a linked session a message on ``channel``.
+
+    **The store routes it, and the handler does not.** Who it reaches is the
+    other member of the live link under that name (``Snapshot.peer_route``),
+    which only the store can see, and only at the instant it files the message:
+    a recipient looked up first and posted after would let a close land in
+    between. So this carries what the sender wrote and no recipient, and the
+    reducer builds the ``Concern`` -- with its channel, so it is filed as
+    ``peer-posted``, and the id of the link it routed over, which is what later
+    hands it over -- or refuses it and files nothing. The reply is a
+    ``PeerSettled`` on ``request_id``.
+
+    ``node_id`` is the gate's, as on ``ConcernPosted``, and is the sender:
+    nothing the sender wrote names who is speaking. ``concern_id`` is minted by
+    the bus in the shape ``model.is_concern_id`` reads, so a declaration's
+    ``re`` can name it. ``edited`` is the gate's stamp.
+
+    **It reaches only the link it was written for.** ``called_at`` is the
+    gate's monotonic stamp of when the agent made the call
+    (``bus.CALLED_AT_KEY``), which on a reviewed rung is before the operator
+    approved it. A link that went live after it -- the operator closed the name
+    and linked it again to another session while the call was parked -- refuses
+    the send, as does an ``re`` naming a message sent over another link
+    (``Snapshot.peer_send_refusal``). None is a call no gate stamped; the bus
+    never emits one.
+    """
+
+    node_id: NodeId  # the sender
+    request_id: str
+    concern_id: ConcernId
+    channel: str
+    subject: str
+    body: str
+    at: float
+    edited: bool = False
+    needs_answer: bool = False
+    re: ConcernId | None = None
+    quiet: bool = False
+    called_at: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PeerInboxRead:
+    """
+    A lead asked for the messages linked leads have sent it. Each one on
+    ``channel`` that a live link hands over now is delivered, and the reply is a
+    ``PeerInboxDelivered``.
+
+    An intent of its own and not an arm of ``InboxRead``, so that a team read
+    cannot deliver a peer message by any argument: ``InboxRead``'s arm reads
+    ``Snapshot.inbox_of``, which holds none.
+
+    **Delivery asks the message's own link at the read**
+    (``Snapshot.peer_deliverable``). A message whose link is not live in this
+    run -- closed since it was sent, or not restored at this start -- is not
+    handed over, by that link or by a later one under the same name: it is held,
+    waiting in the store and kept in its sender's log if that session was
+    recording its board when it was sent, and the reply counts it, with no
+    text. Whether a later run hands it over is that run's link's to say.
+
+    ``channel`` is a name -- what the lead knows a link by -- or
+    ``EVERY_CHANNEL``, never None, which on a concern means team mail.
+    """
+
+    node_id: NodeId  # the reader
+    request_id: str
+    at: float
+    channel: ChannelScope
+
+
+@dataclass(frozen=True, slots=True)
 class ConcernEdited:
     """
     The operator changed a concern's text before it was delivered.
@@ -342,11 +424,33 @@ class ConcernEdited:
 
 @dataclass(frozen=True, slots=True)
 class ConcernWithdrawn:
-    """The operator stopped a concern from being delivered."""
+    """
+    A concern was withdrawn: by the operator, or by the agent that sent it.
+
+    ``node_id`` None is the operator's, which stops a concern still waiting
+    and does nothing to one already delivered. With a node it is that agent's,
+    and only the concern's sender may (``store._message_withdrawal_refusal``): a
+    concern inside a team while it waits, and a peer message while it waits
+    and after its lead read it, until it is answered -- the case
+    ``withdraw_peer_message`` exists for. ``reason`` is the withdrawer's
+    words, kept on the concern and quoted to a lead that had read it.
+
+    ``request_id`` is set by a caller that waits for the store's answer
+    (``effects.PeerWithdrawSettled``), and None by one that does not.
+
+    ``peer_only`` is set by ``withdraw_peer_message``, which withdraws a
+    message between teams and nothing else: the store then refuses a concern
+    inside a team (``model.PeerWithdrawRefusal.TEAM_MAIL``) after the sender
+    check, and the agent form without it may still withdraw its own team
+    concern while it waits. Run-only, like the reason: no log record carries
+    it (``boardfacts`` reads only the concern's state).
+    """
 
     concern_id: ConcernId
     reason: str | None = None
     node_id: NodeId | None = None
+    request_id: str | None = None
+    peer_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -773,6 +877,13 @@ class DecisionRaised:
     ``model.MAX_OPEN_DECISIONS_PER_ASKER`` open, and -- for a sub-agent only --
     when the sub-agents of its session have ``model.MAX_OPEN_SUBAGENT_DECISIONS``
     open between them. The reply is a ``DecisionSettled`` effect.
+
+    ``channel`` is the name of a channel the asker raised it on, or None. Beside
+    the record and not on it, as ``PeerSent.channel`` is: the record names its
+    link with its channel (``Decision.__post_init__``), and only the arm knows
+    which link the name resolves to. The arm stamps both, whatever ``decision``
+    says, and refuses a raise on a channel from a sub-agent or off a live link
+    of the asker's session.
     """
 
     node_id: NodeId  # the asker
@@ -782,6 +893,11 @@ class DecisionRaised:
     # The emitter's clock, for the reason ``TaskReleased.at`` gives. None takes
     # the frame's.
     at: float | None = None
+    channel: str | None = None
+    # The gate's stamp of when the call was made, for ``PeerSent.called_at``'s
+    # reason: a raise on a channel is refused when the live link of that name
+    # went live after it. None is a call no gate stamped, and is not asked.
+    called_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1151,6 +1267,206 @@ class FailedSessionClosed:
     run_held: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ChannelLinked:
+    """
+    The operator linked two leads' sessions as a channel under ``name``.
+
+    Honoured only where ``Snapshot.link_refusal`` gives none: a plain name no
+    open channel has, exactly two members, each a running session whose board
+    is being recorded, and an id the store does not hold. Refused, the store is
+    unchanged and the shell says why (``app._record_channels``).
+
+    **The shell mints what the reducer cannot**: ``channel_id`` is a fresh uuid,
+    ``at`` is the wall-clock time the channel is created at, and ``recording``
+    is the sessions ``AppState.board_logs`` showed recording when the act was
+    made -- a fact of the shell the store has no other way to see.
+
+    **Only ``app.link_leads`` builds this**, and the store trusts its
+    ``recording``. The store cannot check it: whether a board is recorded is
+    ``AppState.board_logs``, which lives in the shell and which the pure
+    reducer cannot read. A second builder would have to state the same fact the
+    same way, or link a session whose board nobody writes.
+
+    The fact goes to the channel's own log from the shell, never from here
+    (``channels.outcomes``).
+    """
+
+    channel_id: ChannelId
+    name: str
+    members: frozenset[str]
+    charter: str
+    at: float
+    recording: frozenset[str]
+    # No node: an operator's act.
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelClosed:
+    """
+    The operator closed the channel ``channel_id``. Allowed whenever the store
+    holds it open, whether or not its members are running; a channel already
+    closed, or one the store does not hold, is left as it is. Nothing is
+    removed: the channel stays, closed at ``at`` (wall-clock, the shell's).
+    """
+
+    channel_id: ChannelId
+    at: float
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelsRestored:
+    """
+    The links the channel logs held that restore as they were, read once at
+    startup before any session can start (``channels.restore_all``). A link
+    withheld there -- its log short or stopped, or several live under one name
+    -- is not here, and so never enters the store. A channel the store already holds
+    under an id is left as the store has it. The shell's, with no node; every
+    time on these records is the log's.
+    """
+
+    channels: tuple[Channel, ...]
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSettled:
+    """
+    A session the pool has just taken is in the store with whatever board it
+    has: its log's ``BoardRestored`` has been applied, or it has none to
+    restore. The instant peer mail already waiting for it may wake it
+    (Decided 10, at resume), and not before: the root's announce is applied
+    ahead of its restore (``app._open_board_log``), so a wake decided at the
+    announce would be decided before the board was in the store.
+
+    Emitted by the shell straight behind the restore on the same queue, with
+    no await between, so it is applied after the restore and before anything
+    the session says -- or, for a session the pool holds behind a run still
+    ending under its id, straight behind its announce, which is after that
+    run's end (``app._launch``). A wake for this session left pending from an
+    earlier run is dropped first: whatever became of that wake, it did not
+    reach this run.
+    """
+
+    session_id: str
+    # No node: the shell's, as ``BoardRestored`` is.
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WakeChainReleased:
+    """
+    The operator let a link's held wakes go (``model.WakeChainHeld``): its
+    chain starts again from nothing, and each lead whose wake was held and has
+    a message on it that is not quiet is woken now. A link with nothing held
+    is left as it is.
+    """
+
+    link_id: ChannelId
+    # No node: an operator's act.
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PeerWakeSent:
+    """
+    The shell let go of a peer wake it held for ``session_id`` on
+    ``link_id``: sent it, or dropped it as having nothing to read or nobody
+    to read it (``app._send_wakes``). The session is no longer pending on
+    the link, so its next message wakes it again.
+
+    ``covered`` is the mail the sent line counted, by id, and empty for a
+    wake dropped unsent. A message filed between the send and this intent's
+    apply was coalesced into a wake that did not count it, so the store asks
+    a wake for any that is not quiet and not covered.
+
+    ``told`` is the same for the decisions raised on the link that the sent
+    line named (``model.PeerWakes.untold``): each is no longer owed a wake,
+    and one raised between the send and the apply is woken for again.
+    """
+
+    session_id: str
+    link_id: ChannelId
+    covered: frozenset[ConcernId] = frozenset()
+    told: frozenset[DecisionId] = frozenset()
+    # No node: the shell's, as ``SessionSettled`` is.
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionWakeSent:
+    """
+    The shell sent ``session_id`` a wake naming ``decisions`` as answered or
+    dismissed (``app._send_wakes``). The store marks each one raised on a
+    channel by the lead across it as told to this lead
+    (``model.PeerWakes.heard``), so a resume does not name it again.
+
+    Said only for a wake that went: one dropped because its session failed,
+    was closed or left the fleet before the shell sent it is said nothing of,
+    so its decisions stay untold and are named at the session's next
+    ``SessionSettled``.
+    """
+
+    session_id: str
+    decisions: frozenset[DecisionId]
+    # No node: the shell's, as ``PeerWakeSent`` is.
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PeerQuestionAged:
+    """
+    The shell's word that the question between leads ``concern_id`` has gone
+    unanswered for the age the operator set (``Settings.peer_answer_age_s``),
+    measured from when its lead was handed it (Decided 11). The shell holds a
+    one-shot timer per question (``app._age_questions``) and sends this when it
+    runs out, since the reducer reads no clock and nothing else is applied
+    while every session is idle.
+
+    The store raises a ``model.PeerQuestionUnanswered`` row for it if the
+    question is still owed an answer (``Snapshot.awaiting_answer``), and does
+    nothing otherwise: an answer that crossed this on its way is not undone.
+    """
+
+    concern_id: ConcernId
+    # No node: the shell's, as ``SessionSettled`` is.
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HeldMailDismissed:
+    """
+    The operator dismissed a ``model.PeerMailHeld`` row: the mail it counted,
+    ``concerns``, raises no row again in this run. The mail is kept: this
+    ends the row, and hands nothing over and deletes nothing. Mail not among
+    ``concerns`` raises a row of its own.
+    """
+
+    concerns: frozenset[ConcernId]
+    # No node: an operator's act.
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PeerQuestionDismissed:
+    """
+    The operator dismissed a ``model.PeerQuestionUnanswered`` row: the
+    question ``concern_id`` raises no row for the same reason again in this
+    run. ``running`` is the row's own (``PeerQuestionUnanswered.running``), so
+    a row raised for the lead's session not running is dismissed apart from
+    one raised for the age passing: dismissing the first does not hide the
+    second after a resume. Nothing is logged and the question is untouched:
+    it is still owed, and its lead still reads and answers it.
+    """
+
+    concern_id: ConcernId
+    running: bool
+    # No node: an operator's act.
+    node_id: NodeId | None = None
+
+
 Intent = (
     AgentSpawned
     | FailureAcknowledged
@@ -1168,6 +1484,8 @@ Intent = (
     | AgentRemoved
     | ConcernPosted
     | InboxRead
+    | PeerSent
+    | PeerInboxRead
     | ConcernEdited
     | ConcernWithdrawn
     | TaskAmended
@@ -1197,4 +1515,14 @@ Intent = (
     | SessionRecalled
     | SessionDetached
     | FailedSessionClosed
+    | ChannelLinked
+    | ChannelClosed
+    | ChannelsRestored
+    | SessionSettled
+    | WakeChainReleased
+    | PeerWakeSent
+    | DecisionWakeSent
+    | PeerQuestionAged
+    | HeldMailDismissed
+    | PeerQuestionDismissed
 )

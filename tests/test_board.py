@@ -40,10 +40,12 @@ from pptmstr.intents import (
 )
 from pptmstr.model import (
     AgentState,
+    Charter,
     ClaimRefusal,
     Concern,
     ConcernState,
     NodeId,
+    Provenance,
     Snapshot,
     Task,
     TaskState,
@@ -580,6 +582,7 @@ def concern(cid: str, *, sender: NodeId, recipient: NodeId, at: float = 1.0) -> 
         subject=f"about {cid}",
         body="...",
         posted_at=at,
+        channel=None,
     )
 
 
@@ -759,6 +762,7 @@ def test_a_stalled_task_shows_the_reason_somebody_bothered_to_record() -> None:
                 body="holding this until the store lands",
                 posted_at=1.0,
                 task_id="t1",
+                channel=None,
             ),
         )
     )
@@ -782,6 +786,7 @@ def test_a_concern_about_nothing_in_particular_lands_on_no_row() -> None:
                 subject="a question",
                 body="which model should I use",
                 posted_at=1.0,
+                channel=None,
             ),
         )
     )
@@ -878,6 +883,7 @@ def _about(
         body="holding this until the store lands",
         posted_at=at,
         task_id=tid,
+        channel=None,
     )
 
 
@@ -972,6 +978,7 @@ def test_the_rows_carry_each_authors_basis_and_derive_none() -> None:
                     posted_at=3.0,
                     task_id="t1",
                     basis=basis,
+                    channel=None,
                 ),
             )
         )
@@ -1048,6 +1055,7 @@ def _round(store: Store) -> None:
                     body="b",
                     posted_at=20.0 + n,
                     incident=incident,
+                    channel=None,
                 ),
             )
         )
@@ -1528,7 +1536,13 @@ def test_mail_waiting_for_an_earlier_runs_agent_in_this_window_is_undeliverable(
     store = _started_again()
     for at, (cid, recipient) in enumerate((("c-old", DEV_1), ("c-new", QA_1))):
         concern = Concern(
-            id=cid, sender=LEAD_1, recipient=recipient, subject="s", body="b", posted_at=20.0 + at
+            id=cid,
+            sender=LEAD_1,
+            recipient=recipient,
+            subject="s",
+            body="b",
+            posted_at=20.0 + at,
+            channel=None,
         )
         store.apply(ConcernPosted(LEAD_1, concern))
 
@@ -1831,7 +1845,13 @@ def _mail(store: Store, concern_id: str, to: NodeId) -> None:
         ConcernPosted(
             LEAD_1,
             Concern(
-                id=concern_id, sender=LEAD_1, recipient=to, subject="s", body="b", posted_at=1.0
+                id=concern_id,
+                sender=LEAD_1,
+                recipient=to,
+                subject="s",
+                body="b",
+                posted_at=1.0,
+                channel=None,
             ),
         )
     )
@@ -1936,6 +1956,45 @@ def test_a_team_session_taken_off_the_fleet_has_no_board() -> None:
 
     assert store.snapshot().off_fleet(S1)
     assert not has_board(store.snapshot(), S1)
+
+
+def test_a_message_between_leads_is_not_on_either_teams_board() -> None:
+    """
+    It is filed in its sender's log like a concern, and it is not mail inside
+    the team: not in the concern log, not a reason on a row, not counted.
+    """
+    store = Store()
+    team(store, S1)
+    team(store, S2)
+    declare(store, "t1", by=LEAD_1)
+    store.apply(ConcernPosted(DEV_1, _about("c-team", "t1", sender=DEV_1, recipient=LEAD_1)))
+    peer = dataclasses.replace(
+        _about("c-peer", "t1", sender=LEAD_1, recipient=LEAD_2), channel="brand", link="k1"
+    )
+    store.apply(ConcernPosted(LEAD_1, peer))
+    snap = store.snapshot()
+    assert "c-peer" in snap.concerns
+
+    for session in (S1, S2):
+        assert "c-peer" not in [c.id for c in board_concerns(snap, session)]
+    assert [c.id for c in board_concerns(snap, S1)] == ["c-team"]
+    assert board_tasks(snap, S1)[0].concerns == ("c-team",)
+
+
+def test_a_rows_provenance_is_the_tasks() -> None:
+    store = Store()
+    team(store, S1)
+    asked = Provenance("brand", "c-0123456789ab", Charter.YES)
+    store.apply(
+        TaskDeclared(
+            Task(id="t1", title="asked for", declared_at=0.0, provenance=asked), node_id=LEAD_1
+        )
+    )
+    declare(store, "t2", by=LEAD_1)
+
+    rows = {row.id: row for row in board_tasks(store.snapshot(), S1)}
+    assert rows["t1"].provenance == asked
+    assert rows["t2"].provenance is None
 
 
 # -- a gate on every writer --------------------------------------------------------------

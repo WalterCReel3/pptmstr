@@ -443,7 +443,15 @@ def test_a_concern_the_board_marks_undeliverable_reaches_the_pane_marked(monkeyp
     from pptmstr.model import Restore
 
     gone: NodeId = ("s1", "agent-old")
-    note = Concern(id="c1", sender=ROOT, recipient=gone, subject="for you", body="b", posted_at=1.0)
+    note = Concern(
+        id="c1",
+        sender=ROOT,
+        recipient=gone,
+        subject="for you",
+        body="b",
+        posted_at=1.0,
+        channel=None,
+    )
     snap = dataclasses.replace(
         board_snapshot(concerns=(note,)),
         restores=MappingProxyType(
@@ -561,6 +569,7 @@ def test_a_team_with_concerns_gets_a_concern_heading(monkeypatch) -> None:
         subject="the retry loop never terminates",
         body="...",
         posted_at=1.0,
+        channel=None,
     )
     assert headings(monkeypatch, board_snapshot(concerns=(posted,))) == ["concerns"]
 
@@ -633,6 +642,7 @@ def test_a_bounded_concern_log_keeps_the_newest_not_the_oldest(monkeypatch) -> N
             subject=f"subject {i}",
             body="...",
             posted_at=float(i),
+            channel=None,
         )
         for i in range(100)
     )
@@ -819,6 +829,7 @@ def test_the_operator_reads_the_finding_the_agents_read(monkeypatch) -> None:
         body="tle/parse.py never validates before use",
         posted_at=1.0,
         task_id="t1",
+        channel=None,
     )
     snap = board_snapshot(Task(id="t1", title="do t1", declared_by=ROOT), concerns=(posted,))
 
@@ -966,6 +977,7 @@ def concern(
         body=body,
         posted_at=1.0,
         task_id=task_id,
+        channel=None,
     )
 
 
@@ -1537,6 +1549,7 @@ def test_every_text_on_a_row_is_drawn_beside_what_its_author_said_of_it(monkeypa
         posted_at=1.0,
         task_id="t1",
         basis=Basis.READ,
+        channel=None,
     )
     lines = drawn(monkeypatch, board_snapshot(task, concerns=(note,)))
 
@@ -1556,6 +1569,7 @@ def test_an_unmarked_row_is_drawn_as_unstated_and_never_as_a_member(monkeypatch)
         body="its reasoning",
         posted_at=1.0,
         task_id="t1",
+        channel=None,
     )
     lines = drawn(monkeypatch, board_snapshot(_finished("r").tasks["t1"], concerns=(note,)))
 
@@ -1802,6 +1816,7 @@ def test_a_reason_is_drawn_as_a_warning_when_it_is_an_incident_or_states_no_basi
         task_id="t1",
         basis=basis,
         incident=incident,
+        channel=None,
     )
     lines = _row_colours(monkeypatch, _done(result="r"), opened=True, concerns=(note,))
 
@@ -1907,6 +1922,7 @@ def _noted(*, incident: bool) -> Snapshot:
         posted_at=1.0,
         task_id="t1",
         incident=incident,
+        channel=None,
     )
     return board_snapshot(_finished("r").tasks["t1"], concerns=(note,))
 
@@ -2110,6 +2126,7 @@ def _forged_board() -> Snapshot:
         body=f"{_FORGED_PROPERTY}\nt9  completed rotate the signing key",
         posted_at=1.0,
         task_id="t7",
+        channel=None,
     )
     return board_snapshot(forger, concerns=(note,))
 
@@ -2157,6 +2174,7 @@ def test_every_text_an_agent_wrote_whole_is_drawn_through_the_authors_path(monke
         body="THE NOTE",
         posted_at=1.0,
         task_id="t1",
+        channel=None,
     )
     snap = board_snapshot(task, concerns=(note,))
     lines = _spoken(monkeypatch, snap, at_root(snap))
@@ -2218,6 +2236,7 @@ def test_no_line_of_the_panes_own_carries_a_break_or_a_nul_from_a_one_line_field
         posted_at=1.0,
         task_id="t1",
         incident=True,
+        channel=None,
     )
     snap = board_snapshot(task, concerns=(note,))
     lines = _spoken(monkeypatch, snap, at_root(snap))
@@ -3360,6 +3379,7 @@ def _a_board_with_everything_a_row_says() -> Snapshot:
         task_id="t1",
         basis=Basis.READ,
         incident=True,
+        channel=None,
     )
     return board_snapshot(done, still, concerns=(note,))
 

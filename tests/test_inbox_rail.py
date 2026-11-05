@@ -2076,3 +2076,57 @@ def test_the_expanded_approval_draws_those_rows_and_no_other_form_of_the_command
     assert fake.begin_child.call_args.args[1].y == 240.0
     drawn = [str(call.args[1]) for call in fake.text_colored.call_args_list]
     assert "    echo 59" in drawn, "a line past the cap was not drawn for the child to scroll to"
+
+
+# -- a decision on a channel says so on its row --------------------------------
+
+
+def _channel_row(closed: bool = False) -> tuple[Snapshot, Any]:
+    from pptmstr.intents import ChannelClosed
+    from pptmstr.model import DecisionOwed
+    from tests.test_decision_view import linked_leads
+
+    store = linked_leads()
+    if closed:
+        store.apply(ChannelClosed("k1", 6.0), now=6.0)
+    snap = store.snapshot()
+    return snap, next(o for o in snap.needs_you if isinstance(o, DecisionOwed))
+
+
+@pytest.mark.parametrize(
+    ("closed", "marker"),
+    [
+        (False, "#brand · both leads read the answer"),
+        (True, "#brand · link not live: only its asker's side reads the answer"),
+    ],
+)
+def test_a_channel_decisions_row_names_the_channel_ahead_of_its_summary(
+    monkeypatch: pytest.MonkeyPatch, closed: bool, marker: str
+) -> None:
+    snap, row = _channel_row(closed)
+
+    drawn = _row_text(monkeypatch, snap, row)
+
+    assert inbox.channel_marker(snap, row) == marker
+    assert drawn.index(marker) < drawn.index(row.summary)
+
+
+def test_a_decision_with_no_channel_draws_the_row_it_drew_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pptmstr.model import DecisionOwed
+    from tests.test_decision_view import _snap_with_one
+
+    _, snap = _snap_with_one()
+    row = next(o for o in snap.needs_you if isinstance(o, DecisionOwed))
+
+    drawn = _row_text(monkeypatch, snap, row)
+
+    assert inbox.channel_marker(snap, row) is None
+    assert not any("#" in line or "leads" in line for line in drawn)
+    assert drawn[-1] == row.summary
+
+
+def test_only_a_decision_carries_a_channel_marker() -> None:
+    write = approval(ROOT)
+    assert inbox.channel_marker(snapshot(record(ROOT), needs_you=(write,)), write) is None

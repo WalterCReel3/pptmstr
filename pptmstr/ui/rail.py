@@ -44,13 +44,16 @@ from typing import assert_never
 
 from imgui_bundle import imgui
 
+from .. import drawable
 from ..model import (
     AgentRecord,
     AgentState,
+    Channel,
     EndedHow,
     NodeId,
     Obligation,
     ObligationKind,
+    PeerIndex,
     Recalled,
     Snapshot,
     TranscriptPresence,
@@ -218,16 +221,30 @@ def _stopped_on(owed: Sequence[Obligation]) -> list[Obligation]:
     """
     The obligations that mean their node has stopped until the operator acts.
 
-    Every kind but a decision and a command. An approval, a question and a
-    failure are read off a node that is parked or dead; a decision and a command
-    are records their asker filed, and the asker was told to carry on and may be
-    working while either waits.
+    Every kind but a decision, a command, a held wake and the two about two
+    teams. An approval, a question and a failure are read off a node that is
+    parked or dead; a decision and a command are records their asker filed, and
+    the asker was told to carry on and may be working while either waits. A
+    held wake is a wake its lead was not given, and an unanswered peer question
+    or held peer mail is news about two teams: none says what that lead is
+    doing.
     """
     return [o for o in owed if o.kind not in _ASKER_CARRIES_ON]
 
 
-# The kinds that are a record an agent filed and not a state its node is in.
-_ASKER_CARRIES_ON = frozenset({ObligationKind.DECISION, ObligationKind.COMMAND})
+# The kinds that are not a state their node is in: a record an agent filed, a
+# wake pptmstr held back from a lead that may be busy with anything else, or
+# what the operator is told about two teams -- a question left unanswered past
+# its age, mail held on a link that is not live.
+_ASKER_CARRIES_ON = frozenset(
+    {
+        ObligationKind.DECISION,
+        ObligationKind.COMMAND,
+        ObligationKind.WAKE_CHAIN,
+        ObligationKind.PEER_QUESTION,
+        ObligationKind.PEER_HELD,
+    }
+)
 
 
 def _density(rec: AgentRecord, owed: list[Obligation], *, unread: int = 0) -> str:
@@ -245,15 +262,62 @@ def _density(rec: AgentRecord, owed: list[Obligation], *, unread: int = 0) -> st
     the case the mark is for.
     """
     if rec.recalled is not None:
-        # Nothing is owed for a recalled record -- one that comes to owe stops
-        # being recalled in the store -- and the taller classes draw a spend, a
-        # context ring and an elapsed time, none of which this process observed.
+        # The taller classes draw a spend, a context ring and an elapsed time,
+        # none of which this process observed. A recalled record can still owe:
+        # a question to its lead or mail held for it (``PeerQuestionUnanswered``,
+        # ``PeerMailHeld``) leaves it recalled, since clearing that would make
+        # the store take it for a session a wake can reach. Its badges are drawn
+        # on the one line (``_card``), beside the file's account.
         return "ended"
     if _stopped_on(owed):
         return "blocked"
     if rec.state in (AgentState.DONE, AgentState.CANCELLED) and not owed and not unread:
         return "ended"
     return "active"
+
+
+def channel_lines(
+    snap: Snapshot, rec: AgentRecord, index: PeerIndex | None = None
+) -> tuple[str, ...]:
+    """
+    One line per live link a root's session is in, by name: ``#name ↔ peer``,
+    how many peer messages on it wait for this lead, when any do, and whose
+    move it is on the link (``session_menu.whose_move_text``). Nothing for a sub-agent, and
+    nothing for a link that is closed: a closed link is one the operator took
+    out of view.
+
+    The name is the operator's and passed the plain-name rule, and it is still
+    drawn through ``drawable.text``, as every text that reaches a draw call
+    from the store may be. The peer is named as its card is
+    (``session_menu.peer_label``).
+
+    ``index`` is the frame's ``Snapshot.peer_index``, built here when none is
+    given: a rail drawing every card builds it once and passes it to each.
+    """
+    return tuple(line for _, line in channel_rows(snap, rec, index))
+
+
+def channel_rows(
+    snap: Snapshot, rec: AgentRecord, index: PeerIndex | None = None
+) -> tuple[tuple[Channel, str], ...]:
+    """
+    ``channel_lines``, each with the link it is the line of: what a click on
+    that line points the cursor at (``FocusState.to_link``).
+    """
+    if rec.node_id[1] is not None:
+        return ()
+    me = rec.node_id[0]
+    peers_of = snap.peer_index() if index is None else index
+    out: list[tuple[Channel, str]] = []
+    for link in session_menu.live_links(snap, me):
+        peers = ", ".join(session_menu.peer_label(snap, p) for p in sorted(link.members - {me}))
+        line = f"#{drawable.text(link.name)} ↔ {peers}"
+        waiting = peers_of.waiting.get((rec.node_id, link.id), 0)
+        if waiting:
+            line += f" · {waiting} unread"
+        move = snap.whose_move(link, peers_of)
+        out.append((link, f"{line} · {session_menu.whose_move_text(snap, move, me)}"))
+    return tuple(out)
 
 
 def _ago(seconds: float) -> str:
@@ -343,13 +407,17 @@ def _health(rec: AgentRecord) -> None:
 # The order a card's badges are drawn in, left to right: what stops work first --
 # a parked call, then a dead session, then a turn that ended, then a decision its
 # asker may be working past, then a command, which stops nothing either and is
-# said again in words under the title (``commands_mark``).
+# said again in words under the title (``commands_mark``), then a held wake,
+# then the two that tell the operator about two teams.
 _BADGE_ORDER = (
     ObligationKind.APPROVAL,
     ObligationKind.FAILURE,
     ObligationKind.QUESTION,
     ObligationKind.DECISION,
     ObligationKind.COMMAND,
+    ObligationKind.WAKE_CHAIN,
+    ObligationKind.PEER_QUESTION,
+    ObligationKind.PEER_HELD,
 )
 
 
@@ -369,6 +437,36 @@ def _badges(owed: Sequence[Obligation]) -> tuple[tuple[ObligationKind, int], ...
 # Between two badges on one card, and between the last badge and the title.
 _BADGE_GAP = 3.0
 _BADGE_PAD = 5.0
+
+
+def _badge_row(
+    owed: Sequence[Obligation],
+) -> tuple[list[tuple[ObligationKind, str]], list[float], float]:
+    """A card's badges, each one's width, and the row's width with its gaps."""
+    badges = [(kind, _badge_text(kind, count)) for kind, count in _badges(owed)]
+    widths = [imgui.calc_text_size(text).x + _BADGE_PAD * 2 for _, text in badges]
+    return badges, widths, sum(widths) + _BADGE_GAP * max(len(badges) - 1, 0)
+
+
+def _draw_badges(
+    draw: imgui.ImDrawList,
+    badges: Sequence[tuple[ObligationKind, str]],
+    widths: Sequence[float],
+    x: float,
+    y: float,
+    line_h: float,
+) -> None:
+    """``badges`` left to right from ``x`` on the card line at ``y``."""
+    for (kind, text), badge_w in zip(badges, widths, strict=True):
+        draw.add_rect_filled(
+            imgui.ImVec2(x, y - 1.0),
+            imgui.ImVec2(x + badge_w, y + line_h - 3.0),
+            P.obligation(kind).u32,
+            2.0,
+        )
+        imgui.set_cursor_screen_pos(imgui.ImVec2(x + _BADGE_PAD, y))
+        imgui.text_colored(P.bg.vec4, text)
+        x += badge_w + _BADGE_GAP
 
 
 def _badge_text(kind: ObligationKind, count: int) -> str:
@@ -562,6 +660,9 @@ class _Box:
     outer_x: float
     right: float
     height: float
+    # The card's channel lines with their links (``channel_rows``), drawn
+    # last, at its foot.
+    links: tuple[tuple[Channel, str], ...] = ()
 
 
 def draw(
@@ -574,6 +675,7 @@ def draw(
     hide_ended: bool = False,
     now_wall: float | None = None,
     new_task: Callable[[], None] | None = None,
+    link_opened: Callable[[], None] | None = None,
 ) -> None:
     """
     Build the rail from one snapshot. Never reads the store.
@@ -592,6 +694,10 @@ def draw(
     (``fleet_view.fold``): no card, no count, no mention. ``now_wall`` is
     ``time.time()`` as the frame read it, and is what a closed card's age is measured
     against; ``now`` is monotonic and cannot be.
+
+    ``link_opened`` is called after a click on a card's channel line has pointed
+    the cursor at that link, so the shell can bring the pane that draws its
+    thread in front. None does nothing more than the pointing.
     """
     # Before the empty-rail return, not after: an empty snapshot is the one case
     # where every id in the set is stale.
@@ -610,6 +716,8 @@ def draw(
         return
 
     owed_by_session = _by_session(snap)
+    # Every card's channel lines read this one, built for this frame alone.
+    peers = snap.peer_index()
     cursor = focus.node(snap)
     state.arm_scroll(cursor)
 
@@ -627,6 +735,8 @@ def draw(
                 menu=menu,
                 hide_ended=hide_ended,
                 now_wall=now_wall,
+                link_opened=link_opened,
+                peers=peers,
             )
     if new_task is not None:
         imgui.spacing()
@@ -709,6 +819,8 @@ def _group(
     menu: session_menu.Wiring | None = None,
     hide_ended: bool = False,
     now_wall: float | None = None,
+    link_opened: Callable[[], None] | None = None,
+    peers: PeerIndex | None = None,
 ) -> None:
     """
     One session: the root's card, and -- when open -- a card per sub-agent under it.
@@ -786,6 +898,8 @@ def _group(
         indent=0.0,
         menu=menu,
         now_wall=now_wall,
+        link_opened=link_opened,
+        peers=peers,
     )
     if not expanded:
         return
@@ -806,6 +920,8 @@ def _group(
             scope=Scope.AGENT,
             indent=_GROUP_INDENT,
             menu=menu,
+            link_opened=link_opened,
+            peers=peers,
         )
     _bracket(left, root_bottom, bottom)
 
@@ -858,6 +974,8 @@ def _card(
     indent: float,
     menu: session_menu.Wiring | None = None,
     now_wall: float | None = None,
+    link_opened: Callable[[], None] | None = None,
+    peers: PeerIndex | None = None,
 ) -> float:
     """
     One agent, root or sub-agent, drawn the same way. Returns its bottom edge.
@@ -881,10 +999,13 @@ def _card(
     # speaks for its sub-agents' unread answers as it does for their parked calls.
     unread = decision_view.unread_answers(snap, lambda asker: covers(scope, rec.node_id, asker))
     density = _density(rec, owed, unread=unread)
+    # Under the density's own lines, one each: a card's height is still fixed by
+    # what it holds, and a link is something it holds.
+    links = channel_rows(snap, rec, peers)
 
     draw = imgui.get_window_draw_list()
     line_h = imgui.get_text_line_height_with_spacing()
-    height = line_h * _LINES[density] + _PAD * 2
+    height = line_h * (_LINES[density] + len(links)) + _PAD * 2
 
     outer = imgui.get_cursor_screen_pos()
     width = max(imgui.get_content_region_avail().x - indent, 40.0)
@@ -906,7 +1027,7 @@ def _card(
 
     lo = imgui.ImVec2(origin.x, origin.y)
     hi = imgui.ImVec2(origin.x + width, origin.y + height)
-    box = _Box(origin=origin, outer_x=outer.x, right=hi.x, height=height)
+    box = _Box(origin=origin, outer_x=outer.x, right=hi.x, height=height, links=links)
 
     # Focus is an outline and an edge bar, never a fill.
     #
@@ -966,16 +1087,19 @@ def _card(
             _small()
             fact_w = imgui.calc_text_size(fact).x
             _normal()
+            badges, widths, badges_w = _badge_row(owed)
+            owes_w = badges_w + _BADGE_GAP if badges else 0.0
             title = session_menu.card_title(rec)
             imgui.text_colored(
                 P.text_dim.vec4,
-                ellipsis(title, width - 54.0 - _PAD - fact_w - _subs_width(signal)),
+                ellipsis(title, width - 54.0 - _PAD - fact_w - owes_w - _subs_width(signal)),
             )
             marker = _draw_subs(signal)
             _small()
-            imgui.set_cursor_screen_pos(imgui.ImVec2(hi.x - _PAD - fact_w, y + 2.0))
+            imgui.set_cursor_screen_pos(imgui.ImVec2(hi.x - _PAD - owes_w - fact_w, y + 2.0))
             imgui.text_colored((P.warn if warns else P.text_dim).vec4, fact)
             _normal()
+            _draw_badges(draw, badges, widths, hi.x - _PAD - badges_w, y, line_h)
         else:
             # One line, and no model on it: the two slots an ended card has left are
             # what it became and what it cost. A model that no longer runs anything is
@@ -1015,11 +1139,10 @@ def _card(
             menu=menu,
             asked=asked,
             focused=focused,
+            link_opened=link_opened,
         )
 
-    badges = [(kind, _badge_text(kind, count)) for kind, count in _badges(owed)]
-    widths = [imgui.calc_text_size(text).x + _BADGE_PAD * 2 for _, text in badges]
-    badges_w = sum(widths) + _BADGE_GAP * max(len(badges) - 1, 0)
+    badges, widths, badges_w = _badge_row(owed)
     # What one badge took, as a floor: a card with one kind is laid out as it was.
     title_room = width - (_PAD * 2 + 30.0) - (max(52.0, badges_w + 16.0) if owed else 42.0)
     if working:
@@ -1027,17 +1150,7 @@ def _card(
     imgui.text_colored(P.text_strong.vec4, ellipsis(session_menu.card_title(rec), title_room))
 
     if badges:
-        bx = hi.x - _PAD - badges_w
-        for (kind, text), badge_w in zip(badges, widths, strict=True):
-            draw.add_rect_filled(
-                imgui.ImVec2(bx, y - 1.0),
-                imgui.ImVec2(bx + badge_w, y + line_h - 3.0),
-                P.obligation(kind).u32,
-                2.0,
-            )
-            imgui.set_cursor_screen_pos(imgui.ImVec2(bx + _BADGE_PAD, y))
-            imgui.text_colored(P.bg.vec4, text)
-            bx += badge_w + _BADGE_GAP
+        _draw_badges(draw, badges, widths, hi.x - _PAD - badges_w, y, line_h)
     else:
         elapsed = format_elapsed(
             (rec.ended_at if rec.ended_at is not None else now) - rec.started_at
@@ -1094,6 +1207,7 @@ def _card(
             menu=menu,
             asked=asked,
             focused=focused,
+            link_opened=link_opened,
         )
 
     y += line_h
@@ -1133,6 +1247,7 @@ def _card(
         menu=menu,
         asked=asked,
         focused=focused,
+        link_opened=link_opened,
     )
 
 
@@ -1150,28 +1265,38 @@ def _tail(
     menu: session_menu.Wiring | None = None,
     asked: bool = False,
     focused: bool = False,
+    link_opened: Callable[[], None] | None = None,
 ) -> float:
     """
     What every density class does once it has drawn its own reading: resolve the
     frame's click, draw the card's menu if it is open, close the card out, and
     report where it ended.
 
-    Two targets share this card's one ``invisible_button`` -- the disclosure and
-    everything else -- so the click is resolved in one place and they are mutually
-    exclusive. A disclosure that also selected is one gesture doing two things, and
-    the one it does second is the one nobody asked for.
+    Three targets share this card's one ``invisible_button`` -- the disclosure,
+    each channel line, and everything else -- so the click is resolved in one
+    place and they are mutually exclusive. A disclosure that also selected is one
+    gesture doing two things, and the one it does second is the one nobody asked
+    for.
 
-    Only the disclosure needs this. A sub-agent's card is a sibling in the group with
-    a button of its own, so ImGui routes its clicks and nothing here has to know it
-    exists.
+    Only the disclosure and the channel lines need this. A sub-agent's card is a
+    sibling in the group with a button of its own, so ImGui routes its clicks and
+    nothing here has to know it exists.
     """
+    _draw_links(box)
     on_marker = hovered and _on_marker(marker)
-    if on_marker:
+    on_link = _link_at(box, imgui.get_mouse_pos().y) if hovered and not on_marker else None
+    if on_marker or on_link is not None:
         imgui.set_mouse_cursor(imgui.MouseCursor_.hand)
 
     if clicked:
         if on_marker:
             state.toggle(rec.node_id[0])
+        elif on_link is not None:
+            # A channel line is the link's and not the card's: its thread, in
+            # DETAIL, read from this card.
+            focus.to_link(on_link, rec.node_id)
+            if link_opened is not None:
+                link_opened()
         else:
             # The same scope the highlight was derived from, so the card that
             # lights and the card that was clicked are the same card by construction.
@@ -1195,6 +1320,43 @@ def _tail(
     _end(box.outer_x, box.origin.y, box.height)
     imgui.pop_id()
     return box.origin.y + box.height
+
+
+def _draw_links(box: _Box) -> None:
+    """
+    The card's channel lines, at its foot in the rows its height was given for
+    them, in the small face and dim: a link is a standing fact about the card
+    and not something it owes.
+    """
+    if not box.links:
+        return
+    line_h = imgui.get_text_line_height_with_spacing()
+    x = box.origin.x + _PAD + 4.0
+    y = _links_top(box, line_h)
+    room = max(box.right - _PAD - x, 20.0)
+    _small()
+    for _, line in box.links:
+        imgui.set_cursor_screen_pos(imgui.ImVec2(x, y + 2.0))
+        imgui.text_colored(P.text_dim.vec4, ellipsis(line, room))
+        y += line_h
+    _normal()
+
+
+def _links_top(box: _Box, line_h: float) -> float:
+    """Where the card's first channel line is drawn (``_draw_links``)."""
+    return box.origin.y + box.height - _PAD - line_h * len(box.links)
+
+
+def _link_at(box: _Box, y: float) -> Channel | None:
+    """
+    The link whose channel line is at height ``y`` on the card, the rows
+    ``_draw_links`` drew them in, and None above the first and below the last.
+    """
+    if not box.links:
+        return None
+    line_h = imgui.get_text_line_height_with_spacing()
+    row = int((y - _links_top(box, line_h)) // line_h)
+    return box.links[row][0] if 0 <= row < len(box.links) else None
 
 
 def _end(outer_x: float, top: float, height: float) -> None:

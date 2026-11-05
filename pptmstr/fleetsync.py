@@ -108,6 +108,9 @@ from .intents import (
     ApprovalResolved,
     BoardRead,
     BoardRestored,
+    ChannelClosed,
+    ChannelLinked,
+    ChannelsRestored,
     CommandApproved,
     CommandEnded,
     CommandRefused,
@@ -125,14 +128,22 @@ from .intents import (
     DecisionDismissed,
     DecisionRaised,
     DecisionsRead,
+    DecisionWakeSent,
     DecisionWithdrawn,
     DigestRead,
     FailedSessionClosed,
     FailureAcknowledged,
+    HeldMailDismissed,
     InboxRead,
     Intent,
+    PeerInboxRead,
+    PeerQuestionAged,
+    PeerQuestionDismissed,
+    PeerSent,
+    PeerWakeSent,
     SessionDetached,
     SessionRecalled,
+    SessionSettled,
     StateChanged,
     SubagentDelivered,
     SubagentProgress,
@@ -146,6 +157,7 @@ from .intents import (
     TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
+    WakeChainReleased,
 )
 from .model import (
     AgentRecord,
@@ -265,6 +277,8 @@ def changes(
             | AgentRemoved()
             | ConcernPosted()
             | InboxRead()
+            | PeerSent()
+            | PeerInboxRead()
             | ConcernEdited()
             | ConcernWithdrawn()
             | TaskAmended()
@@ -291,6 +305,16 @@ def changes(
             | CommandEnded()
             | CommandsRead()
             | CommandsRestored()
+            | ChannelLinked()
+            | ChannelClosed()
+            | ChannelsRestored()
+            | SessionSettled()
+            | WakeChainReleased()
+            | PeerWakeSent()
+            | DecisionWakeSent()
+            | PeerQuestionAged()
+            | HeldMailDismissed()
+            | PeerQuestionDismissed()
         ):
             # Nothing about a run. A removal, and a decision, an approval or a
             # command that brings a session back, are read off the snapshots

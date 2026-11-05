@@ -523,6 +523,7 @@ def test_an_incident_subject_spelling_the_panes_words_is_drawn_as_an_agents(monk
                 body="b",
                 posted_at=22.0,
                 incident=True,
+                channel=None,
             ),
         )
     )
@@ -588,6 +589,7 @@ def test_no_line_of_the_pane_carries_a_break_or_a_nul_from_a_one_line_field(
                 posted_at=4.0,
                 task_id="t1",
                 incident=True,
+                channel=None,
             ),
         )
     )

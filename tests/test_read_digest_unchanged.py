@@ -79,6 +79,7 @@ def board_scenario() -> tuple[Snapshot, NodeId]:
                 task_id="t14",
                 basis=Basis.RUN,
                 incident=True,
+                channel=None,
             ),
         )
     )

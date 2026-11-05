@@ -46,7 +46,7 @@ from typing import assert_never
 from imgui_bundle import imgui
 
 from ..approval import Policy
-from ..model import AgentRecord, NodeId
+from ..model import AgentRecord, ChannelId, NodeId
 from ..settings import Settings
 from ..theme import REQUIRED_THEMES, THEMES
 from . import launcher, session_menu, settings_dialog, widgets
@@ -101,12 +101,15 @@ class ShowStatusBar:
 @dataclass(frozen=True, slots=True)
 class CardChoice:
     """
-    One of the focused card's own items, as ``session_menu.choose`` takes it.
+    One of the focused card's own items, as ``session_menu.choose`` takes it:
+    ``rung`` names which of an action offered once per rung, ``channel`` which of
+    one offered once per link.
     """
 
     node: NodeId
     action: session_menu.Action
     rung: Policy | None = None
+    channel: ChannelId | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,7 +362,7 @@ def _card(card: Card | None) -> list[Row]:
                 out.append(
                     Item(
                         entry.label,
-                        CardChoice(node, entry.action, entry.rung),
+                        CardChoice(node, entry.action, entry.rung, entry.channel),
                         refused=(
                             card.gone
                             if card.gone is not None

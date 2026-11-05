@@ -244,6 +244,8 @@ def test_a_live_roots_card_offers_every_control_and_says_why_one_cannot_act(
         Item(Action.DETAILS, "Details"),
         Item(Action.HEALTH, "Health"),
         Rule(),
+        Item(Action.LINK, session_menu.LINK_LABEL, session_menu.NOT_WIRED),
+        Rule(),
         Item(Action.CLOSE, "Close…" if turn else "Close", close),
     )
 
@@ -293,6 +295,9 @@ def test_an_ended_roots_card_offers_resume_fork_and_details_and_a_failed_one_its
             # Nobody said whether a process is attached, and Close is two
             # different acts by the answer.
             Item(Action.CLOSE, "Close", session_menu.RUN_NOT_KNOWN),
+            # The store links a FAILED lead, so its own card offers to.
+            Rule(),
+            Item(Action.LINK, session_menu.LINK_LABEL, why),
         ]
     want += [Rule(), Item(Action.REMOVE, "Remove from fleet", why)]
     offered = session_menu.entries(record(ROOT, state, acknowledged=acknowledged), policy)
@@ -1207,6 +1212,7 @@ def test_a_right_click_on_a_card_opens_that_cards_menu(fleet: _Fleet) -> None:
         f"autonomous  restart…  -  {session_menu.NOT_WIRED.words}",
         "Details",
         "Health",
+        f"{session_menu.LINK_LABEL}  -  {session_menu.NOT_WIRED.words}",
         "Close…",
     ]
     assert fleet.called() == {}, "opening a menu does nothing"
@@ -1318,6 +1324,7 @@ def test_an_ended_cards_menu_resumes_through_the_action_and_ends_nothing(
             "Retry in a new session",
             "Dismiss",
             f"Close  -  {session_menu.RUN_NOT_KNOWN.words}",
+            f"{session_menu.LINK_LABEL}  -  {why}",
             f"Remove from fleet  -  {why}",
         ]
         fleet.click(fleet.items["Resume…"])
@@ -2708,3 +2715,258 @@ def test_detail_heads_a_root_session_with_the_cards_title() -> None:
     snap = store.snapshot()
     (owed,) = [each for each in snap.needs_you if each.node == ROOT]
     assert inbox.identity(snap, owed)[0] == session_menu.card_title(snap.nodes[ROOT])
+
+
+# -- linking leads -------------------------------------------------------------------
+
+_LINKING = frozenset({Action.LINK, Action.CLOSE_CHANNEL})
+
+
+def _linked(store: Store, name: str = "brand", channel_id: str = "k1") -> Store:
+    """``store`` with ``ROOT`` and ``OTHER`` linked under ``name``."""
+    from pptmstr.intents import ChannelLinked
+
+    pair = frozenset({ROOT[0], OTHER[0]})
+    store.apply(ChannelLinked(channel_id, name, pair, "", 5.0, pair), now=5.0)
+    assert store.snapshot().channels[channel_id].live
+    return store
+
+
+@pytest.mark.parametrize(
+    ("other", "recording", "wired", "told", "refused"),
+    [
+        (AgentState.THINKING, frozenset({"s1", "s2"}), _LINKING, True, None),
+        (AgentState.AWAITING_INPUT, frozenset({"s1", "s2"}), _LINKING, True, None),
+        # A failed lead can still answer, and is still linkable.
+        (AgentState.FAILED, frozenset({"s1", "s2"}), _LINKING, True, None),
+        (AgentState.DONE, frozenset({"s1", "s2"}), _LINKING, True, session_menu.NO_PEER),
+        (AgentState.THINKING, frozenset({"s1"}), _LINKING, True, session_menu.NO_PEER),
+        (AgentState.THINKING, frozenset({"s2"}), _LINKING, True, session_menu.LINK_NOT_RECORDED),
+        (AgentState.THINKING, None, _LINKING, True, session_menu.RECORDING_NOT_KNOWN),
+        (AgentState.THINKING, frozenset({"s1", "s2"}), _LINKING, False, None),
+        (AgentState.THINKING, frozenset({"s1", "s2"}), frozenset(), True, session_menu.NOT_WIRED),
+    ],
+)
+def test_link_leads_is_offered_on_a_live_root_and_greyed_with_why_it_cannot_link(
+    other: AgentState,
+    recording: frozenset[str] | None,
+    wired: frozenset[Action],
+    told: bool,
+    refused: str | None,
+) -> None:
+    """
+    Enabled only where the form would have a lead to offer: this lead and
+    another running one are both recorded. ``told`` False is a menu given no
+    snapshot, which says so rather than guessing.
+    """
+    store = _store()
+    if other.is_terminal:
+        store.apply(AgentFinished(OTHER, other, 3.0), now=3.0)
+    elif other is not AgentState.THINKING:
+        store.apply(StateChanged(OTHER, other), now=3.0)
+    snap = store.snapshot()
+    facts = Facts(snap=snap if told else None, wired=wired, recording=recording)
+    item = session_menu.find(session_menu.entries(snap.nodes[ROOT], None, facts), Action.LINK)
+
+    assert item is not None and item.label == session_menu.LINK_LABEL
+    expected = refused if told else session_menu.STORE_NOT_ASKED
+    if not told and wired != _LINKING:
+        expected = session_menu.NOT_WIRED
+    assert item.refused == expected
+    if expected is not None:
+        assert item.text.endswith(session_menu.few_words(expected))
+
+
+@pytest.mark.parametrize("state", [s for s in ENDED if s.is_final])
+def test_a_finished_roots_card_and_a_sub_agents_offer_no_link(state: AgentState) -> None:
+    store = _store(state)
+    snap = store.snapshot()
+    facts = Facts(snap=snap, wired=_LINKING, recording=frozenset({"s1", "s2"}))
+    assert (
+        session_menu.find(session_menu.entries(snap.nodes[ROOT], None, facts), Action.LINK) is None
+    )
+    assert session_menu.entries(snap.nodes[BUILDER], None, facts) == (
+        Item(Action.DETAILS, "Details"),
+    )
+
+
+def test_choosing_link_leads_opens_the_form_and_links_nothing() -> None:
+    snap = _store().snapshot()
+    actions = dataclasses.replace(_actions(), link=MagicMock(), close_channel=MagicMock())
+    facts = Facts(snap=snap, recording=frozenset({"s1", "s2"}))
+    rec = snap.nodes[ROOT]
+
+    session_menu.choose(Action.LINK, rec, None, session_menu.MenuState(), actions, facts=facts)
+
+    assert actions.link.call_args_list == [((rec,),)]  # type: ignore[union-attr]
+    assert not actions.close_channel.called  # type: ignore[union-attr]
+    assert _called(actions) == {}
+
+
+def test_a_refused_link_leads_does_nothing_when_chosen() -> None:
+    snap = _store().snapshot()
+    actions = dataclasses.replace(_actions(), link=MagicMock())
+    facts = Facts(snap=snap, recording=frozenset({"s1"}))
+    session_menu.choose(
+        Action.LINK, snap.nodes[ROOT], None, session_menu.MenuState(), actions, facts=facts
+    )
+    assert not actions.link.called  # type: ignore[union-attr]
+
+
+def test_each_live_link_a_lead_is_in_gets_a_close_and_a_closed_one_none() -> None:
+    from pptmstr.intents import ChannelClosed
+
+    store = _linked(_linked(_store()), "ops", "k2")
+    store.apply(ChannelClosed("k2", 6.0), now=6.0)
+    _linked(store, "zeta", "k3")
+    snap = store.snapshot()
+    facts = Facts(snap=snap, wired=_LINKING, recording=frozenset({"s1", "s2"}))
+
+    for node in (ROOT, OTHER):
+        closes = [
+            e
+            for e in session_menu.entries(snap.nodes[node], None, facts)
+            if isinstance(e, Item) and e.action is Action.CLOSE_CHANNEL
+        ]
+        assert [(e.label, e.channel, e.refused) for e in closes] == [
+            ("Close channel #brand", "k1", None),
+            ("Close channel #zeta", "k3", None),
+        ]
+        assert len({e.key for e in closes}) == 2
+
+
+def test_close_channel_is_offered_on_an_ended_member_and_closes_that_link_only() -> None:
+    """
+    A link is closed whenever it is visible, whatever its members are doing;
+    the item chosen names its own link, not the first one.
+    """
+    store = _linked(_linked(_store()), "zeta", "k3")
+    store.apply(AgentFinished(ROOT, AgentState.DONE, 7.0), now=7.0)
+    snap = store.snapshot()
+    assert session_menu.kind_of(snap.nodes[ROOT]) is Kind.ENDED_ROOT
+    actions = dataclasses.replace(_actions(), close_channel=MagicMock(), link=MagicMock())
+    facts = Facts(snap=snap, recording=frozenset({"s1", "s2"}))
+
+    session_menu.choose(
+        Action.CLOSE_CHANNEL,
+        snap.nodes[ROOT],
+        None,
+        session_menu.MenuState(),
+        actions,
+        channel="k3",
+        facts=facts,
+    )
+
+    assert actions.close_channel.call_args_list == [(("k3",),)]  # type: ignore[union-attr]
+
+
+def test_a_close_channel_choice_that_names_no_link_closes_none() -> None:
+    """
+    ``find`` and ``choose`` without ``channel`` never fall back to the first
+    link's close: a choice that does not say which link closes nothing.
+    """
+    store = _linked(_linked(_store()), "zeta", "k3")
+    snap = store.snapshot()
+    actions = dataclasses.replace(_actions(), close_channel=MagicMock(), link=MagicMock())
+    facts = Facts(snap=snap, recording=frozenset({"s1", "s2"}))
+    offered = session_menu.entries(snap.nodes[ROOT], None, facts)
+
+    assert session_menu.find(offered, Action.CLOSE_CHANNEL) is None
+    found = session_menu.find(offered, Action.CLOSE_CHANNEL, channel="k1")
+    assert found is not None and found.channel == "k1"
+    session_menu.choose(
+        Action.CLOSE_CHANNEL, snap.nodes[ROOT], None, session_menu.MenuState(), actions, facts=facts
+    )
+    assert not actions.close_channel.called  # type: ignore[union-attr]
+
+
+def test_close_channel_unwired_is_greyed_and_chooses_nothing() -> None:
+    snap = _linked(_store()).snapshot()
+    facts = Facts(snap=snap, wired=frozenset(), recording=frozenset({"s1", "s2"}))
+    item = session_menu.find(
+        session_menu.entries(snap.nodes[ROOT], None, facts), Action.CLOSE_CHANNEL, channel="k1"
+    )
+    assert item is not None and item.refused == session_menu.NOT_WIRED
+    actions = _actions()
+    session_menu.choose(
+        Action.CLOSE_CHANNEL,
+        snap.nodes[ROOT],
+        None,
+        session_menu.MenuState(),
+        actions,
+        channel="k1",
+        facts=facts,
+    )
+    assert _called(actions) == {}
+
+
+def test_the_wiring_tells_the_menu_which_boards_are_recorded() -> None:
+    snap = _store().snapshot()
+    wiring = session_menu.Wiring(
+        state=session_menu.MenuState(),
+        actions=dataclasses.replace(_actions(), link=MagicMock()),
+        gate=lambda node: None,
+        snap=snap,
+        recording=frozenset({"s1", "s2"}),
+    )
+    facts = wiring.facts(ROOT)
+    assert facts.recording == frozenset({"s1", "s2"}) and Action.LINK in facts.wired
+    item = session_menu.find(session_menu.entries(snap.nodes[ROOT], None, facts), Action.LINK)
+    assert item is not None and item.enabled
+
+
+def test_a_failed_roots_card_offers_link_leads_as_the_store_would_link_it() -> None:
+    """
+    ``Snapshot.link_refusal`` takes a FAILED lead as running -- it can still
+    answer -- and the other lead's card offers it as a peer; its own card
+    offers the same link from its side.
+    """
+    snap = _store(AgentState.FAILED).snapshot()
+    rec = snap.nodes[ROOT]
+    assert session_menu.kind_of(rec) is Kind.ENDED_ROOT
+    recording = frozenset({"s1", "s2"})
+    facts = Facts(snap=snap, wired=_LINKING, recording=recording)
+
+    item = session_menu.find(session_menu.entries(rec, None, facts), Action.LINK)
+
+    assert item is not None and item.enabled
+    assert snap.link_refusal("k9", "brand", frozenset({"s1", "s2"}), recording) is None
+    other = snap.nodes[OTHER]
+    assert rec in session_menu.link_peers(snap, other.node_id[0], recording)
+
+
+def test_an_ended_root_whose_transcript_is_gone_still_closes_each_link_its_card_draws() -> None:
+    """
+    Its card draws every live link it is in (``rail.channel_lines``), so its
+    menu closes each of them: there may be no other card left to close one from.
+    """
+    store = _linked(_linked(_store()), "zeta", "k3")
+    snap = store.snapshot()
+    rec = dataclasses.replace(
+        snap.nodes[ROOT],
+        state=AgentState.DONE,
+        recalled=Recalled(transcript=TranscriptPresence.GONE),
+    )
+    assert session_menu.kind_of(rec) is Kind.ENDED_ROOT
+    facts = Facts(snap=snap, wired=_LINKING | ALL_WIRED, recording=frozenset({"s1", "s2"}))
+
+    offered = session_menu.entries(rec, None, facts)
+
+    closes = [e for e in offered if isinstance(e, Item) and e.action is Action.CLOSE_CHANNEL]
+    assert [(e.label, e.channel, e.refused) for e in closes] == [
+        ("Close channel #brand", "k1", None),
+        ("Close channel #zeta", "k3", None),
+    ]
+    assert session_menu.find(offered, Action.RESUME) is None
+    assert session_menu.find(offered, Action.LINK) is None
+    actions = dataclasses.replace(_actions(), close_channel=MagicMock())
+    session_menu.choose(
+        Action.CLOSE_CHANNEL,
+        rec,
+        None,
+        session_menu.MenuState(),
+        actions,
+        channel="k3",
+        facts=facts,
+    )
+    assert actions.close_channel.call_args_list == [(("k3",),)]  # type: ignore[union-attr]

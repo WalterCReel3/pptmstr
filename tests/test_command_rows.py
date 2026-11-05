@@ -536,6 +536,7 @@ def test_an_expanded_command_row_is_drawn_by_the_command_view_with_what_it_was_h
     request(store, 1, now=5.0)
     snap = store.snapshot()
     (row,) = snap.needs_you
+    assert isinstance(row, CommandOwed)
     given = rows(wired=True)
 
     fake, (body,) = _expanded(monkeypatch, snap, row, given)
@@ -1418,6 +1419,7 @@ def test_a_command_whose_record_is_not_on_disk_says_so_on_its_row_and_in_detail(
     request(store, 1, now=5.0)
     snap = store.snapshot()
     (row,) = snap.needs_you
+    assert isinstance(row, CommandOwed)
     given = dataclasses.replace(
         rows(wired=True), unrecorded={cid(1): "what was asked is not recorded: EROFS\nsecond"}
     )

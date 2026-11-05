@@ -29,7 +29,8 @@ an open command             a ``Command`` it asked that is asked or running
                             not hidden on the strength of a row being drawn
 holds a task                a ``Task`` in ``CLAIMED`` whose ``claimed_by`` it is
 mail waiting                a ``Concern`` in ``POSTED`` addressed to it, which is what
-                            ``Snapshot.inbox_of`` returns
+                            ``Snapshot.inbox_of`` returns: team mail, never a
+                            message between leads, which only a lead reads
 an answer it has not read   a ``Decision`` it raised that the operator answered or
                             dismissed, with no ``first_delivered_at``
 a result it has not read    a ``Command`` it asked that has ended some way other
@@ -134,7 +135,11 @@ def _kept(snap: Snapshot, session: str) -> set[NodeId]:
         for t in snap.tasks.values()
         if t.state is TaskState.CLAIMED and t.claimed_by is not None
     )
-    kept.update(c.recipient for c in snap.concerns.values() if c.state is ConcernState.POSTED)
+    kept.update(
+        c.recipient
+        for c in snap.concerns.values()
+        if c.state is ConcernState.POSTED and not c.is_peer
+    )
     kept.update(
         d.asker
         for d in snap.decisions.values()

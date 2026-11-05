@@ -36,19 +36,27 @@ Two properties come from this rather than from care:
 from __future__ import annotations
 
 import enum
+import re
 from dataclasses import dataclass
+from pathlib import PurePath
 
+from . import drawable
 from .board import BoardConcern, BoardTask
 from .command import Command, CommandId, RequestRefusal
 from .digest import Digest
 from .model import (
+    Channel,
+    CitedQuestion,
     ClaimRefusal,
     CommandRefusal,
     Concern,
+    ConcernId,
     Decision,
     DecisionRefusal,
     DetachRefusal,
     NodeId,
+    PeerRefusal,
+    PeerWithdrawRefusal,
     Snapshot,
     Task,
     TaskId,
@@ -90,6 +98,231 @@ class InboxDelivered:
 
     request_id: str
     concerns: tuple[Concern, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PeerIdentity:
+    """
+    Who a lead is, as another lead's link names it: its session id, its card's
+    title and its project. Derived from the store's root record for the session
+    (``peer_identity``) each time it is asked, never stored, so a session id
+    names one lead alike in every reply and across a resume that restores the
+    record.
+
+    ``title`` is the card's title as the fleet draws it for a root
+    (``ui.session_menu.card_title``): the record's task, typed by the operator or
+    an agent, and never this tool's words. ``project`` is the last component of
+    the directory the session's writes are measured from (``session_base``, or
+    ``cwd`` on a record that has none) -- the name the fleet's project lane
+    shows (``ui.projects.project_key``) without the filesystem read the lane
+    makes. Either is empty where the store holds no such fact, and ``held`` is
+    False when it holds no root record for the session at all.
+
+    Both are drawable (``drawable.text``): the record holds its task and its
+    directories verbatim (``store._VERBATIM``), and this value is what carries
+    them into a lead's tool replies, its wakes and the operator's rows.
+    """
+
+    session: str
+    title: str = ""
+    project: str = ""
+    held: bool = False
+
+
+def peer_identity(snap: Snapshot, session_id: str) -> PeerIdentity:
+    """
+    ``session_id``'s lead as ``snap`` describes it (``PeerIdentity``).
+
+    The title rule mirrors ``ui.session_menu.card_title``'s for a root, so the
+    two are kept in step; it is copied here because the core does not import
+    the UI. It is the task, or nothing where ``card_title`` falls back to the
+    session id: the description says the id already.
+
+    The title and the project are made drawable here, from the verbatim
+    record, once: every reader of a ``PeerIdentity`` is handed text that any
+    text call and any transport takes.
+    """
+    rec = snap.get((session_id, None))
+    if rec is None:
+        return PeerIdentity(session=session_id)
+    base = rec.session_base or rec.cwd or ""
+    return PeerIdentity(
+        session=session_id,
+        title=drawable.text(rec.task),
+        project=drawable.text(PurePath(base).name),
+        held=True,
+    )
+
+
+# How much of a peer's card title its description quotes (``peer_text``). A
+# title is the session's first prompt, so it can be a paragraph; sixty
+# characters tell two cards apart, and the cut is said.
+PEER_TITLE_CHARS = 60
+
+# What a session id may be made of and still be laid out bare in a peer's
+# description: the characters ``bus._BARE_NAME`` admits. A minted id always is.
+_BARE_SESSION = re.compile(r"[A-Za-z0-9_./*@+-]+")
+
+
+def _quoted(text: str) -> str:
+    """
+    ``text`` on one line between double quotes, a quote and a backslash in it escaped.
+    """
+    flat = " ".join(text.splitlines()).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{flat}"'
+
+
+def peer_text(
+    peer: PeerIdentity, *, title_chars: int = PEER_TITLE_CHARS, project: bool = True
+) -> str:
+    """
+    A lead on another team, named alike to the operator and to every lead:
+    ``session <id head>, card "<title>", project "<project>"``. The one
+    renderer of a ``PeerIdentity`` (``bus.peer_said`` is this), so a session
+    reads the same in a lead's reply, in a wake, on the operator's queue row
+    and on the card, and alike after a resume that restores its record.
+
+    The head is the session id's first eight characters, bare, or quoted when
+    it holds anything else. The title and the project are typed by an agent or
+    the operator, so each is quoted with its quote marks escaped and on one
+    line: such text cannot end its own field and go on as this function's
+    words. A title past ``title_chars`` is cut, and the cut is said outside the
+    quotes; ``title_chars`` 0 leaves the card out, and ``project`` False the
+    project (``peer_forms``). A session with no root record in the store is
+    said so.
+    """
+    head = " ".join(peer.session[:8].splitlines())
+    head = f"session {head if _BARE_SESSION.fullmatch(head) else _quoted(head)}"
+    if not peer.held:
+        return f"{head} (its card is not in this run)"
+    said = [head]
+    title = " ".join(peer.title.split())
+    if title and title_chars > 0:
+        shown = title[:title_chars]
+        said.append(f"card {_quoted(shown)}" + (" (title cut)" if shown != title else ""))
+    if peer.project and project:
+        said.append(f"project {_quoted(peer.project)}")
+    return ", ".join(said)
+
+
+# How much of a peer's card title its short description quotes (``peer_forms``).
+PEER_SHORT_TITLE_CHARS = 16
+
+
+def peer_forms(peer: PeerIdentity) -> tuple[str, ...]:
+    """
+    ``peer_text``'s descriptions of ``peer``, longest first and each distinct:
+    the whole one, then the session head and a title cut to
+    ``PEER_SHORT_TITLE_CHARS``, then the head alone. For a row that must keep
+    something else whole and says whom it reaches in what room is left
+    (``approval.summarize``).
+    """
+    forms = (
+        peer_text(peer),
+        peer_text(peer, title_chars=PEER_SHORT_TITLE_CHARS, project=False),
+        peer_text(peer, title_chars=0, project=False),
+    )
+    return tuple(dict.fromkeys(forms))
+
+
+@dataclass(frozen=True, slots=True)
+class PeerSettled:
+    """
+    A lead sent a message to a linked lead, and this is what the store did.
+
+    ``refusal`` None means it was filed, addressed to the lead of the link's
+    other member. Anything else is why not, in the reducer's vocabulary, with
+    the sentence left to the shell as on ``TaskWriteSettled``. Carries no
+    message id: the caller minted it.
+
+    ``recipient`` is the lead the message went to. The sender may name only
+    the channel, and this is the one place it learns which lead that reached.
+    On ``PeerRefusal.LINKED_AFTER`` it is the lead on the live link of that
+    name now, which the message did not reach, so the refusal can say who
+    that is; on every other refusal it is None.
+
+    ``re_withdrawn`` says the message its ``re`` names is withdrawn, which
+    does not stop the send: True when it was withdrawn after its lead read it
+    (by its sender, the only one who can), False when before, and None when it
+    is not withdrawn or there is no ``re``.
+    """
+
+    request_id: str
+    refusal: PeerRefusal | None = None
+    recipient: PeerIdentity | None = None
+    re_withdrawn: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PeerWithdrawSettled:
+    """
+    A lead withdrew a peer message it sent, and this is what the store did.
+
+    ``refusal`` None means it was withdrawn; anything else is why not, with the
+    sentence left to the shell as on ``PeerSettled``. On a withdrawal,
+    ``recipient`` is the lead it was addressed to, ``channel`` the link's name,
+    ``read`` whether that lead had been handed it -- and so is told of the
+    withdrawal at its next read -- and ``answers`` the message it answered
+    (its ``re``), with ``cited`` where that message stands now that nothing
+    withdrawn answers it (``model.Snapshot.cited_question``): owed an answer
+    again only when it is ``CitedQuestion.OWED_AGAIN``.
+    """
+
+    request_id: str
+    refusal: PeerWithdrawRefusal | None = None
+    recipient: PeerIdentity | None = None
+    channel: str | None = None
+    read: bool = False
+    answers: ConcernId | None = None
+    cited: CitedQuestion | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PeerInboxDelivered:
+    """
+    A lead read its peer mail, and these went with the reply.
+
+    ``concerns`` are the messages handed over, as delivered, oldest first.
+    None is the answer to a request the store never saw, which is not "no
+    mail".
+
+    ``held`` are messages waiting for the reader whose own link does not hand
+    them over: the link they were sent over is not live in this run -- closed,
+    or not restored at this start (``model.Snapshot.peer_deliverable``). They
+    are held, waiting in the store and kept in their sender's log if that
+    session was recording its board when they were sent, and are carried here
+    so the reply can say they exist; their text is not the reader's while
+    their link is not live.
+
+    ``links`` are the live links the reader's session is a member of when it
+    read, so a reply can tell "nothing arrived" from "you are on no such
+    channel".
+
+    ``peers`` describe every other session those name: the other member of
+    each link, and the sender of each message handed over, owed or withdrawn,
+    once each.
+
+    ``owed`` are the questions the reader was handed by an earlier read, over
+    a live link the read covers, and owes an answer to
+    (``model.Snapshot.owed_answers``), oldest handed over first. Listed again
+    and marked as nothing: their delivery is as it was.
+
+    ``withdrawn`` are the messages the reader was handed by an earlier read on
+    a channel the read covers and their sender has since withdrawn
+    (``model.Snapshot.withdrawn_untold``), oldest handed over first, at most
+    ``model.MAX_WITHDRAWALS_LISTED``. Each is listed by the one read in a run
+    that carries it: the read marks it told. ``withdrawn_more`` counts those
+    past the bound, left for the next read.
+    """
+
+    request_id: str
+    concerns: tuple[Concern, ...] | None
+    held: tuple[Concern, ...] = ()
+    links: tuple[Channel, ...] = ()
+    peers: tuple[PeerIdentity, ...] = ()
+    owed: tuple[Concern, ...] = ()
+    withdrawn: tuple[Concern, ...] = ()
+    withdrawn_more: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,10 +459,16 @@ class DecisionSettled:
     reducer's vocabulary, with the sentence left to the shell as on
     ``TaskWriteSettled``. Carries no decision id for the reason that effect
     carries no task id: the caller minted it or named it.
+
+    ``peer`` is set only on a raise over a link: the lead at its other end,
+    which can read the decision, when it was filed; on
+    ``DecisionRefusal.LINKED_AFTER``, the lead on the live link of that name
+    now, which the asker may not have meant. None otherwise.
     """
 
     request_id: str
     refusal: DecisionRefusal | None = None
+    peer: PeerIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,10 +492,15 @@ class DecisionsDelivered:
     ``decisions`` None is the answer to a request the store never saw, as
     ``DigestDelivered.digest`` None is. It is not the empty tuple, which says
     the asker may read none.
+
+    ``peers`` describe the lead of every other session one of ``decisions``
+    was raised in over a link, once each, so the reply names which lead
+    raised it and not only the link.
     """
 
     request_id: str
     decisions: tuple[Decision, ...] | None
+    peers: tuple[PeerIdentity, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,6 +591,9 @@ class WakeReason(enum.Enum):
     DECISION_DISMISSED = "decision dismissed"
     COMMAND_ENDED = "command ended"
     CONCERN_TO_LEAD = "concern to the lead"
+    # A linked lead's message is waiting on a link (Decided 10). The subject is
+    # the link's id, and the wake carries no message text.
+    PEER_MESSAGE = "peer message"
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,7 +603,8 @@ class SessionWoken:
     worker's message to it, has arrived, and the session is to be told so with
     a message of pptmstr's own (``bus.wake_lines``).
 
-    ``subject_id`` is what to read: the decision, command or concern id.
+    ``subject_id`` is what to read: the decision, command or concern id, or
+    for ``PEER_MESSAGE`` the id of the link the mail waits on.
     ``sender`` is the worker that posted a concern, None for the rest. The
     session is the asker's session and its lead is what is woken, a sub-agent
     asker included: a sub-agent has no turn of its own to be woken into, and it
@@ -364,7 +612,10 @@ class SessionWoken:
 
     Not an answer to anybody, so ``request_id`` is empty, as on ``CommandToRun``.
     Whether the session is live, and coalescing a burst into one wake, are the
-    shell's: neither is a fact of the store.
+    shell's: neither is a fact of the store. The one exception is a peer
+    message's wake, which the store itself coalesces per link and counts
+    toward the link's chain (``model.PeerWakes``), because what it holds back
+    is owed to the operator as a row.
     """
 
     session_id: str
@@ -380,6 +631,9 @@ class SessionWoken:
 Effect = (
     ClaimSettled
     | InboxDelivered
+    | PeerSettled
+    | PeerWithdrawSettled
+    | PeerInboxDelivered
     | TaskWriteSettled
     | BoardDelivered
     | DigestDelivered

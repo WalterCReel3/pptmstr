@@ -32,8 +32,10 @@ reducer arm they follow does.
 
 **A fact goes to one session's log**, and ``Fact`` says which: a task's is its
 declarer's, the session whose board shows it (``Task.belongs_to``), and a
-concern's is its sender's (``board.board_concerns``). A task with no declarer is
-on no board and has no log to go to, so nothing is derived for it.
+concern's is its sender's (``board.board_concerns``), and a decision's is its
+asker's (``Decision.session_id``), whichever agent of the session asked and
+whoever ended it. A task with no declarer is on no board and has no log to go
+to, so nothing is derived for it.
 
 **Times are the store's.** A record built here carries the monotonic stamp the
 reducer used, so that it can be compared with the snapshot it came from.
@@ -43,7 +45,7 @@ reducer used, so that it can be compared with the snapshot it came from.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TypeVar, assert_never
 
@@ -59,6 +61,9 @@ from .intents import (
     ApprovalResolved,
     BoardRead,
     BoardRestored,
+    ChannelClosed,
+    ChannelLinked,
+    ChannelsRestored,
     CommandApproved,
     CommandEnded,
     CommandRefused,
@@ -76,14 +81,22 @@ from .intents import (
     DecisionDismissed,
     DecisionRaised,
     DecisionsRead,
+    DecisionWakeSent,
     DecisionWithdrawn,
     DigestRead,
     FailedSessionClosed,
     FailureAcknowledged,
+    HeldMailDismissed,
     InboxRead,
     Intent,
+    PeerInboxRead,
+    PeerQuestionAged,
+    PeerQuestionDismissed,
+    PeerSent,
+    PeerWakeSent,
     SessionDetached,
     SessionRecalled,
+    SessionSettled,
     StateChanged,
     SubagentDelivered,
     SubagentProgress,
@@ -97,21 +110,26 @@ from .intents import (
     TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
+    WakeChainReleased,
 )
 from .model import (
     CLOSED_BY_OPERATOR,
+    Answered,
     Basis,
     Concern,
     ConcernState,
+    Decision,
+    Dismissed,
     NodeId,
     Snapshot,
     Task,
     TaskState,
+    Withdrawn,
     is_address_only,
     withdrawal_label,
 )
 
-_T = TypeVar("_T", Task, Concern)
+_T = TypeVar("_T", Task, Concern, Decision)
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,16 +182,62 @@ def outcomes(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> t
         ):
             return ()
 
-        case (
-            DecisionRaised()
-            | DecisionAnswered()
-            | DecisionDismissed()
-            | DecisionWithdrawn()
-            | DecisionsRead()
-        ):
-            # A decision is not a board fact and is in no log: it does not
-            # survive a restart of pptmstr.
-            return ()
+        case DecisionRaised():
+            raised = after.decisions.get(intent.decision.id)
+            if raised is None or intent.decision.id in before.decisions:
+                return ()
+            return (
+                Fact(
+                    raised.session_id,
+                    boardlog.Raised(
+                        at=raised.raised_at,
+                        decision_id=raised.id,
+                        asker=_address(after, raised.asker),
+                        question=raised.question,
+                        standing=raised.standing.value,
+                        blocks=raised.blocks,
+                        if_unanswered=raised.if_unanswered,
+                        evidence=raised.evidence,
+                        recommendation=raised.recommendation,
+                        reversible=raised.reversible,
+                        asker_id=_node(raised.asker),
+                        channel=raised.channel,
+                        link=raised.link,
+                    ),
+                ),
+            )
+
+        case DecisionAnswered() | DecisionDismissed() | DecisionWithdrawn():
+            ended = _changed(before.decisions, after.decisions, intent.decision_id)
+            if ended is None:
+                return ()
+            ending: Record
+            match ended.outcome:
+                case Answered():
+                    ending = boardlog.Answered(ended.outcome.at, ended.id, ended.outcome.text)
+                case Dismissed():
+                    ending = boardlog.Dismissed(ended.outcome.at, ended.id)
+                case Withdrawn():
+                    ending = boardlog.Retracted(ended.outcome.at, ended.id)
+                case None:
+                    return ()
+                case _:
+                    assert_never(ended.outcome)
+            return (Fact(ended.session_id, ending),)
+
+        case DecisionsRead():
+            # Only a read by id marks anything, and then only the one decision.
+            if intent.decision_id is None:
+                return ()
+            handed_over = _changed(before.decisions, after.decisions, intent.decision_id)
+            if handed_over is None or handed_over.first_delivered_at is None:
+                return ()
+            return (
+                Fact(
+                    handed_over.session_id,
+                    boardlog.AnswerDelivered(handed_over.first_delivered_at, handed_over.id),
+                ),
+            )
 
         case (
             CommandRequested()
@@ -195,6 +259,22 @@ def outcomes(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> t
             # after it failed, keeps its board as it stands.
             return ()
 
+        case ChannelLinked() | ChannelClosed() | ChannelsRestored():
+            # A link is not a board fact. Its record is the channel's own log
+            # (``channels.outcomes``), never a member's board.
+            return ()
+
+        case SessionSettled() | WakeChainReleased() | PeerWakeSent() | DecisionWakeSent():
+            # Waking is this run's alone (``model.PeerWakes``), and no log
+            # holds it.
+            return ()
+
+        case PeerQuestionAged() | HeldMailDismissed() | PeerQuestionDismissed():
+            # This run's alone as well: the shell measures a question's age
+            # again from its logged delivery after a restart, and a dismissed
+            # row of held mail or of a question is raised again then.
+            return ()
+
         case BoardRestored():
             # A restored board came out of the log, and deriving records from it
             # would append the log to itself.
@@ -204,6 +284,7 @@ def outcomes(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> t
             landed = after.tasks.get(intent.task.id)
             if landed is None or intent.task.id in before.tasks:
                 return ()
+            provenance = landed.provenance
             return _about(
                 landed,
                 boardlog.Declared(
@@ -217,6 +298,9 @@ def outcomes(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> t
                     basis=_stated(landed.basis),
                     property=landed.property,
                     declared_by_id=_node(landed.declared_by),
+                    channel=None if provenance is None else provenance.channel,
+                    re=None if provenance is None else provenance.re,
+                    inside_charter=None if provenance is None else provenance.inside_charter.value,
                     after_all_writers=landed.after_all_writers,
                 ),
             )
@@ -419,29 +503,55 @@ def outcomes(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> t
             stopped = _changed(before.concerns, after.concerns, intent.concern_id)
             if stopped is None:
                 return ()
+            # Withdrawn after its lead was handed it, which only a peer message
+            # is: a kind of its own, since a ``concern-withdrawn`` after a
+            # delivery restores as contested (``boardlog.PeerRetracted``).
+            if stopped.delivered_at is not None:
+                return (Fact(stopped.sender[0], boardlog.PeerRetracted(now, stopped.id)),)
             return (Fact(stopped.sender[0], boardlog.Withdrawn(now, stopped.id)),)
 
         case InboxRead():
-            # One read can hand over concerns from more than one sender's session,
-            # and each session's log is told about its own.
-            handed: dict[str, list[str]] = {}
-            for waiting in before.inbox_of(intent.node_id):
-                delivered = after.concerns.get(waiting.id)
-                if delivered is not None and delivered is not waiting:
-                    handed.setdefault(delivered.sender[0], []).append(delivered.id)
-            return tuple(
-                Fact(session_id, boardlog.Delivered(intent.at, tuple(ids)))
-                for session_id, ids in handed.items()
+            return _delivered(before.inbox_of(intent.node_id), after, intent.at)
+
+        case PeerSent():
+            # Filed by the same rule as a concern: a message with a channel is
+            # ``peer-posted``, in its sender's log if that session was recording
+            # its board when it was sent.
+            sent = after.concerns.get(intent.concern_id)
+            if sent is None or intent.concern_id in before.concerns:
+                return ()
+            return _filed(after, sent)
+
+        case PeerInboxRead():
+            return _delivered(
+                before.peer_inbox_named(intent.node_id, intent.channel), after, intent.at
             )
 
         case _:
             assert_never(intent)
 
 
+def _delivered(waiting: Sequence[Concern], after: Snapshot, at: float) -> tuple[Fact, ...]:
+    """
+    The deliveries a read made of ``waiting``, the concerns it could hand over:
+    those the step changed. One read can hand over concerns from more than one
+    sender's session, and each session's log is told about its own. A peer
+    message a closed link held back is unchanged, so no delivery is filed for it.
+    """
+    handed: dict[str, list[str]] = {}
+    for posted in waiting:
+        delivered = after.concerns.get(posted.id)
+        if delivered is not None and delivered is not posted:
+            handed.setdefault(delivered.sender[0], []).append(delivered.id)
+    return tuple(
+        Fact(session_id, boardlog.Delivered(at, tuple(ids))) for session_id, ids in handed.items()
+    )
+
+
 def _changed(before: Mapping[str, _T], after: Mapping[str, _T], key: str) -> _T | None:
     """
-    The task or concern under ``key`` as the step left it, when the step changed
-    it. None when it did not: the thing is absent, is the same object, or was
+    The task, concern or decision under ``key`` as the step left it, when the
+    step changed it. None when it did not: the thing is absent, is the same object, or was
     replaced by an equal one.
     """
     was = before.get(key)
@@ -486,10 +596,15 @@ def _filed(snap: Snapshot, concern: Concern) -> tuple[Fact, ...]:
     waiting and untouched. A caller that hands over one already rewritten, handed
     on or stopped has that filed too, so what became of it is derived with it and
     a restore reads the concern the store holds.
+
+    A concern with a channel is filed as ``boardlog.PeerPosted``, which a build
+    that predates peer messages cannot read as team mail; one without is a
+    ``boardlog.Posted``.
     """
     session_id = concern.sender[0]
-    records: list[Record] = [
-        boardlog.Posted(
+    posted: Record
+    if concern.channel is None:
+        posted = boardlog.Posted(
             at=concern.posted_at,
             concern_id=concern.id,
             sender=_address(snap, concern.sender),
@@ -502,13 +617,38 @@ def _filed(snap: Snapshot, concern: Concern) -> tuple[Fact, ...]:
             sender_id=_node(concern.sender),
             recipient_id=_node(concern.recipient),
         )
-    ]
+    else:
+        posted = boardlog.PeerPosted(
+            at=concern.posted_at,
+            concern_id=concern.id,
+            sender=_address(snap, concern.sender),
+            recipient=_address(snap, concern.recipient),
+            subject=concern.subject,
+            body=concern.body,
+            channel=concern.channel,
+            # Set wherever a channel is (``model.Concern``); "" only for a
+            # concern no store step builds, which a restore refuses.
+            link=concern.link or "",
+            task_id=concern.task_id,
+            basis=_stated(concern.basis),
+            incident=concern.incident,
+            sender_id=_node(concern.sender),
+            recipient_id=_node(concern.recipient),
+            needs_answer=concern.needs_answer,
+            re=concern.re,
+            quiet=concern.quiet,
+        )
+    records: list[Record] = [posted]
     if concern.edited:
         records.append(boardlog.Edited(concern.posted_at, concern.id, concern.body))
-    if concern.state is ConcernState.WITHDRAWN:
-        records.append(boardlog.Withdrawn(concern.posted_at, concern.id))
-    elif concern.state is ConcernState.DELIVERED and concern.delivered_at is not None:
+    if concern.delivered_at is not None and concern.state is not ConcernState.POSTED:
         records.append(boardlog.Delivered(concern.delivered_at, (concern.id,)))
+    if concern.state is ConcernState.WITHDRAWN:
+        records.append(
+            boardlog.Withdrawn(concern.posted_at, concern.id)
+            if concern.delivered_at is None
+            else boardlog.PeerRetracted(concern.delivered_at, concern.id)
+        )
     return tuple(Fact(session_id, record) for record in records)
 
 

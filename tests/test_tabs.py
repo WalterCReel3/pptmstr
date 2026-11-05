@@ -174,21 +174,27 @@ def test_every_name_the_app_looks_a_pane_up_by_is_a_declared_pane() -> None:
 def test_every_focus_call_finds_its_pane() -> None:
     """
     ``begin_frame`` hands ``pending_pane`` to ``focus_dockable_window``, which
-    matches the whole label; HEALTH is the one name set, and it is FOCUS's.
+    matches the whole label. HEALTH and SESSION are set with a switch to FOCUS,
+    so they are FOCUS's; DETAIL is set in whichever layout is current, so both
+    have it.
     """
     triage, focus = _layouts()
-    assert focus.dockable_window_of_name("HEALTH") is not None
+    for name in ("HEALTH", "SESSION", "DETAIL"):
+        assert focus.dockable_window_of_name(name) is not None
+    assert triage.dockable_window_of_name("DETAIL") is not None
     for layout in (triage, focus):
         for window in layout.dockable_windows:
             assert layout.dockable_window_of_name(window.label) is not None
 
 
-def test_app_sets_no_pending_pane_but_health() -> None:
+def test_app_sets_no_pending_pane_but_health_session_and_detail() -> None:
     source = (ROOT / "pptmstr" / "app.py").read_text(encoding="utf-8")
     sets = [line.strip() for line in source.splitlines() if "pending_pane = " in line]
     assert sets == [
         "pane, state.pending_pane = state.pending_pane, None",
         'state.pending_pane = "HEALTH"',
+        'state.pending_pane = "SESSION"',
+        'state.pending_pane = "DETAIL"',
     ]
 
 

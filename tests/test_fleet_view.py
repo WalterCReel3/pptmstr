@@ -9,6 +9,7 @@ to match the rule.
 
 from __future__ import annotations
 
+import dataclasses
 import random
 from typing import Any
 
@@ -84,7 +85,15 @@ def decision(did: str, asker: NodeId) -> Decision:
 
 
 def concern(cid: str, sender: NodeId, recipient: NodeId) -> Concern:
-    return Concern(id=cid, sender=sender, recipient=recipient, subject="s", body="b", posted_at=1.0)
+    return Concern(
+        id=cid,
+        sender=sender,
+        recipient=recipient,
+        subject="s",
+        body="b",
+        posted_at=1.0,
+        channel=None,
+    )
 
 
 def ended_pair() -> Store:
@@ -227,6 +236,20 @@ def test_an_ended_sub_agent_holding_a_claimed_task_is_drawn_until_it_lets_go() -
     store.apply(TaskReleased(B, "t2"))
     assert store.snapshot().tasks["t2"].state is TaskState.PENDING
     assert folded_of(store).folded == (A, B)
+
+
+def test_a_message_between_leads_is_not_mail_waiting_for_a_sub_agent() -> None:
+    """
+    Only a lead reads peer mail (``read_peer_messages``), so a peer message
+    addressed to a sub-agent -- which no store step files -- keeps nothing on
+    the card: ``inbox_of`` would never hand it over.
+    """
+    store = ended_pair()
+    peer = dataclasses.replace(concern("c-peer", OTHER_A, A), channel="brand", link="k1")
+    snap = dataclasses.replace(store.snapshot(), concerns={"c-peer": peer})
+    assert snap.inbox_of(A) == ()
+
+    assert fold(snap, ROOT, None, True).folded == (A, B)
 
 
 def test_an_ended_sub_agent_with_mail_waiting_is_drawn_until_it_reads_it() -> None:

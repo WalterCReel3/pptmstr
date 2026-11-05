@@ -82,6 +82,34 @@ def test_wrong_types_fall_back_per_field(tmp_path: Path) -> None:
     assert got.fps_idle == Settings().fps_idle
 
 
+def test_the_peer_answer_age_is_fifteen_minutes_and_round_trips(tmp_path: Path) -> None:
+    """Decided 4 and 11: a fixed age, 15 minutes unless the operator sets one."""
+    assert Settings().peer_answer_age_s == 900.0
+    path = tmp_path / "settings.json"
+    save(Settings(peer_answer_age_s=300.0), path, unread=None)
+    assert load(path).peer_answer_age_s == 300.0
+
+
+@pytest.mark.parametrize("value", [0, -60, True, "15m", None, float("inf"), 1e400], ids=repr)
+def test_a_peer_answer_age_that_is_not_a_positive_number_is_the_default(
+    tmp_path: Path, value: object
+) -> None:
+    """
+    Zero would surface every question the frame it is read, and ``true`` is an
+    int to Python: neither is an age anybody set.
+    """
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"peer_answer_age_s": value}))
+    assert load(path).peer_answer_age_s == Settings().peer_answer_age_s
+
+
+def test_a_whole_number_of_seconds_is_read_as_a_float(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"peer_answer_age_s": 120}))
+    got = load(path).peer_answer_age_s
+    assert got == 120.0 and type(got) is float
+
+
 def test_wrap_inputs_round_trips(tmp_path: Path) -> None:
     path = tmp_path / "settings.json"
     save(Settings(wrap_inputs=False), path, unread=None)
