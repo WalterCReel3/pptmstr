@@ -1,0 +1,98 @@
+module,loc,top_level_defs,fan_in,fan_out,weighted_in,weighted_out,prefix_cluster,community,label_prop,test_modules_importing,dotted_patches
+pptmstr,3,1,1,0,0,0,,,,3,0
+__main__,61,2,0,4,0,4,,,,1,0
+app,6193,243,1,59,1,694,,,,29,2
+approval,1952,65,22,6,172,29,command*+req/appr/shellscan/sandbox,C2,L0,36,0
+board,960,37,15,2,197,61,board*+digest,C1,L0,10,0
+boardfacts,693,12,1,4,1,114,board*+digest,C3,L0,8,0
+boardgraph,459,20,1,5,21,60,board*+digest,C1,L0,2,0
+boardlog,2002,72,9,2,152,37,board*+digest,C3,L0,20,0
+boardsync,745,24,2,3,23,48,board*+digest,C3,L0,8,0
+bridge,394,7,11,2,36,12,,C0,L0,38,0
+brief,353,18,6,2,22,2,,C0,L0,13,0
+bus,6076,186,3,11,51,491,,C1,L0,18,0
+channels,1049,42,1,4,34,59,session*/fleet*/links/channels,C3,L0,3,0
+cli_version,301,16,4,0,21,0,,C2,L0,7,2
+command,930,53,14,3,455,3,command*+req/appr/shellscan/sandbox,C5,L3,18,0
+commandbus,1132,41,1,9,2,191,command*+req/appr/shellscan/sandbox,C5,L3,6,0
+commandfile,1180,72,4,3,54,52,command*+req/appr/shellscan/sandbox,C5,L3,7,0
+commandrun,1992,82,3,2,48,85,command*+req/appr/shellscan/sandbox,C5,L3,4,0
+commandtext,801,46,4,1,26,2,command*+req/appr/shellscan/sandbox,C5,L3,5,0
+digest,696,33,4,3,37,45,board*+digest,C1,L0,8,0
+drawable,183,10,17,0,46,0,,C0,L0,12,0
+driver,3524,40,3,14,16,168,,C3,L0,24,39
+effects,648,26,9,5,170,33,,C1,L0,17,0
+fake_driver,1398,35,1,6,2,114,,C4,L0,8,0
+figures,3,0,0,0,0,0,,,,1,0
+figures.displaylist,2575,154,2,1,52,3,,C6,L2,5,0
+figures.fences,280,26,3,2,7,2,,C6,L2,4,0
+figures.host,1036,54,2,8,9,75,,C6,L2,4,0
+figures.mermaid,398,31,3,1,4,6,,C6,L2,5,0
+figures.render,744,39,4,5,9,11,,C6,L2,4,0
+figures.sanitise,1405,96,4,0,14,0,,C6,L2,4,0
+fleetsync,1110,25,1,5,17,119,session*/fleet*/links/channels,C3,L0,4,0
+intents,1528,58,15,5,374,108,,C3,L0,58,0
+layout_ini,146,7,1,0,1,0,,,,2,0
+links,229,14,1,1,3,5,session*/fleet*/links/channels,C3,L0,2,0
+log,74,4,7,1,144,1,,C3,L0,10,0
+model,5175,156,42,4,2147,26,,C1,L0,71,1
+model_catalog,328,16,3,0,8,0,,C2,L0,5,0
+pairing,603,50,3,0,57,0,,C7,L6,5,0
+plugins,81,8,2,0,2,0,,C3,L0,2,0
+pool,551,5,1,5,6,39,,C3,L0,8,0
+requests,1495,75,0,1,0,6,command*+req/appr/shellscan/sandbox,C1,L0,3,0
+sandbox,207,6,1,0,3,0,command*+req/appr/shellscan/sandbox,C2,L0,8,0
+sessionfile,644,43,7,3,48,7,session*/fleet*/links/channels,C3,L0,15,0
+sessions,345,14,4,2,29,5,session*/fleet*/links/channels,C2,L0,6,0
+settings,568,21,10,0,33,0,,C0,L1,33,7
+shellscan,981,31,3,0,6,0,command*+req/appr/shellscan/sandbox,C5,L0,3,0
+store,4723,93,2,10,8,802,,C1,L0,64,0
+templates,900,20,5,1,19,12,,C2,L0,9,0
+theme,1510,75,29,2,524,67,,C0,L0,37,0
+transcript,584,13,12,1,125,2,,C4,L0,21,0
+tree,155,6,4,0,9,0,,C2,L0,2,0
+ui,0,0,0,0,0,0,,,,1,0
+ui.blocks,500,25,2,2,40,9,,C4,L4,3,0
+ui.board_pane,2219,122,6,8,68,324,ui *_pane,C0,L0,10,0
+ui.brief_pane,345,14,1,6,3,42,ui *_pane,C0,L0,1,0
+ui.command_view,1618,137,4,8,26,172,ui *_view,C5,L3,8,0
+ui.compose,185,4,2,4,10,15,,C0,L0,10,0
+ui.decision_view,915,68,6,8,19,120,ui *_view,C1,L0,9,0
+ui.detail,1737,75,1,19,14,290,,C0,L0,8,0
+ui.digest_pane,581,30,1,11,1,109,ui *_pane,C0,L0,6,0
+ui.fleet_view,156,4,1,2,1,14,ui *_view,C1,L0,2,0
+ui.focus,432,10,8,1,32,33,,C1,L0,22,0
+ui.gate_menu,234,16,2,1,9,9,ui *_menu,C2,L0,3,0
+ui.health,375,15,1,8,2,70,,C2,L0,6,0
+ui.inbox,2727,148,3,18,33,365,,C0,L0,14,0
+ui.inline,91,6,3,0,11,0,,C4,L4,3,0
+ui.launcher,4390,163,5,14,84,292,,C2,L0,14,0
+ui.link_form,299,15,1,5,3,21,ui *_form,C1,L0,2,0
+ui.main_menu,567,48,2,9,29,19,ui *_menu,C1,L0,4,0
+ui.projects,99,6,3,2,5,6,,C1,L0,3,0
+ui.rail,1375,57,1,11,3,176,,C1,L0,9,0
+ui.resume_form,1135,55,1,9,9,141,ui *_form,C2,L0,7,0
+ui.review,616,26,3,4,59,18,,C0,L0,12,0
+ui.rich_pane,492,27,1,5,4,78,ui *_pane,C4,L4,2,0
+ui.session_details,1055,52,3,11,12,87,,C2,L0,7,0
+ui.session_menu,1344,77,6,7,42,110,ui *_menu,C1,L0,7,0
+ui.settings_dialog,1137,72,2,5,6,82,,C0,L1,4,0
+ui.span_layout,169,7,1,1,5,1,,C4,L4,1,0
+ui.splash,848,40,1,0,9,0,,C0,L5,5,0
+ui.splash_art,123,6,1,0,5,0,,C0,L5,2,0
+ui.splash_view,211,11,0,3,0,24,ui *_view,C0,L5,3,0
+ui.tabs,381,29,1,1,1,1,,C0,L0,2,0
+ui.tool_block,1439,72,1,5,15,37,,C4,L0,5,0
+ui.transcript_pane,2305,70,3,7,6,134,ui *_pane,C4,L0,10,0
+ui.typeset,232,1,9,7,9,7,,C0,L0,30,1
+ui.typeset.diffs,1115,41,2,7,22,51,,C0,L1,5,0
+ui.typeset.find,88,4,1,1,3,1,,C4,L0,0,0
+ui.typeset.gate,2031,102,4,6,64,38,,C0,L1,15,0
+ui.typeset.parts,313,21,3,2,85,10,,C0,L0,0,0
+ui.typeset.roles,636,48,6,0,237,0,,C0,L1,5,0
+ui.typeset.syntax,460,25,1,1,11,4,,C0,L1,1,0
+ui.typeset.themes,501,31,5,2,37,58,,C0,L1,10,0
+ui.typeset.views,2993,106,6,11,84,206,,C0,L1,10,0
+ui.widgets,1301,89,20,3,436,41,,C2,L0,35,1
+version,410,21,2,2,2,44,,C7,L6,2,0
+worktree,1475,65,1,0,58,0,,C2,L0,2,0

@@ -9,7 +9,7 @@
   passed and 23 `[imgui-error]` lines, and `typecheck-all` at 1936. Round three is wakes, the
   backstop, decision wakes, and the unanswered-question and held-mail rows. None of it has been
   seen on a display or run between two live sessions.
-- Round four's first part comes from [the first three-lead run](2026-10-24-first-three-lead-run.md).
+- Round four's first part comes from [the first three-lead run](archive/2026-10-24-first-three-lead-run.md).
   It's on the board as P1–P5 (2026-10-24):
   - peer identity on every link surface;
   - owed answers named at resume;

@@ -1,7 +1,7 @@
 # A break-glass command: the contained team asks, the operator reads it, pptmstr runs it
 
 **Dated:** 2026-10-13 · **Status:** a design agreed in conversation with the operator; built since —
-[`2026-10-13-building-the-break-glass-command.md`](2026-10-13-building-the-break-glass-command.md)
+[`2026-10-13-building-the-break-glass-command.md`](archive/2026-10-13-building-the-break-glass-command.md)
 records what and how far it was verified · **Found by:** the operator, asking
 whether work had happened on "the autonomous workteam that has access to a
 break-glass/privileged-actor concept" · **Continues:**

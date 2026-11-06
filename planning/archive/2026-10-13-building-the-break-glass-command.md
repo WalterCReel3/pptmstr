@@ -2,7 +2,7 @@
 
 **Dated:** 2026-10-13 · **Status:** built, uncommitted, twice reviewed and twice fixed, seen drawn by nobody — see
 "Built, and what two reviews changed"; the plan below was made by reading and is kept as written · **Decisions it builds:**
-[`2026-10-13-a-break-glass-command-the-operator-runs.md`](2026-10-13-a-break-glass-command-the-operator-runs.md)
+[`2026-10-13-a-break-glass-command-the-operator-runs.md`](../2026-10-13-a-break-glass-command-the-operator-runs.md)
 · **Nearest precedent in the tree:** decisions (`model.Decision`, the decision arms in
 `store.py`, `bus.raise_decision`, `ui/decision_view.py`)
 

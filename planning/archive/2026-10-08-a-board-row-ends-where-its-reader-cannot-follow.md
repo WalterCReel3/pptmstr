@@ -162,7 +162,7 @@ as unsolvable by trimming.
   would put the operator back in the relay this removes the lead from.
 - **Optional argument.** `part` is declared through `bus._schema` with
   `required=("task_id",)`, per
-  [`archive/2026-08-13-every-bus-tool-requires-its-optional-arguments.md`](archive/2026-08-13-every-bus-tool-requires-its-optional-arguments.md):
+  [`archive/2026-08-13-every-bus-tool-requires-its-optional-arguments.md`](2026-08-13-every-bus-tool-requires-its-optional-arguments.md):
   the `{name: type}` shorthand would have marked it required and refused the call the
   description documents.
 - **Prompts.** `worker_prompt` and `lead_briefing` each say what the tool is *for* —

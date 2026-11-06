@@ -15,7 +15,7 @@ clickable and invokes the system's handler for its scheme. ·
 (`_bare_addresses`, `_show_destinations`, `_names_itself`),
 `pptmstr/ui/typeset/views.py` (`follow_links`, `_Followed`, `_show_view`,
 `_say_a_refusal`), `pptmstr/app.py` (`main`), and
-[`2026-10-18-vector-displays-beside-typeset-text.md`](2026-10-18-vector-displays-beside-typeset-text.md)
+[`2026-10-18-vector-displays-beside-typeset-text.md`](../2026-10-18-vector-displays-beside-typeset-text.md)
 §5 and §9.
 
 **A click on a link in any typeset markdown view goes to `links.follow`. It hands
@@ -218,7 +218,7 @@ reviewer-2's `link-review` findings, all derived from reading:
 
 - **Markdown images are not rendered.** That is the operator's call of 2026-10-20,
   recorded in
-  [`2026-10-18-vector-displays-beside-typeset-text.md`](2026-10-18-vector-displays-beside-typeset-text.md)
+  [`2026-10-18-vector-displays-beside-typeset-text.md`](../2026-10-18-vector-displays-beside-typeset-text.md)
   §5. `![alt](url)` is still an exclamation mark and a link, and the link follows
   the same policy as any other.
 - The hazard recorded in that record's §9 still stands: `_reader` modifies

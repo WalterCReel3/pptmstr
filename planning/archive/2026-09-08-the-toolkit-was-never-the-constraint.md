@@ -2,9 +2,9 @@
 
 **Dated:** 2026-09-08 · **Status:** decision recorded; the port question is closed,
 the text-widget direction is open and unscoped ·
-**Bears on:** [`../notes/2026-08-31-the-instrument-is-the-product.md`](../notes/2026-08-31-the-instrument-is-the-product.md)
+**Bears on:** [`../notes/2026-08-31-the-instrument-is-the-product.md`](../../notes/2026-08-31-the-instrument-is-the-product.md)
 §6.5.3, whose thesis argues the operator surface should shrink ·
-**Corrects:** [`archive/2026-08-16-the-wake-up-crash-belongs-to-glfw.md`](archive/2026-08-16-the-wake-up-crash-belongs-to-glfw.md)
+**Corrects:** [`archive/2026-08-16-the-wake-up-crash-belongs-to-glfw.md`](2026-08-16-the-wake-up-crash-belongs-to-glfw.md)
 — see §7
 
 **The question was whether to convert this application to an Electron app with a Rust
@@ -147,7 +147,7 @@ which any `pip install -U` silently reverts.
 
 Note for anyone who reads this and reaches for a Rust harness: the clean-room
 reimplementation assessed in
-[`archive/2026-08-14-the-transcript-outlives-the-window-and-our-record-of-it-does-not.md`](archive/2026-08-14-the-transcript-outlives-the-window-and-our-record-of-it-does-not.md)
+[`archive/2026-08-14-the-transcript-outlives-the-window-and-our-record-of-it-does-not.md`](2026-08-14-the-transcript-outlives-the-window-and-our-record-of-it-does-not.md)
 is a rebuild of source that leaked. Using it as a basis is a licensing and provenance
 decision for an MIT project, not an engineering one.
 
@@ -166,7 +166,7 @@ Ranked, from an audit of what a wider audience would hit:
    one yet.
 3. **The approval gate is the workflow.** Six-hour park, no policy dial, `declare_task`
    parking per declaration. This is thesis-level and
-   [`../notes/2026-08-31-the-instrument-is-the-product.md`](../notes/2026-08-31-the-instrument-is-the-product.md)
+   [`../notes/2026-08-31-the-instrument-is-the-product.md`](../../notes/2026-08-31-the-instrument-is-the-product.md)
    §6.2 is harsher about it than anything found here.
 4. **Auth is never checked.** `probe.py`'s `check_agent_cli` runs `claude --version`,
    which succeeds when logged out. The first launch then dies in `driver.py`'s broad
@@ -232,7 +232,7 @@ mouse input, is the entire safety net for the code a widget would replace.
 ## 7. Corrections to the record
 
 **The wake-crash record cites the wrong PR, and it is the load-bearing sentence.**
-[`archive/2026-08-16-the-wake-up-crash-belongs-to-glfw.md`](archive/2026-08-16-the-wake-up-crash-belongs-to-glfw.md)
+[`archive/2026-08-16-the-wake-up-crash-belongs-to-glfw.md`](2026-08-16-the-wake-up-crash-belongs-to-glfw.md)
 says *"There is no released fix to upgrade into: glfw#1147 added `if (!ci) continue;`
 to the polling loop only."* glfw#1147 is "X11: Expose zero monitor for functional
 headless", elmindreda, 2017-11-28, and its entire diff is `if (!_glfw.monitorCount)` →

@@ -1348,3 +1348,14 @@ make and this record will not make for it.
 
 *(Distinct from the size of `read_board`'s output, which is a separate and measured problem boarded
 on its own.)*
+
+**Spend has no stop either.** *Carried from
+[`2026-08-10-layout-proposals.md`](archive/2026-08-10-layout-proposals.md),
+[`2026-08-10-launcher-as-a-modal.md`](archive/2026-08-10-launcher-as-a-modal.md) and
+[`2026-08-10-research-sessions-under-the-inbox.md`](archive/2026-08-10-research-sessions-under-the-inbox.md),
+2026-11-06.* `max_budget_usd` is still unwired: nothing in `pptmstr/` names it, so
+`driver._options()` never passes it and HEALTH reports spend it cannot cap. Those records left it
+as driver semantics (thread it through the launch, `AgentSession.__init__` and `_options()`) and put
+the control in FOCUS/HEALTH beside the spend figure it constrains. With an operator watching, visible
+spend was an acceptable downgrade from invisible spend. Unattended, it is the same gap as the
+declaration volume above: nothing bounds it.

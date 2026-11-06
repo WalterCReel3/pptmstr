@@ -4,7 +4,7 @@
 a design record · **Branch:** `gate-policy-ingest`, at `cd7f57f`
 
 The design reasoning is in
-[`2026-09-17-a-research-policy-reduces-the-orienting-burst.md`](2026-09-17-a-research-policy-reduces-the-orienting-burst.md).
+[`2026-09-17-a-research-policy-reduces-the-orienting-burst.md`](../2026-09-17-a-research-policy-reduces-the-orienting-burst.md).
 This file is only what a next session needs to resume cold.
 
 ---
@@ -120,7 +120,7 @@ Four commits, all in `pptmstr/shellscan.py`, each with an adversarial corpus blo
   Migration is the harder half — briefs already exist under the wrong slug.
   **Resolved 2026-10-15** by removing the slug rather than matching it: briefs are keyed by
   session id under `<config>/briefs/<id>/`, and the old location is read, not moved
-  ([`archive/2026-10-15-a-brief-is-keyed-by-its-session.md`](archive/2026-10-15-a-brief-is-keyed-by-its-session.md)).
+  ([`archive/2026-10-15-a-brief-is-keyed-by-its-session.md`](2026-10-15-a-brief-is-keyed-by-its-session.md)).
 
 ## The numbers, and what they are worth
 
@@ -202,7 +202,7 @@ admitted `cat` returns them; it serves `mounts`, `status`, `version` and
 `root/etc/passwd` like any other file. So it is four of the eight `/proc` paths measured
 and not `/proc` as a category. Seven of the sixteen probe rows hand over contents `Read`
 will not. Measured 2026-09-23 and carried as **U11** in
-[`2026-09-03-a-dangerously-autonomous-mode.md`](2026-09-03-a-dangerously-autonomous-mode.md),
+[`2026-09-03-a-dangerously-autonomous-mode.md`](../2026-09-03-a-dangerously-autonomous-mode.md),
 numbered separately from U8 because U8's remedy would make it worse. No fix is boarded and
 that record says why — including why turning containment on for this rung would not close
 it.

@@ -1,0 +1,851 @@
+{
+ "graph": {
+  "nodes": 91,
+  "undirected_edges": 398,
+  "two_m": 12322.0
+ },
+ "constrained": {
+  "q_free": 0.4232,
+  "q_free_shuffled": [
+   0.4041,
+   0.4232
+  ],
+  "graph_py_prefix_partition": 0.0789,
+  "all_prefix_clusters_contracted": {
+   "q": 0.3832,
+   "cost_vs_free": 0.04,
+   "q_shuffled_max": 0.3879,
+   "cost_best_vs_best": 0.0353,
+   "communities": 5
+  },
+  "domain_prefixes_only_contracted": {
+   "clusters": [
+    "board*+digest",
+    "command*+req/appr/shellscan/sandbox",
+    "session*/fleet*/links/channels"
+   ],
+   "q": 0.3962,
+   "cost_vs_free": 0.027,
+   "q_shuffled_max": 0.3962,
+   "cost_best_vs_best": 0.027,
+   "communities": 7
+  },
+  "one_cluster_at_a_time": {
+   "board*+digest": {
+    "n": 6,
+    "q": 0.4112,
+    "cost_vs_free": 0.012,
+    "q_shuffled_max": 0.414,
+    "cost_best_vs_best": 0.0091,
+    "communities": 7
+   },
+   "command*+req/appr/shellscan/sandbox": {
+    "n": 9,
+    "q": 0.412,
+    "cost_vs_free": 0.0112,
+    "q_shuffled_max": 0.4128,
+    "cost_best_vs_best": 0.0104,
+    "communities": 8
+   },
+   "session*/fleet*/links/channels": {
+    "n": 5,
+    "q": 0.4182,
+    "cost_vs_free": 0.0049,
+    "q_shuffled_max": 0.4197,
+    "cost_best_vs_best": 0.0035,
+    "communities": 6
+   },
+   "ui *_form": {
+    "n": 2,
+    "q": 0.4227,
+    "cost_vs_free": 0.0004,
+    "q_shuffled_max": 0.4229,
+    "cost_best_vs_best": 0.0003,
+    "communities": 8
+   },
+   "ui *_menu": {
+    "n": 3,
+    "q": 0.4203,
+    "cost_vs_free": 0.0029,
+    "q_shuffled_max": 0.4221,
+    "cost_best_vs_best": 0.0011,
+    "communities": 8
+   },
+   "ui *_pane": {
+    "n": 5,
+    "q": 0.4205,
+    "cost_vs_free": 0.0027,
+    "q_shuffled_max": 0.4233,
+    "cost_best_vs_best": -0.0001,
+    "communities": 7
+   },
+   "ui *_view": {
+    "n": 4,
+    "q": 0.4139,
+    "cost_vs_free": 0.0093,
+    "q_shuffled_max": 0.4145,
+    "cost_best_vs_best": 0.0087,
+    "communities": 8
+   }
+  },
+  "fixed_prefix_labels_rest_take_free_louvain": 0.2803,
+  "fixed_domain_prefix_labels_rest_take_free_louvain": 0.3484,
+  "contracted_partition": {
+   "K0": [
+    "bridge",
+    "brief",
+    "drawable",
+    "figures.displaylist",
+    "figures.fences",
+    "figures.host",
+    "figures.mermaid",
+    "figures.render",
+    "figures.sanitise",
+    "settings",
+    "theme",
+    "transcript",
+    "ui.blocks",
+    "ui.board_pane",
+    "ui.brief_pane",
+    "ui.compose",
+    "ui.detail",
+    "ui.digest_pane",
+    "ui.inbox",
+    "ui.inline",
+    "ui.review",
+    "ui.rich_pane",
+    "ui.settings_dialog",
+    "ui.span_layout",
+    "ui.tabs",
+    "ui.tool_block",
+    "ui.transcript_pane",
+    "ui.typeset",
+    "ui.typeset.diffs",
+    "ui.typeset.find",
+    "ui.typeset.gate",
+    "ui.typeset.parts",
+    "ui.typeset.roles",
+    "ui.typeset.syntax",
+    "ui.typeset.themes",
+    "ui.typeset.views"
+   ],
+   "K1": [
+    "board",
+    "boardfacts",
+    "boardgraph",
+    "boardlog",
+    "boardsync",
+    "bus",
+    "channels",
+    "digest",
+    "driver",
+    "effects",
+    "fake_driver",
+    "fleetsync",
+    "intents",
+    "links",
+    "log",
+    "model",
+    "plugins",
+    "pool",
+    "sessionfile",
+    "sessions",
+    "store",
+    "ui.focus",
+    "ui.gate_menu",
+    "ui.main_menu",
+    "ui.projects",
+    "ui.rail",
+    "ui.session_menu"
+   ],
+   "K2": [
+    "cli_version",
+    "model_catalog",
+    "tree",
+    "ui.health",
+    "ui.launcher",
+    "ui.link_form",
+    "ui.resume_form",
+    "ui.session_details",
+    "ui.widgets",
+    "worktree"
+   ],
+   "K3": [
+    "approval",
+    "command",
+    "commandbus",
+    "commandfile",
+    "commandrun",
+    "commandtext",
+    "requests",
+    "sandbox",
+    "shellscan",
+    "templates",
+    "ui.command_view",
+    "ui.decision_view",
+    "ui.fleet_view",
+    "ui.splash",
+    "ui.splash_art",
+    "ui.splash_view"
+   ],
+   "K4": [
+    "pairing",
+    "version"
+   ]
+  }
+ },
+ "null": {
+  "q_real": 0.4232,
+  "q_real_unit_weights": 0.3545,
+  "n": 100,
+  "weighted_swap_weights_ride_edges": {
+   "real": 0.4232,
+   "mean": 0.54,
+   "sd": 0.0207,
+   "min": 0.479,
+   "max": 0.5951,
+   "z_of_real": -5.64,
+   "swaps_done_per_edge_mean": 10.0
+  },
+  "weighted_swap_equal_weight_only": {
+   "real": 0.4232,
+   "mean": 0.3808,
+   "sd": 0.0086,
+   "min": 0.3607,
+   "max": 0.4049,
+   "z_of_real": 4.94,
+   "swaps_done_per_edge_mean": 10.0,
+   "weight_on_swappable_edges": 0.592
+  },
+  "unit_weight_swap_vs_unit_real": {
+   "real": 0.3545,
+   "mean": 0.2481,
+   "sd": 0.0086,
+   "min": 0.2242,
+   "max": 0.2677,
+   "z_of_real": 12.43,
+   "swaps_done_per_edge_mean": 10.0
+  },
+  "strength_configuration_model": {
+   "real": 0.4232,
+   "mean": 0.0296,
+   "sd": 0.003,
+   "min": 0.0231,
+   "max": 0.0361,
+   "z_of_real": 129.83,
+   "self_loop_weight_dropped_mean": 0.0495
+  }
+ },
+ "reweighting": [
+  {
+   "weighting": "raw (graph.py)",
+   "q": 0.4232,
+   "communities": 8,
+   "board_split_deterministic": true,
+   "board_split_fraction_of_shuffled_runs": 0.57,
+   "read_half_together_fraction": 0.77,
+   "persistence_half_together_fraction": 0.6,
+   "c3_best_match_deterministic": {
+    "jaccard": 1.0,
+    "kept": [
+     "boardfacts",
+     "boardlog",
+     "boardsync",
+     "channels",
+     "driver",
+     "fleetsync",
+     "intents",
+     "links",
+     "log",
+     "plugins",
+     "pool",
+     "sessionfile"
+    ],
+    "lost": [],
+    "gained": []
+   },
+   "c3_mean_pair_coassignment": 0.79,
+   "partition": {
+    "C0": [
+     "bridge",
+     "brief",
+     "drawable",
+     "settings",
+     "theme",
+     "ui.board_pane",
+     "ui.brief_pane",
+     "ui.compose",
+     "ui.detail",
+     "ui.digest_pane",
+     "ui.inbox",
+     "ui.review",
+     "ui.settings_dialog",
+     "ui.splash",
+     "ui.splash_art",
+     "ui.splash_view",
+     "ui.tabs",
+     "ui.typeset",
+     "ui.typeset.diffs",
+     "ui.typeset.gate",
+     "ui.typeset.parts",
+     "ui.typeset.roles",
+     "ui.typeset.syntax",
+     "ui.typeset.themes",
+     "ui.typeset.views"
+    ],
+    "C1": [
+     "board",
+     "boardgraph",
+     "bus",
+     "digest",
+     "effects",
+     "model",
+     "requests",
+     "store",
+     "ui.decision_view",
+     "ui.fleet_view",
+     "ui.focus",
+     "ui.link_form",
+     "ui.main_menu",
+     "ui.projects",
+     "ui.rail",
+     "ui.session_menu"
+    ],
+    "C2": [
+     "approval",
+     "cli_version",
+     "model_catalog",
+     "sandbox",
+     "sessions",
+     "templates",
+     "tree",
+     "ui.gate_menu",
+     "ui.health",
+     "ui.launcher",
+     "ui.resume_form",
+     "ui.session_details",
+     "ui.widgets",
+     "worktree"
+    ],
+    "C3": [
+     "boardfacts",
+     "boardlog",
+     "boardsync",
+     "channels",
+     "driver",
+     "fleetsync",
+     "intents",
+     "links",
+     "log",
+     "plugins",
+     "pool",
+     "sessionfile"
+    ],
+    "C4": [
+     "fake_driver",
+     "transcript",
+     "ui.blocks",
+     "ui.inline",
+     "ui.rich_pane",
+     "ui.span_layout",
+     "ui.tool_block",
+     "ui.transcript_pane",
+     "ui.typeset.find"
+    ],
+    "C5": [
+     "command",
+     "commandbus",
+     "commandfile",
+     "commandrun",
+     "commandtext",
+     "shellscan",
+     "ui.command_view"
+    ],
+    "C6": [
+     "figures.displaylist",
+     "figures.fences",
+     "figures.host",
+     "figures.mermaid",
+     "figures.render",
+     "figures.sanitise"
+    ],
+    "C7": [
+     "pairing",
+     "version"
+    ]
+   }
+  },
+  {
+   "weighting": "unit",
+   "q": 0.3545,
+   "communities": 7,
+   "board_split_deterministic": false,
+   "board_split_fraction_of_shuffled_runs": 0.0,
+   "read_half_together_fraction": 1.0,
+   "persistence_half_together_fraction": 0.03,
+   "c3_best_match_deterministic": {
+    "jaccard": 0.22,
+    "kept": [
+     "boardlog",
+     "boardsync",
+     "channels",
+     "fleetsync",
+     "sessionfile"
+    ],
+    "lost": [
+     "boardfacts",
+     "driver",
+     "intents",
+     "links",
+     "log",
+     "plugins",
+     "pool"
+    ],
+    "gained": [
+     "brief",
+     "cli_version",
+     "model_catalog",
+     "sandbox",
+     "sessions",
+     "settings",
+     "templates",
+     "ui.launcher",
+     "ui.resume_form",
+     "ui.session_details",
+     "worktree"
+    ]
+   },
+   "c3_mean_pair_coassignment": 0.39,
+   "partition": {
+    "C0": [
+     "board",
+     "boardfacts",
+     "boardgraph",
+     "bridge",
+     "bus",
+     "command",
+     "commandbus",
+     "commandfile",
+     "commandrun",
+     "commandtext",
+     "digest",
+     "drawable",
+     "driver",
+     "effects",
+     "fake_driver",
+     "intents",
+     "links",
+     "log",
+     "model",
+     "pool",
+     "requests",
+     "shellscan",
+     "store",
+     "transcript",
+     "ui.command_view",
+     "ui.decision_view",
+     "ui.digest_pane",
+     "ui.fleet_view"
+    ],
+    "C1": [
+     "pairing",
+     "theme",
+     "ui.board_pane",
+     "ui.brief_pane",
+     "ui.detail",
+     "ui.focus",
+     "ui.inbox",
+     "ui.review",
+     "ui.settings_dialog",
+     "ui.tabs",
+     "ui.typeset",
+     "ui.typeset.diffs",
+     "ui.typeset.find",
+     "ui.typeset.gate",
+     "ui.typeset.parts",
+     "ui.typeset.roles",
+     "ui.typeset.syntax",
+     "ui.typeset.themes",
+     "ui.typeset.views",
+     "version"
+    ],
+    "C2": [
+     "boardlog",
+     "boardsync",
+     "brief",
+     "channels",
+     "cli_version",
+     "fleetsync",
+     "model_catalog",
+     "sandbox",
+     "sessionfile",
+     "sessions",
+     "settings",
+     "templates",
+     "ui.launcher",
+     "ui.resume_form",
+     "ui.session_details",
+     "worktree"
+    ],
+    "C3": [
+     "approval",
+     "plugins",
+     "tree",
+     "ui.compose",
+     "ui.gate_menu",
+     "ui.health",
+     "ui.link_form",
+     "ui.main_menu",
+     "ui.projects",
+     "ui.rail",
+     "ui.session_menu",
+     "ui.tool_block",
+     "ui.transcript_pane",
+     "ui.widgets"
+    ],
+    "C4": [
+     "figures.displaylist",
+     "figures.fences",
+     "figures.host",
+     "figures.mermaid",
+     "figures.render",
+     "figures.sanitise"
+    ],
+    "C5": [
+     "ui.blocks",
+     "ui.inline",
+     "ui.rich_pane",
+     "ui.span_layout"
+    ],
+    "C6": [
+     "ui.splash",
+     "ui.splash_art",
+     "ui.splash_view"
+    ]
+   }
+  },
+  {
+   "weighting": "log1p",
+   "q": 0.3619,
+   "communities": 6,
+   "board_split_deterministic": false,
+   "board_split_fraction_of_shuffled_runs": 0.23,
+   "read_half_together_fraction": 1.0,
+   "persistence_half_together_fraction": 1.0,
+   "c3_best_match_deterministic": {
+    "jaccard": 0.46,
+    "kept": [
+     "boardfacts",
+     "boardlog",
+     "boardsync",
+     "channels",
+     "driver",
+     "fleetsync",
+     "intents",
+     "links",
+     "log",
+     "plugins",
+     "pool",
+     "sessionfile"
+    ],
+    "lost": [],
+    "gained": [
+     "board",
+     "boardgraph",
+     "bus",
+     "commandbus",
+     "digest",
+     "drawable",
+     "effects",
+     "model",
+     "requests",
+     "settings",
+     "store",
+     "tree",
+     "ui.compose",
+     "ui.fleet_view"
+    ]
+   },
+   "c3_mean_pair_coassignment": 0.57,
+   "partition": {
+    "C0": [
+     "board",
+     "boardfacts",
+     "boardgraph",
+     "boardlog",
+     "boardsync",
+     "bus",
+     "channels",
+     "commandbus",
+     "digest",
+     "drawable",
+     "driver",
+     "effects",
+     "fleetsync",
+     "intents",
+     "links",
+     "log",
+     "model",
+     "plugins",
+     "pool",
+     "requests",
+     "sessionfile",
+     "settings",
+     "store",
+     "tree",
+     "ui.compose",
+     "ui.fleet_view"
+    ],
+    "C1": [
+     "approval",
+     "cli_version",
+     "model_catalog",
+     "sandbox",
+     "sessions",
+     "templates",
+     "theme",
+     "ui.gate_menu",
+     "ui.health",
+     "ui.launcher",
+     "ui.link_form",
+     "ui.main_menu",
+     "ui.projects",
+     "ui.rail",
+     "ui.resume_form",
+     "ui.session_details",
+     "ui.session_menu",
+     "ui.tabs",
+     "ui.tool_block",
+     "ui.widgets",
+     "worktree"
+    ],
+    "C2": [
+     "figures.displaylist",
+     "figures.fences",
+     "figures.host",
+     "figures.mermaid",
+     "figures.render",
+     "figures.sanitise",
+     "pairing",
+     "ui.brief_pane",
+     "ui.settings_dialog",
+     "ui.transcript_pane",
+     "ui.typeset",
+     "ui.typeset.diffs",
+     "ui.typeset.find",
+     "ui.typeset.gate",
+     "ui.typeset.parts",
+     "ui.typeset.roles",
+     "ui.typeset.syntax",
+     "ui.typeset.themes",
+     "ui.typeset.views",
+     "version"
+    ],
+    "C3": [
+     "bridge",
+     "command",
+     "commandfile",
+     "commandrun",
+     "commandtext",
+     "shellscan",
+     "ui.board_pane",
+     "ui.command_view",
+     "ui.decision_view",
+     "ui.detail",
+     "ui.digest_pane",
+     "ui.focus",
+     "ui.inbox",
+     "ui.review"
+    ],
+    "C4": [
+     "brief",
+     "fake_driver",
+     "transcript",
+     "ui.blocks",
+     "ui.inline",
+     "ui.rich_pane",
+     "ui.span_layout"
+    ],
+    "C5": [
+     "ui.splash",
+     "ui.splash_art",
+     "ui.splash_view"
+    ]
+   }
+  }
+ ],
+ "churn": {
+  "head": "b72a48ae63ee9d9929a16d4d1db4243aaed5175e",
+  "today": "2026-11-06",
+  "since_30d": "2026-10-07",
+  "since_90d": "2026-08-08",
+  "per_month_hot_files": {
+   "app.py": {
+    "2026-08": 20,
+    "2026-09": 7,
+    "2026-10": 26,
+    "2026-11": 0
+   },
+   "store.py": {
+    "2026-08": 17,
+    "2026-09": 3,
+    "2026-10": 10,
+    "2026-11": 0
+   },
+   "bus.py": {
+    "2026-08": 9,
+    "2026-09": 1,
+    "2026-10": 8,
+    "2026-11": 0
+   },
+   "model.py": {
+    "2026-08": 14,
+    "2026-09": 5,
+    "2026-10": 11,
+    "2026-11": 0
+   },
+   "driver.py": {
+    "2026-08": 18,
+    "2026-09": 7,
+    "2026-10": 13,
+    "2026-11": 0
+   },
+   "ui/launcher.py": {
+    "2026-08": 5,
+    "2026-09": 6,
+    "2026-10": 8,
+    "2026-11": 0
+   },
+   "ui/inbox.py": {
+    "2026-08": 9,
+    "2026-09": 0,
+    "2026-10": 20,
+    "2026-11": 0
+   }
+  },
+  "top10_by_commits_90d": [
+   {
+    "file": "pptmstr/app.py",
+    "commits_30d": 26,
+    "commits_90d": 53,
+    "commits_all": 53,
+    "lines_changed_90d": 7743,
+    "lines_changed_all": 7743
+   },
+   {
+    "file": "pptmstr/driver.py",
+    "commits_30d": 13,
+    "commits_90d": 38,
+    "commits_all": 38,
+    "lines_changed_90d": 4500,
+    "lines_changed_all": 4500
+   },
+   {
+    "file": "pptmstr/ui/typeset/views.py",
+    "commits_30d": 32,
+    "commits_90d": 32,
+    "commits_all": 32,
+    "lines_changed_90d": 4073,
+    "lines_changed_all": 4073
+   },
+   {
+    "file": "pptmstr/model.py",
+    "commits_30d": 11,
+    "commits_90d": 30,
+    "commits_all": 30,
+    "lines_changed_90d": 5441,
+    "lines_changed_all": 5441
+   },
+   {
+    "file": "pptmstr/store.py",
+    "commits_30d": 10,
+    "commits_90d": 30,
+    "commits_all": 30,
+    "lines_changed_90d": 5643,
+    "lines_changed_all": 5643
+   },
+   {
+    "file": "pptmstr/ui/inbox.py",
+    "commits_30d": 20,
+    "commits_90d": 29,
+    "commits_all": 29,
+    "lines_changed_90d": 3789,
+    "lines_changed_all": 3789
+   },
+   {
+    "file": "pptmstr/ui/typeset/gate.py",
+    "commits_30d": 26,
+    "commits_90d": 26,
+    "commits_all": 26,
+    "lines_changed_90d": 2773,
+    "lines_changed_all": 2773
+   },
+   {
+    "file": "pptmstr/ui/detail.py",
+    "commits_30d": 19,
+    "commits_90d": 25,
+    "commits_all": 25,
+    "lines_changed_90d": 3449,
+    "lines_changed_all": 3449
+   },
+   {
+    "file": "pptmstr/ui/transcript_pane.py",
+    "commits_30d": 15,
+    "commits_90d": 20,
+    "commits_all": 20,
+    "lines_changed_90d": 3862,
+    "lines_changed_all": 3862
+   },
+   {
+    "file": "pptmstr/ui/launcher.py",
+    "commits_30d": 8,
+    "commits_90d": 19,
+    "commits_all": 19,
+    "lines_changed_90d": 5676,
+    "lines_changed_all": 5676
+   }
+  ],
+  "top10_by_lines_changed_90d": [
+   [
+    "pptmstr/app.py",
+    7743
+   ],
+   [
+    "pptmstr/bus.py",
+    7274
+   ],
+   [
+    "pptmstr/ui/launcher.py",
+    5676
+   ],
+   [
+    "pptmstr/store.py",
+    5643
+   ],
+   [
+    "pptmstr/model.py",
+    5441
+   ],
+   [
+    "pptmstr/driver.py",
+    4500
+   ],
+   [
+    "pptmstr/ui/typeset/views.py",
+    4073
+   ],
+   [
+    "pptmstr/ui/transcript_pane.py",
+    3862
+   ],
+   [
+    "pptmstr/ui/inbox.py",
+    3789
+   ],
+   [
+    "pptmstr/ui/detail.py",
+    3449
+   ]
+  ]
+ }
+}

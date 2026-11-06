@@ -313,9 +313,9 @@ Both are one run and neither is answerable by reading.
 
 ## Records this one corrects
 
-- `planning/2026-08-10-launcher-as-a-modal.md` — surface list is stale: it says the modal
+- `planning/archive/2026-08-10-launcher-as-a-modal.md` — surface list is stale: it says the modal
   exposes task, working directory and model, and that Enter launches. There are five fields
-  and the binding was reversed by `planning/2026-08-11-prompt-boxes-send-on-ctrl-enter.md`.
+  and the binding was reversed by `planning/archive/2026-08-11-prompt-boxes-send-on-ctrl-enter.md`.
   Its refusal of a launcher `permission_mode` field still stands and this record agrees with
   it, on different grounds — a toggle would not disable the gate, it would look like it does,
   which is the worse failure.

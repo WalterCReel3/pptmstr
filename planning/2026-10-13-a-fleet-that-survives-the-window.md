@@ -147,6 +147,14 @@ concerns are fine. Especially closing the failed card. That was an annoyance bug
 
 **(O)** Whether the existing `sessions.json` (bookmark, title) folds into `session.json`.
 
+**(O) Which sessions are on a widened gate.** *Carried from
+[`2026-09-21-what-is-left-on-the-gate-policy-branch.md`](archive/2026-09-21-what-is-left-on-the-gate-policy-branch.md)
+(`t-rail-gate-display`), 2026-11-06.* The status bar says *how many* sessions are widened
+(`app._relaxed_count`), and HEALTH shows one session's gate (`ui/health.py`, `gate_line`), but
+no view says *which*. With nothing auto-revoking a widened gate, the display is one of only two
+bounds on the mode. D4's Gate controls on the card are the natural place for it, which is not
+decided.
+
 ## Corrected after the operator used the build
 
 **D9.** Three things were built differently from what was said, and the operator called each

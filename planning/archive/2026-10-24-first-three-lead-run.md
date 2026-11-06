@@ -75,7 +75,7 @@ and eleven tasks on the hub's board.
 
 ## What it says about a coordinator
 
-See [the coordinator concept](2026-10-21-a-coordinator-session-holds-a-mandate.md). This is the
+See [the coordinator concept](../2026-10-21-a-coordinator-session-holds-a-mandate.md). This is the
 first evidence on the axis the topology research never measured: the operator's load.
 
 - **For a coordinator (H2).**

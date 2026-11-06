@@ -180,7 +180,7 @@ Both found while grounding this, both by reading rather than by running:
    gate is built on it. Trust promotion is therefore entirely local state and
    needs no SDK call. That row should read "—". `_options()` sets
    `permission_mode="dontAsk"` once (`driver.py:652`) and
-   `planning/2026-08-10-launcher-as-a-modal.md:51` records that the parking
+   `planning/archive/2026-08-10-launcher-as-a-modal.md:51` records that the parking
    design assumes it; nothing should be changing it per node.
 
 2. **§5.4's "per-node trust this tool class for this session" is this feature.**

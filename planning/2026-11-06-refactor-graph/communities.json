@@ -1,0 +1,849 @@
+{
+ "louvain_without_app": [
+  {
+   "id": "C0",
+   "size": 25,
+   "loc": 22399,
+   "metrics": {
+    "members": 25,
+    "internal": 973,
+    "out": 752,
+    "in": 446,
+    "cohesion": 0.448,
+    "top_partners": [
+     "model:340",
+     "ui.widgets:152",
+     "app:108",
+     "board:83",
+     "ui.command_view:61"
+    ]
+   },
+   "prefix_mix": {
+    "ui (other)": 16,
+    "core (other)": 5,
+    "ui *_pane": 3,
+    "ui *_view": 1
+   },
+   "members": [
+    "bridge",
+    "brief",
+    "drawable",
+    "settings",
+    "theme",
+    "ui.board_pane",
+    "ui.brief_pane",
+    "ui.compose",
+    "ui.detail",
+    "ui.digest_pane",
+    "ui.inbox",
+    "ui.review",
+    "ui.settings_dialog",
+    "ui.splash",
+    "ui.splash_art",
+    "ui.splash_view",
+    "ui.tabs",
+    "ui.typeset",
+    "ui.typeset.diffs",
+    "ui.typeset.gate",
+    "ui.typeset.parts",
+    "ui.typeset.roles",
+    "ui.typeset.syntax",
+    "ui.typeset.themes",
+    "ui.typeset.views"
+   ],
+   "label_propagation": [
+    "L0",
+    "L1",
+    "L5"
+   ]
+  },
+  {
+   "id": "C1",
+   "size": 16,
+   "loc": 25419,
+   "metrics": {
+    "members": 16,
+    "internal": 1621,
+    "out": 402,
+    "in": 1144,
+    "cohesion": 0.512,
+    "top_partners": [
+     "intents:226",
+     "app:145",
+     "ui.board_pane:129",
+     "ui.inbox:128",
+     "theme:126"
+    ]
+   },
+   "prefix_mix": {
+    "core (other)": 4,
+    "board*+digest": 3,
+    "ui (other)": 3,
+    "ui *_view": 2,
+    "ui *_menu": 2,
+    "command*+req/appr/shellscan/sandbox": 1,
+    "ui *_form": 1
+   },
+   "members": [
+    "board",
+    "boardgraph",
+    "bus",
+    "digest",
+    "effects",
+    "model",
+    "requests",
+    "store",
+    "ui.decision_view",
+    "ui.fleet_view",
+    "ui.focus",
+    "ui.link_form",
+    "ui.main_menu",
+    "ui.projects",
+    "ui.rail",
+    "ui.session_menu"
+   ],
+   "label_propagation": [
+    "L0"
+   ]
+  },
+  {
+   "id": "C2",
+   "size": 14,
+   "loc": 14153,
+   "metrics": {
+    "members": 14,
+    "internal": 487,
+    "out": 199,
+    "in": 384,
+    "cohesion": 0.455,
+    "top_partners": [
+     "model:110",
+     "theme:56",
+     "app:55",
+     "ui.board_pane:48",
+     "ui.inbox:40"
+    ]
+   },
+   "prefix_mix": {
+    "core (other)": 5,
+    "ui (other)": 4,
+    "command*+req/appr/shellscan/sandbox": 2,
+    "session*/fleet*/links/channels": 1,
+    "ui *_menu": 1,
+    "ui *_form": 1
+   },
+   "members": [
+    "approval",
+    "cli_version",
+    "model_catalog",
+    "sandbox",
+    "sessions",
+    "templates",
+    "tree",
+    "ui.gate_menu",
+    "ui.health",
+    "ui.launcher",
+    "ui.resume_form",
+    "ui.session_details",
+    "ui.widgets",
+    "worktree"
+   ],
+   "label_propagation": [
+    "L0"
+   ]
+  },
+  {
+   "id": "C3",
+   "size": 12,
+   "loc": 12230,
+   "metrics": {
+    "members": 12,
+    "internal": 359,
+    "out": 346,
+    "in": 461,
+    "cohesion": 0.308,
+    "top_partners": [
+     "model:254",
+     "app:254",
+     "store:114",
+     "fake_driver:33",
+     "approval:31"
+    ]
+   },
+   "prefix_mix": {
+    "core (other)": 5,
+    "session*/fleet*/links/channels": 4,
+    "board*+digest": 3
+   },
+   "members": [
+    "boardfacts",
+    "boardlog",
+    "boardsync",
+    "channels",
+    "driver",
+    "fleetsync",
+    "intents",
+    "links",
+    "log",
+    "plugins",
+    "pool",
+    "sessionfile"
+   ],
+   "label_propagation": [
+    "L0"
+   ]
+  },
+  {
+   "id": "C4",
+   "size": 9,
+   "loc": 7066,
+   "metrics": {
+    "members": 9,
+    "internal": 160,
+    "out": 216,
+    "in": 51,
+    "cohesion": 0.375,
+    "top_partners": [
+     "model:62",
+     "theme:53",
+     "intents:34",
+     "driver:18",
+     "ui.detail:16"
+    ]
+   },
+   "prefix_mix": {
+    "ui (other)": 5,
+    "core (other)": 2,
+    "ui *_pane": 2
+   },
+   "members": [
+    "fake_driver",
+    "transcript",
+    "ui.blocks",
+    "ui.inline",
+    "ui.rich_pane",
+    "ui.span_layout",
+    "ui.tool_block",
+    "ui.transcript_pane",
+    "ui.typeset.find"
+   ],
+   "label_propagation": [
+    "L0",
+    "L4"
+   ]
+  },
+  {
+   "id": "C5",
+   "size": 7,
+   "loc": 8634,
+   "metrics": {
+    "members": 7,
+    "internal": 347,
+    "out": 158,
+    "in": 270,
+    "cohesion": 0.448,
+    "top_partners": [
+     "app:120",
+     "store:51",
+     "ui.inbox:50",
+     "model:49",
+     "bus:46"
+    ]
+   },
+   "prefix_mix": {
+    "command*+req/appr/shellscan/sandbox": 6,
+    "ui *_view": 1
+   },
+   "members": [
+    "command",
+    "commandbus",
+    "commandfile",
+    "commandrun",
+    "commandtext",
+    "shellscan",
+    "ui.command_view"
+   ],
+   "label_propagation": [
+    "L0",
+    "L3"
+   ]
+  },
+  {
+   "id": "C6",
+   "size": 6,
+   "loc": 6438,
+   "metrics": {
+    "members": 6,
+    "internal": 78,
+    "out": 19,
+    "in": 17,
+    "cohesion": 0.684,
+    "top_partners": [
+     "ui.typeset.views:18",
+     "theme:6",
+     "ui.typeset.roles:4",
+     "log:2",
+     "app:2"
+    ]
+   },
+   "prefix_mix": {
+    "core (other)": 6
+   },
+   "members": [
+    "figures.displaylist",
+    "figures.fences",
+    "figures.host",
+    "figures.mermaid",
+    "figures.render",
+    "figures.sanitise"
+   ],
+   "label_propagation": [
+    "L2"
+   ]
+  },
+  {
+   "id": "C7",
+   "size": 2,
+   "loc": 1013,
+   "metrics": {
+    "members": 2,
+    "internal": 44,
+    "out": 0,
+    "in": 15,
+    "cohesion": 0.746,
+    "top_partners": [
+     "ui.typeset.gate:12",
+     "__main__:2",
+     "app:1"
+    ]
+   },
+   "prefix_mix": {
+    "core (other)": 2
+   },
+   "members": [
+    "pairing",
+    "version"
+   ],
+   "label_propagation": [
+    "L6"
+   ]
+  }
+ ],
+ "louvain_with_app": {
+  "C0": [
+   "bridge",
+   "brief",
+   "drawable",
+   "figures.displaylist",
+   "figures.fences",
+   "figures.host",
+   "figures.mermaid",
+   "figures.render",
+   "figures.sanitise",
+   "theme",
+   "ui.board_pane",
+   "ui.brief_pane",
+   "ui.compose",
+   "ui.detail",
+   "ui.digest_pane",
+   "ui.inbox",
+   "ui.review",
+   "ui.settings_dialog",
+   "ui.splash",
+   "ui.splash_art",
+   "ui.splash_view",
+   "ui.typeset",
+   "ui.typeset.diffs",
+   "ui.typeset.gate",
+   "ui.typeset.parts",
+   "ui.typeset.roles",
+   "ui.typeset.syntax",
+   "ui.typeset.themes",
+   "ui.typeset.views"
+  ],
+  "C1": [
+   "app",
+   "boardlog",
+   "boardsync",
+   "channels",
+   "command",
+   "commandbus",
+   "commandfile",
+   "commandrun",
+   "commandtext",
+   "layout_ini",
+   "links",
+   "log",
+   "model_catalog",
+   "pool",
+   "settings",
+   "shellscan",
+   "ui.command_view",
+   "ui.main_menu",
+   "ui.tabs"
+  ],
+  "C2": [
+   "board",
+   "boardgraph",
+   "bus",
+   "digest",
+   "effects",
+   "model",
+   "requests",
+   "store",
+   "ui.decision_view",
+   "ui.fleet_view",
+   "ui.focus",
+   "ui.link_form",
+   "ui.projects",
+   "ui.rail",
+   "ui.session_menu"
+  ],
+  "C3": [
+   "boardfacts",
+   "driver",
+   "fake_driver",
+   "fleetsync",
+   "intents",
+   "plugins",
+   "sessionfile",
+   "transcript",
+   "ui.blocks",
+   "ui.inline",
+   "ui.rich_pane",
+   "ui.span_layout",
+   "ui.tool_block",
+   "ui.transcript_pane",
+   "ui.typeset.find"
+  ],
+  "C4": [
+   "approval",
+   "cli_version",
+   "sandbox",
+   "sessions",
+   "templates",
+   "tree",
+   "ui.gate_menu",
+   "ui.health",
+   "ui.launcher",
+   "ui.resume_form",
+   "ui.session_details",
+   "ui.widgets",
+   "worktree"
+  ],
+  "C5": [
+   "__main__",
+   "pairing",
+   "version"
+  ]
+ },
+ "prefix_clusters": {
+  "board*+digest": {
+   "members": 6,
+   "internal": 95,
+   "out": 270,
+   "in": 336,
+   "cohesion": 0.136,
+   "top_partners": [
+    "model:200",
+    "bus:119",
+    "ui.board_pane:78",
+    "intents:61",
+    "app:47"
+   ]
+  },
+  "command*+req/appr/shellscan/sandbox": {
+   "members": 9,
+   "internal": 242,
+   "out": 126,
+   "in": 524,
+   "cohesion": 0.271,
+   "top_partners": [
+    "app:123",
+    "ui.command_view:109",
+    "model:82",
+    "store:58",
+    "bus:46"
+   ]
+  },
+  "session*/fleet*/links/channels": {
+   "members": 5,
+   "internal": 31,
+   "out": 164,
+   "in": 100,
+   "cohesion": 0.105,
+   "top_partners": [
+    "intents:66",
+    "app:62",
+    "boardlog:41",
+    "model:38",
+    "ui.launcher:25"
+   ]
+  },
+  "ui *_pane": {
+   "members": 5,
+   "internal": 41,
+   "out": 646,
+   "in": 41,
+   "cohesion": 0.056,
+   "top_partners": [
+    "theme:141",
+    "board:81",
+    "model:77",
+    "ui.widgets:74",
+    "transcript:48"
+   ]
+  },
+  "ui *_view": {
+   "members": 4,
+   "internal": 2,
+   "out": 328,
+   "in": 44,
+   "cohesion": 0.005,
+   "top_partners": [
+    "model:93",
+    "command:88",
+    "theme:57",
+    "ui.widgets:39",
+    "ui.inbox:22"
+   ]
+  },
+  "ui *_form": {
+   "members": 2,
+   "internal": 0,
+   "out": 162,
+   "in": 12,
+   "cohesion": 0.0,
+   "top_partners": [
+    "ui.launcher:64",
+    "ui.widgets:58",
+    "app:12",
+    "approval:11",
+    "model:9"
+   ]
+  },
+  "ui *_menu": {
+   "members": 3,
+   "internal": 16,
+   "out": 122,
+   "in": 64,
+   "cohesion": 0.079,
+   "top_partners": [
+    "model:72",
+    "app:44",
+    "approval:28",
+    "ui.rail:12",
+    "theme:8"
+   ]
+  }
+ },
+ "prefix_clusters_without_app_edges": {
+  "board*+digest": {
+   "members": 6,
+   "internal": 95,
+   "out": 270,
+   "in": 289,
+   "cohesion": 0.145,
+   "top_partners": [
+    "model:200",
+    "bus:119",
+    "ui.board_pane:78",
+    "intents:61",
+    "channels:39"
+   ]
+  },
+  "command*+req/appr/shellscan/sandbox": {
+   "members": 9,
+   "internal": 242,
+   "out": 126,
+   "in": 401,
+   "cohesion": 0.315,
+   "top_partners": [
+    "ui.command_view:109",
+    "model:82",
+    "store:58",
+    "bus:46",
+    "ui.inbox:40"
+   ]
+  },
+  "session*/fleet*/links/channels": {
+   "members": 5,
+   "internal": 31,
+   "out": 164,
+   "in": 38,
+   "cohesion": 0.133,
+   "top_partners": [
+    "intents:66",
+    "boardlog:41",
+    "model:38",
+    "ui.launcher:25",
+    "approval:7"
+   ]
+  },
+  "ui *_pane": {
+   "members": 5,
+   "internal": 41,
+   "out": 646,
+   "in": 21,
+   "cohesion": 0.058,
+   "top_partners": [
+    "theme:141",
+    "board:81",
+    "model:77",
+    "ui.widgets:74",
+    "transcript:48"
+   ]
+  },
+  "ui *_view": {
+   "members": 4,
+   "internal": 2,
+   "out": 328,
+   "in": 39,
+   "cohesion": 0.005,
+   "top_partners": [
+    "model:93",
+    "command:88",
+    "theme:57",
+    "ui.widgets:39",
+    "ui.inbox:22"
+   ]
+  },
+  "ui *_form": {
+   "members": 2,
+   "internal": 0,
+   "out": 162,
+   "in": 0,
+   "cohesion": 0.0,
+   "top_partners": [
+    "ui.launcher:64",
+    "ui.widgets:58",
+    "approval:11",
+    "model:9",
+    "ui.session_menu:4"
+   ]
+  },
+  "ui *_menu": {
+   "members": 3,
+   "internal": 16,
+   "out": 122,
+   "in": 20,
+   "cohesion": 0.101,
+   "top_partners": [
+    "model:72",
+    "approval:28",
+    "ui.rail:12",
+    "theme:8",
+    "ui.widgets:6"
+   ]
+  }
+ },
+ "prefix_vs_community": {
+  "board*+digest": {
+   "communities": {
+    "C3": [
+     "boardfacts",
+     "boardlog",
+     "boardsync"
+    ],
+    "C1": [
+     "board",
+     "boardgraph",
+     "digest"
+    ]
+   },
+   "purity": 0.5
+  },
+  "command*+req/appr/shellscan/sandbox": {
+   "communities": {
+    "C5": [
+     "command",
+     "commandbus",
+     "commandfile",
+     "commandrun",
+     "commandtext",
+     "shellscan"
+    ],
+    "C2": [
+     "approval",
+     "sandbox"
+    ],
+    "C1": [
+     "requests"
+    ]
+   },
+   "purity": 0.67
+  },
+  "session*/fleet*/links/channels": {
+   "communities": {
+    "C3": [
+     "channels",
+     "fleetsync",
+     "links",
+     "sessionfile"
+    ],
+    "C2": [
+     "sessions"
+    ]
+   },
+   "purity": 0.8
+  },
+  "ui *_pane": {
+   "communities": {
+    "C0": [
+     "ui.board_pane",
+     "ui.brief_pane",
+     "ui.digest_pane"
+    ],
+    "C4": [
+     "ui.rich_pane",
+     "ui.transcript_pane"
+    ]
+   },
+   "purity": 0.6
+  },
+  "ui *_view": {
+   "communities": {
+    "C1": [
+     "ui.decision_view",
+     "ui.fleet_view"
+    ],
+    "C5": [
+     "ui.command_view"
+    ],
+    "C0": [
+     "ui.splash_view"
+    ]
+   },
+   "purity": 0.5
+  },
+  "ui *_form": {
+   "communities": {
+    "C1": [
+     "ui.link_form"
+    ],
+    "C2": [
+     "ui.resume_form"
+    ]
+   },
+   "purity": 0.5
+  },
+  "ui *_menu": {
+   "communities": {
+    "C1": [
+     "ui.main_menu",
+     "ui.session_menu"
+    ],
+    "C2": [
+     "ui.gate_menu"
+    ]
+   },
+   "purity": 0.67
+  }
+ },
+ "louvain_without_app_or_hubs": {
+  "C0": [
+   "approval",
+   "cli_version",
+   "model_catalog",
+   "plugins",
+   "sandbox",
+   "sessions",
+   "shellscan",
+   "templates",
+   "tree",
+   "ui.gate_menu",
+   "ui.health",
+   "ui.launcher",
+   "ui.link_form",
+   "ui.main_menu",
+   "ui.projects",
+   "ui.resume_form",
+   "ui.session_details",
+   "ui.session_menu",
+   "worktree"
+  ],
+  "C1": [
+   "brief",
+   "settings",
+   "ui.brief_pane",
+   "ui.settings_dialog",
+   "ui.typeset",
+   "ui.typeset.diffs",
+   "ui.typeset.gate",
+   "ui.typeset.parts",
+   "ui.typeset.roles",
+   "ui.typeset.syntax",
+   "ui.typeset.themes",
+   "ui.typeset.views"
+  ],
+  "C2": [
+   "boardfacts",
+   "boardlog",
+   "boardsync",
+   "channels",
+   "driver",
+   "fleetsync",
+   "intents",
+   "pool",
+   "sessionfile",
+   "store"
+  ],
+  "C3": [
+   "bridge",
+   "drawable",
+   "ui.compose",
+   "ui.decision_view",
+   "ui.detail",
+   "ui.fleet_view",
+   "ui.focus",
+   "ui.inbox",
+   "ui.rail",
+   "ui.review"
+  ],
+  "C4": [
+   "fake_driver",
+   "transcript",
+   "ui.blocks",
+   "ui.inline",
+   "ui.rich_pane",
+   "ui.span_layout",
+   "ui.tool_block",
+   "ui.transcript_pane",
+   "ui.typeset.find"
+  ],
+  "C5": [
+   "board",
+   "boardgraph",
+   "bus",
+   "digest",
+   "effects",
+   "ui.board_pane",
+   "ui.digest_pane"
+  ],
+  "C6": [
+   "command",
+   "commandbus",
+   "commandfile",
+   "commandrun",
+   "commandtext",
+   "ui.command_view"
+  ],
+  "C7": [
+   "figures.displaylist",
+   "figures.fences",
+   "figures.host",
+   "figures.mermaid",
+   "figures.render",
+   "figures.sanitise"
+  ],
+  "C8": [
+   "ui.splash",
+   "ui.splash_art",
+   "ui.splash_view"
+  ],
+  "C9": [
+   "pairing",
+   "version"
+  ]
+ }
+}

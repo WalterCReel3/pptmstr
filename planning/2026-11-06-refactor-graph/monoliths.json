@@ -1,0 +1,2583 @@
+{
+ "app": {
+  "module": "pptmstr.app",
+  "loc": 6193,
+  "units": 244,
+  "expanded": [],
+  "intra_edges": 460,
+  "intra_weight": 562,
+  "components": 2,
+  "largest_component": 243,
+  "singletons": 1,
+  "communities": 14,
+  "modularity": 0.617,
+  "cut_weight": 141,
+  "community_detail": [
+   {
+    "id": 0,
+    "size": 47,
+    "lines": 1312,
+    "hubs": [
+     "AppState",
+     "_panels",
+     "_card_actions",
+     "_command_rows",
+     "_card_wiring",
+     "_draw_card_overlays"
+    ],
+    "external_modules": [
+     "model:33",
+     "intents:15",
+     "log:15",
+     "command:12",
+     "ui.session_menu:11",
+     "channels:10"
+    ],
+    "members": [
+     "AppState",
+     "_LOG_FAKE",
+     "_LOG_SWITCHED_OFF",
+     "_SCROLLBACK_FLOOR",
+     "_card_actions",
+     "_card_wiring",
+     "_close",
+     "_close_channel_pressed",
+     "_closed_path",
+     "_command_rows",
+     "_detach",
+     "_dismiss",
+     "_draw_card_overlays",
+     "_fork",
+     "_fork_of",
+     "_from_a_label",
+     "_held",
+     "_interrupt",
+     "_left_behind",
+     "_link_pressed",
+     "_log_panel",
+     "_log_text_edges",
+     "_note_gate",
+     "_observer",
+     "_open_resume",
+     "_panels",
+     "_policy_of",
+     "_record_board",
+     "_record_channels",
+     "_record_commands",
+     "_record_fleet",
+     "_recording",
+     "_relaunch",
+     "_release_survivor",
+     "_resume_session",
+     "_reviewing",
+     "_revoke_policy",
+     "_scrollback_height",
+     "_send",
+     "_session_action",
+     "_settle_restore",
+     "_show_thread",
+     "_stop_recording_everything",
+     "_why_unrecorded",
+     "board_logging",
+     "close_channel",
+     "link_leads"
+    ]
+   },
+   {
+    "id": 1,
+    "size": 29,
+    "lines": 296,
+    "hubs": [
+     "_not_done",
+     "_approve_command",
+     "_run_command",
+     "_refuse_command",
+     "_abandon_command",
+     "_check_for_overdue_commands"
+    ],
+    "external_modules": [
+     "command:15",
+     "log:7",
+     "intents:5",
+     "model:5",
+     "commandrun:3",
+     "approval:2"
+    ],
+    "members": [
+     "ABANDONED",
+     "COMMAND_OVERDUE_S",
+     "NOT_ABANDONED",
+     "NOT_APPLIED",
+     "NOT_CANCELLED",
+     "NOT_HELD",
+     "NOT_REFUSED",
+     "NOT_RUN",
+     "NO_LONGER_ASKED",
+     "NO_LONGER_RUNNING",
+     "NO_SESSION_DIRECTORY",
+     "OVERDUE",
+     "REQUEST_PENDING",
+     "REQUEST_UNRECORDED",
+     "WITHDRAWN_FIRST",
+     "_NO_RUNNER",
+     "_NO_RUNNER_FAKE",
+     "_NO_RUNNER_NONE",
+     "_abandon_command",
+     "_approve_command",
+     "_cancel_command",
+     "_check_for_overdue_commands",
+     "_check_for_unstarted_runs",
+     "_end_unstarted",
+     "_ended_first",
+     "_not_done",
+     "_refuse_command",
+     "_run_command",
+     "_set_policy"
+    ]
+   },
+   {
+    "id": 2,
+    "size": 22,
+    "lines": 483,
+    "hubs": [
+     "main",
+     "guarded",
+     "begin_frame",
+     "_keep_gc_settled",
+     "_GC",
+     "_PANEL_ERRORS"
+    ],
+    "external_modules": [
+     "log:10",
+     "ui.detail:10",
+     "theme:8",
+     "settings:6",
+     "ui.typeset.gate:3",
+     "ui.review:2"
+    ],
+    "members": [
+     "EXIT_SIGNALS",
+     "GC_QUIET_S",
+     "GC_SETTLE_EVERY_S",
+     "_APPROVE_HELD",
+     "_GC",
+     "_GcSettling",
+     "_PANEL_ERRORS",
+     "_REVIEW_PANES",
+     "_apply_theme_if_dirty",
+     "_ask_window_to_close",
+     "_before_exit",
+     "_keep_baked_sizes",
+     "_keep_gc_settled",
+     "_keep_saved_layouts",
+     "_read_survivor_checks",
+     "_settle_gc",
+     "_text_overrides",
+     "begin_frame",
+     "exit_on_signals",
+     "gc_settle_due",
+     "guarded",
+     "main"
+    ]
+   },
+   {
+    "id": 3,
+    "size": 22,
+    "lines": 733,
+    "hubs": [
+     "_launch",
+     "LaunchRefused",
+     "_launch_ended",
+     "LaunchOutcome",
+     "_reap_launches",
+     "_open_board_log"
+    ],
+    "external_modules": [
+     "log:18",
+     "boardlog:9",
+     "ui.launcher:6",
+     "cli_version:5",
+     "boardsync:5",
+     "model:4"
+    ],
+    "members": [
+     "LaunchHeldOnChanges",
+     "LaunchOutcome",
+     "LaunchRefused",
+     "LaunchStarted",
+     "_InFlight",
+     "_Logged",
+     "_MOVED_INSIDE",
+     "_Unreadable",
+     "_addresses_of",
+     "_board_log_unopened",
+     "_carried_addresses",
+     "_containment_refusal",
+     "_launch",
+     "_launch_ended",
+     "_newest",
+     "_note_started",
+     "_open_board_log",
+     "_read_log",
+     "_reap_launches",
+     "_recorded_title",
+     "_seed_brief",
+     "_why_not_started"
+    ]
+   },
+   {
+    "id": 4,
+    "size": 18,
+    "lines": 533,
+    "hubs": [
+     "CommandFiles",
+     "_start",
+     "CommandFileReport",
+     "startup_shortfalls",
+     "_count",
+     "_recall_fleet"
+    ],
+    "external_modules": [
+     "log:19",
+     "commandfile:16",
+     "command:6",
+     "commandrun:6",
+     "channels:6",
+     "boardsync:6"
+    ],
+    "members": [
+     "CommandFileReport",
+     "CommandFiles",
+     "CommandHost",
+     "CommandShortfalls",
+     "Lister",
+     "README_BOARD_LOG_HEADING",
+     "_FILES_CLOSED",
+     "_README_BOARD_LOG",
+     "_Write",
+     "_command_ended",
+     "_command_host",
+     "_count",
+     "_migrate_board_logs",
+     "_recall_fleet",
+     "_restore_channels",
+     "_say_recall",
+     "_start",
+     "startup_shortfalls"
+    ]
+   },
+   {
+    "id": 5,
+    "size": 17,
+    "lines": 367,
+    "hubs": [
+     "apply_intents",
+     "_send_wakes",
+     "_read_board_reports",
+     "_hold_wake",
+     "_say_peer_wakes_spent",
+     "_read_command_reports"
+    ],
+    "external_modules": [
+     "effects:15",
+     "model:10",
+     "log:6",
+     "commandfile:5",
+     "intents:4",
+     "boardlog:4"
+    ],
+    "members": [
+     "WAKE_WINDOW_S",
+     "_RECORD_OF",
+     "_UNWAKEABLE",
+     "_age_questions",
+     "_hold_wake",
+     "_landed",
+     "_note_detach",
+     "_read_board_reports",
+     "_read_command_reports",
+     "_say_decisions_named",
+     "_say_peer_wakes_spent",
+     "_send_wakes",
+     "_sendable",
+     "_still_to_read",
+     "_stop_command",
+     "_wake",
+     "apply_intents"
+    ]
+   },
+   {
+    "id": 6,
+    "size": 17,
+    "lines": 387,
+    "hubs": [
+     "_shut_down",
+     "_read_channel_reports",
+     "_read_outcome",
+     "_read_sweep",
+     "_close_commands",
+     "_close_fleet"
+    ],
+    "external_modules": [
+     "channels:18",
+     "log:17",
+     "fleetsync:6",
+     "commandrun:3",
+     "commandfile:3",
+     "boardlog:3"
+    ],
+    "members": [
+     "_COMMAND_FILES_CLOSE_S",
+     "_LEFT_LIVE",
+     "_SHUTDOWN_MARGIN_S",
+     "_close_board_log",
+     "_close_channel_log",
+     "_close_commands",
+     "_close_fleet",
+     "_live_sessions",
+     "_not_written",
+     "_read_channel_reports",
+     "_read_fleet_reports",
+     "_read_outcome",
+     "_read_sweep",
+     "_record_unconfirmed",
+     "_shut_down",
+     "_stopped",
+     "_sweep_notices"
+    ]
+   },
+   {
+    "id": 7,
+    "size": 14,
+    "lines": 271,
+    "hubs": [
+     "_handle_layout_keys",
+     "FOCUS",
+     "TRIAGE",
+     "_status_bar",
+     "LAYOUT_KEYS",
+     "_handle_card_key"
+    ],
+    "external_modules": [
+     "theme:7",
+     "model:3",
+     "ui.focus:2",
+     "ui.review:1",
+     "ui.inbox:1",
+     "approval:1"
+    ],
+    "members": [
+     "CARD_MENU_KEY",
+     "FOCUS",
+     "FleetCounts",
+     "LAYOUT_KEYS",
+     "TRIAGE",
+     "_go_to_session",
+     "_handle_card_key",
+     "_handle_keys",
+     "_handle_layout_keys",
+     "_modal_up",
+     "_relaxed_count",
+     "_show_health",
+     "_status_bar",
+     "fleet_counts"
+    ]
+   },
+   {
+    "id": 8,
+    "size": 14,
+    "lines": 288,
+    "hubs": [
+     "_apply_settings",
+     "_perform",
+     "_menu_facts",
+     "_menus",
+     "_switch_wrap",
+     "_switch_hide_ended"
+    ],
+    "external_modules": [
+     "ui.main_menu:26",
+     "settings:4",
+     "ui.typeset.gate:3",
+     "ui.typeset.roles:3",
+     "model:2",
+     "ui.session_menu:2"
+    ],
+    "members": [
+     "_LOG_PANES",
+     "_TYPESET_FIELDS",
+     "_apply_settings",
+     "_configure_typeset",
+     "_described",
+     "_find_refused",
+     "_menu_facts",
+     "_menus",
+     "_perform",
+     "_save",
+     "_switch_hide_ended",
+     "_switch_theme",
+     "_switch_typeset",
+     "_switch_wrap"
+    ]
+   },
+   {
+    "id": 9,
+    "size": 13,
+    "lines": 170,
+    "hubs": [
+     "_window",
+     "_focus_layout",
+     "_triage_layout",
+     "_hold_fleet",
+     "FLEET_NODE_FLAGS",
+     "_fleet_window"
+    ],
+    "external_modules": [],
+    "members": [
+     "FLEET_MAX_CHARS",
+     "FLEET_MIN_CHARS",
+     "FLEET_NODE_FLAGS",
+     "SESSION_FLAGS",
+     "_fleet_window",
+     "_focus_layout",
+     "_hold_fleet",
+     "_rail_split",
+     "_split",
+     "_triage_layout",
+     "_window",
+     "fleet_bounds",
+     "fleet_width"
+    ]
+   },
+   {
+    "id": 10,
+    "size": 12,
+    "lines": 221,
+    "hubs": [
+     "_check_survivor",
+     "_restore_commands",
+     "_looked_again",
+     "NOT_LOOKED",
+     "_as_found",
+     "_look"
+    ],
+    "external_modules": [
+     "commandrun:23",
+     "command:13",
+     "log:7",
+     "commandfile:6",
+     "intents:2"
+    ],
+    "members": [
+     "GONE",
+     "GONE_UNTAGGED",
+     "NOT_LOOKED",
+     "RECORD_UNREADABLE",
+     "STILL_THERE",
+     "UNIDENTIFIED",
+     "_as_found",
+     "_check_survivor",
+     "_log_look",
+     "_look",
+     "_looked_again",
+     "_restore_commands"
+    ]
+   },
+   {
+    "id": 11,
+    "size": 9,
+    "lines": 240,
+    "hubs": [
+     "_draw_overlays",
+     "_draw_not_done",
+     "_resume_ends",
+     "_form_up",
+     "_resume_failed",
+     "_launcher_pressed"
+    ],
+    "external_modules": [
+     "ui.launcher:3",
+     "ui.settings_dialog:3",
+     "ui.resume_form:3",
+     "theme:1",
+     "ui.tabs:1",
+     "model:1"
+    ],
+    "members": [
+     "NOT_DONE_TITLE",
+     "_NOT_DONE_WIDTH",
+     "_draw_not_done",
+     "_draw_overlays",
+     "_form_up",
+     "_launcher_pressed",
+     "_resume_ends",
+     "_resume_failed",
+     "_resume_pressed"
+    ]
+   },
+   {
+    "id": 12,
+    "size": 9,
+    "lines": 184,
+    "hubs": [
+     "watch",
+     "_check_for_drain_stall",
+     "_check_for_lost_approvals",
+     "_check_for_stranded_requests",
+     "_DRAIN_STALL_S",
+     "_stalled_transcripts"
+    ],
+    "external_modules": [
+     "log:4",
+     "transcript:2",
+     "model:1"
+    ],
+    "members": [
+     "_DRAIN_STALL_S",
+     "_LOST_APPROVAL_GRACE_S",
+     "_STRANDED_REQUEST_GRACE_S",
+     "_WATCHDOG_POLL_S",
+     "_check_for_drain_stall",
+     "_check_for_lost_approvals",
+     "_check_for_stranded_requests",
+     "_stalled_transcripts",
+     "watch"
+    ]
+   }
+  ]
+ },
+ "bus": {
+  "module": "pptmstr.bus",
+  "loc": 6076,
+  "units": 211,
+  "expanded": [
+   "build_server (1718 lines -> 24 units)"
+  ],
+  "intra_edges": 525,
+  "intra_weight": 687,
+  "components": 6,
+  "largest_component": 206,
+  "singletons": 5,
+  "communities": 13,
+  "modularity": 0.515,
+  "cut_weight": 173,
+  "community_detail": [
+   {
+    "id": 0,
+    "size": 57,
+    "lines": 2129,
+    "hubs": [
+     "_text",
+     "build_server.declare_task",
+     "build_server.raise_decision",
+     "build_server.amend_task",
+     "_sender",
+     "build_server.complete_task"
+    ],
+    "external_modules": [
+     "model:101",
+     "effects:32",
+     "intents:15",
+     "boardgraph:4",
+     "board:3",
+     "driver:2"
+    ],
+    "members": [
+     "CALLED_AT_KEY",
+     "EDITED_KEY",
+     "FROM_KEY",
+     "InvalidBasis",
+     "InvalidStanding",
+     "MAX_LINE_CHARS",
+     "MAX_LISTED",
+     "MAX_PATH_CHARS",
+     "MAX_TEXT_CHARS",
+     "UnstampedCall",
+     "_BASIS_PROPERTY",
+     "_BLOCKS_ARE",
+     "_CHARTER_UNKEPT",
+     "_CUT_NOTE_ROOM",
+     "_FLAG_TYPE",
+     "_OVER_ADVICE",
+     "_PeerMessage",
+     "_behind",
+     "_called_at",
+     "_decision_refusal_text",
+     "_kept",
+     "_lead_of",
+     "_length_refusal",
+     "_listed_refusal",
+     "_outcome",
+     "_park",
+     "_peer_wake_said",
+     "_premises_text",
+     "_property_refusal",
+     "_schema",
+     "_sender",
+     "_stated_basis",
+     "_stated_blocks",
+     "_stated_not_run",
+     "_stated_peer_message",
+     "_stated_provenance",
+     "_stated_reversible",
+     "_stated_standing",
+     "_text",
+     "build_server",
+     "build_server.amend_task",
+     "build_server.board_world",
+     "build_server.claim_task",
+     "build_server.complete_task",
+     "build_server.declare_task",
+     "build_server.post_concern",
+     "build_server.raise_decision",
+     "build_server.read_board",
+     "build_server.read_decisions",
+     "build_server.read_digest",
+     "build_server.read_peer_messages",
+     "build_server.ready",
+     "build_server.send_to_peer",
+     "build_server.why_blocked",
+     "build_server.withdraw_decision",
+     "build_server.withdraw_peer_message",
+     "build_server.withdraw_task"
+    ]
+   },
+   {
+    "id": 1,
+    "size": 57,
+    "lines": 1118,
+    "hubs": [
+     "_board_line",
+     "_task_lines",
+     "_part_text",
+     "_quoted",
+     "_said",
+     "build_server.read_inbox"
+    ],
+    "external_modules": [
+     "board:61",
+     "model:24",
+     "digest:10",
+     "effects:2",
+     "intents:1"
+    ],
+    "members": [
+     "_ANSWER",
+     "_AS_EDITED",
+     "_CLOSED_UNDER_YOU",
+     "_DETAIL_INDENT",
+     "_DETAIL_LEAD",
+     "_MAX_CONCERN_CHARS",
+     "_MAX_DETAIL_CHARS",
+     "_MAX_DIGEST_LINE_CHARS",
+     "_MAX_NOT_RUN_CHARS",
+     "_MAX_RESULT_CHARS",
+     "_NOTE_LEAD",
+     "_PART_NOT_RUN",
+     "_PART_RESULT",
+     "_Prose",
+     "_QUOTE",
+     "_UNDECLARED",
+     "_UNDECLARED_ACCOUNT",
+     "_WITHDRAWN_UNDER_YOU",
+     "_account",
+     "_account_mark",
+     "_answer_lines",
+     "_board_line",
+     "_board_text",
+     "_change_lines",
+     "_closing_reason",
+     "_cost",
+     "_cuttable",
+     "_delimited_note",
+     "_delimited_task",
+     "_edited_note",
+     "_incident_headline",
+     "_incident_lines",
+     "_laid",
+     "_landed_behind_text",
+     "_not_run_heading",
+     "_note_heading",
+     "_operators_notice",
+     "_part_text",
+     "_quoted",
+     "_reasons_text",
+     "_rest",
+     "_result_heading",
+     "_said",
+     "_specification_lines",
+     "_task_lines",
+     "_task_text",
+     "_undeclared",
+     "_unread_note",
+     "_unverified_lines",
+     "_version_heading",
+     "_waiting_on",
+     "_withdrawal_heading",
+     "_withdrawal_notice_lines",
+     "_withdrawal_reason",
+     "_withheld",
+     "build_server.read_inbox",
+     "build_server.withdrawn_because"
+    ]
+   },
+   {
+    "id": 2,
+    "size": 33,
+    "lines": 731,
+    "hubs": [
+     "_named",
+     "_decisions_text",
+     "_chain_lines",
+     "_dry_run_text",
+     "_QUOTE_LEGEND",
+     "_peer_message_lines"
+    ],
+    "external_modules": [
+     "model:48",
+     "boardgraph:17",
+     "effects:13",
+     "drawable:1",
+     "board:1"
+    ],
+    "members": [
+     "_ANSWER_LEGEND",
+     "_BARE_NAME",
+     "_CHARTER_LEGEND",
+     "_CLOSING_LEGEND",
+     "_LIST_NOTICE_ROOM",
+     "_MAX_ROLE_CHARS",
+     "_MAX_ROOTS_LISTED",
+     "_OPEN_BOARD_READ",
+     "_PEER_LEGEND",
+     "_QUOTE_LEGEND",
+     "_already_behind_text",
+     "_auto_depends_text",
+     "_chain_lines",
+     "_cited_text",
+     "_decisions_text",
+     "_dry_run_text",
+     "_hop_state",
+     "_legend",
+     "_linked_now",
+     "_links_lines",
+     "_loop_has_a_gate",
+     "_named",
+     "_peer_message_lines",
+     "_peer_messages_text",
+     "_peer_refusal_text",
+     "_ready_text",
+     "_root_needs",
+     "_shared_note",
+     "_unknown_decision_text",
+     "_unread",
+     "_why_blocked_text",
+     "_withdrawn_message_lines",
+     "peer_said"
+    ]
+   },
+   {
+    "id": 3,
+    "size": 14,
+    "lines": 299,
+    "hubs": [
+     "_one_line",
+     "peer_wake_line",
+     "wake_line",
+     "wake_message",
+     "WAKE_DECISIONS_NAMED",
+     "_relayed"
+    ],
+    "external_modules": [
+     "effects:17",
+     "model:11",
+     "board:3"
+    ],
+    "members": [
+     "WAKE_DECISIONS_NAMED",
+     "WAKE_HEADING",
+     "WAKE_QUESTIONS_NAMED",
+     "_across_a_link",
+     "_amended_text",
+     "_held_live_text",
+     "_one_line",
+     "_provenance_said",
+     "_relayed",
+     "_role",
+     "_titled",
+     "peer_wake_line",
+     "wake_line",
+     "wake_message"
+    ]
+   },
+   {
+    "id": 4,
+    "size": 14,
+    "lines": 228,
+    "hubs": [
+     "_decision_whole",
+     "_decision_listed",
+     "_headline",
+     "_argument",
+     "_own_block",
+     "_age"
+    ],
+    "external_modules": [
+     "model:19"
+    ],
+    "members": [
+     "WAKE_SAID",
+     "WAKE_SAID_SUBAGENT",
+     "_MAX_QUESTION_LINE_CHARS",
+     "_REVERSIBLE_SAID",
+     "_age",
+     "_argument",
+     "_blocks_said",
+     "_decision_listed",
+     "_decision_whole",
+     "_headline",
+     "_own_block",
+     "_sentence_opening",
+     "_standing_said",
+     "_state_word"
+    ]
+   },
+   {
+    "id": 5,
+    "size": 13,
+    "lines": 411,
+    "hubs": [
+     "_refusal_text",
+     "build_server.release_task",
+     "_declare_refusal_text",
+     "_duplicate_id_text",
+     "_stranded",
+     "_claim_refusal_text"
+    ],
+    "external_modules": [
+     "model:50",
+     "board:3",
+     "intents:1"
+    ],
+    "members": [
+     "_CLOSED_IS_NOT_DONE",
+     "_NOT_IN_AN_ID",
+     "_NOT_ON_BOARD",
+     "_OPERATOR_CLOSES",
+     "_claim_refusal_text",
+     "_declare_refusal_text",
+     "_duplicate_id_text",
+     "_escaped_dependency_text",
+     "_held_text",
+     "_refusal_text",
+     "_stranded",
+     "_withdraw_refusal_text",
+     "build_server.release_task"
+    ]
+   },
+   {
+    "id": 6,
+    "size": 12,
+    "lines": 261,
+    "hubs": [
+     "build_server.read_task",
+     "_digest_text",
+     "_MAX_BOARD_CHARS",
+     "_bounded_digest_text",
+     "_IN_FULL",
+     "_waiting_line"
+    ],
+    "external_modules": [
+     "model:12",
+     "digest:11",
+     "board:3",
+     "intents:2",
+     "effects:1"
+    ],
+    "members": [
+     "_IN_FULL",
+     "_ITEM_LEAD",
+     "_MAX_BOARD_CHARS",
+     "_NO_SUBJECT",
+     "_SHOWN_NOTE_ROOM",
+     "_agent_notes",
+     "_bounded_digest_text",
+     "_digest_text",
+     "_unshown",
+     "_waiting_heading",
+     "_waiting_line",
+     "build_server.read_task"
+    ]
+   },
+   {
+    "id": 7,
+    "size": 6,
+    "lines": 42,
+    "hubs": [
+     "qualified",
+     "offered_tools",
+     "BUS_TOOLS",
+     "COMMAND_TOOLS",
+     "PEER_TOOLS",
+     "SERVER_NAME"
+    ],
+    "external_modules": [],
+    "members": [
+     "BUS_TOOLS",
+     "COMMAND_TOOLS",
+     "PEER_TOOLS",
+     "SERVER_NAME",
+     "offered_tools",
+     "qualified"
+    ]
+   },
+   {
+    "id": 10,
+    "size": 1,
+    "lines": 13,
+    "hubs": [
+     "build_server.board_ids"
+    ],
+    "external_modules": [
+     "model:2",
+     "effects:2",
+     "intents:1"
+    ],
+    "members": [
+     "build_server.board_ids"
+    ]
+   },
+   {
+    "id": 11,
+    "size": 1,
+    "lines": 13,
+    "hubs": [
+     "build_server.board_row"
+    ],
+    "external_modules": [
+     "model:2",
+     "effects:2",
+     "board:1",
+     "intents:1"
+    ],
+    "members": [
+     "build_server.board_row"
+    ]
+   },
+   {
+    "id": 12,
+    "size": 1,
+    "lines": 19,
+    "hubs": [
+     "build_server.withdrawn_row"
+    ],
+    "external_modules": [
+     "model:3",
+     "effects:2",
+     "board:2",
+     "intents:1"
+    ],
+    "members": [
+     "build_server.withdrawn_row"
+    ]
+   }
+  ]
+ },
+ "model": {
+  "module": "pptmstr.model",
+  "loc": 5175,
+  "units": 215,
+  "expanded": [
+   "Task (414 lines -> 11 units)",
+   "Snapshot (1179 lines -> 47 units)"
+  ],
+  "intra_edges": 359,
+  "intra_weight": 509,
+  "components": 30,
+  "largest_component": 179,
+  "singletons": 24,
+  "communities": 43,
+  "modularity": 0.67,
+  "cut_weight": 117,
+  "community_detail": [
+   {
+    "id": 0,
+    "size": 26,
+    "lines": 505,
+    "hubs": [
+     "NodeId",
+     "ObligationKind",
+     "Obligation",
+     "PeerMailHeld",
+     "ApprovalNeeded",
+     "DecisionOwed"
+    ],
+    "external_modules": [
+     "command:3"
+    ],
+    "members": [
+     "ApprovalNeeded",
+     "AskerFate",
+     "CommandOwed",
+     "DecisionOwed",
+     "NodeId",
+     "Obligation",
+     "ObligationKind",
+     "PeerMailHeld",
+     "PeerQuestionUnanswered",
+     "QuestionPending",
+     "SessionFailed",
+     "Snapshot.approvals",
+     "Snapshot.children_of",
+     "Snapshot.commands_of",
+     "Snapshot.commands_readable_by",
+     "Snapshot.left_behind",
+     "Snapshot.of_earlier_run",
+     "Task.amended_by",
+     "Task.was_amended_by",
+     "WakeChainHeld",
+     "_ABOUT_TWO_TEAMS",
+     "_ADDRESS_ONLY",
+     "_node_key",
+     "is_address_only",
+     "peer_addressed",
+     "restored_party"
+    ]
+   },
+   {
+    "id": 1,
+    "size": 24,
+    "lines": 525,
+    "hubs": [
+     "Concern",
+     "ConcernState",
+     "Snapshot.cited_question",
+     "_thread_mark",
+     "CitedQuestion",
+     "ThreadMark"
+    ],
+    "external_modules": [],
+    "members": [
+     "CitedQuestion",
+     "Concern",
+     "ConcernState",
+     "Snapshot._answered",
+     "Snapshot._waiting_for",
+     "Snapshot.awaiting_answer",
+     "Snapshot.cited_question",
+     "Snapshot.inbox_of",
+     "Snapshot.is_answered",
+     "Snapshot.peer_deliverable",
+     "Snapshot.peer_held",
+     "Snapshot.peer_unread",
+     "Snapshot.questions_unread",
+     "Snapshot.withdrawn_untold",
+     "ThreadMark",
+     "ThreadMessage",
+     "_CLOSING_NOTICE",
+     "_OPERATOR_PARTY",
+     "_thread_mark",
+     "closing_notice",
+     "is_closing_notice",
+     "is_operator",
+     "operator_party",
+     "withdrawal_notice"
+    ]
+   },
+   {
+    "id": 2,
+    "size": 18,
+    "lines": 634,
+    "hubs": [
+     "Task",
+     "TaskId",
+     "ApprovedWrites",
+     "approved_write",
+     "Task.blocked_on",
+     "TaskState"
+    ],
+    "external_modules": [],
+    "members": [
+     "ApprovedWrites",
+     "Basis",
+     "Snapshot.claimable_tasks",
+     "Task",
+     "Task.blocked_on",
+     "Task.completed_version",
+     "Task.dependency",
+     "Task.is_claimable",
+     "Task.writers",
+     "TaskId",
+     "TaskState",
+     "TaskVersion",
+     "WRITING_TOOLS",
+     "_hunk_budget",
+     "_merged",
+     "approved_write",
+     "count_diff_lines",
+     "written_path"
+    ]
+   },
+   {
+    "id": 3,
+    "size": 16,
+    "lines": 372,
+    "hubs": [
+     "Snapshot.peer_index",
+     "ChannelId",
+     "Snapshot.thread",
+     "PeerIndex",
+     "PendingApproval",
+     "ThreadRow"
+    ],
+    "external_modules": [
+     "approval:2"
+    ],
+    "members": [
+     "ChannelId",
+     "LinkThread",
+     "PeerIndex",
+     "PendingApproval",
+     "Snapshot.parked_link",
+     "Snapshot.parked_on",
+     "Snapshot.peer_index",
+     "Snapshot.thread",
+     "ThreadDecision",
+     "ThreadParked",
+     "ThreadRow",
+     "ThreadSide",
+     "ThreadWakeHeld",
+     "WITHDRAW_PEER_TOOL",
+     "_Waiting",
+     "why_held"
+    ]
+   },
+   {
+    "id": 4,
+    "size": 14,
+    "lines": 419,
+    "hubs": [
+     "Snapshot",
+     "ConcernId",
+     "_empty_map",
+     "DecisionId",
+     "Restore",
+     "PeerWakes"
+    ],
+    "external_modules": [
+     "command:3"
+    ],
+    "members": [
+     "ConcernId",
+     "DecisionId",
+     "NotPlaced",
+     "PeerWakes",
+     "Restore",
+     "Snapshot",
+     "Snapshot.empty",
+     "Snapshot.peer_untold",
+     "Unplaced",
+     "_REFUSED",
+     "_WITHDRAWAL_NOTICE",
+     "_empty_map",
+     "is_withdrawal_notice",
+     "withdrawal_notice_id"
+    ]
+   },
+   {
+    "id": 5,
+    "size": 13,
+    "lines": 205,
+    "hubs": [
+     "Channel",
+     "PeerRefusal",
+     "Snapshot.peer_route",
+     "Snapshot.peer_inbox_of",
+     "Snapshot.owed_answers",
+     "Snapshot.peer_send_refusal"
+    ],
+    "external_modules": [],
+    "members": [
+     "Channel",
+     "ChannelScope",
+     "EVERY_CHANNEL",
+     "EveryChannel",
+     "PeerRefusal",
+     "Snapshot.channels_of",
+     "Snapshot.linked_after",
+     "Snapshot.owed_answers",
+     "Snapshot.peer_inbox_named",
+     "Snapshot.peer_inbox_of",
+     "Snapshot.peer_owing",
+     "Snapshot.peer_route",
+     "Snapshot.peer_send_refusal"
+    ]
+   },
+   {
+    "id": 6,
+    "size": 11,
+    "lines": 593,
+    "hubs": [
+     "AgentRecord",
+     "ContextSnapshot",
+     "ContextPressure",
+     "Recalled",
+     "Snapshot.get",
+     "Snapshot.subagents_of"
+    ],
+    "external_modules": [
+     "approval:6",
+     "transcript:2"
+    ],
+    "members": [
+     "AgentRecord",
+     "ContextPressure",
+     "ContextSnapshot",
+     "EndedHow",
+     "LaunchSpec",
+     "NewWorktree",
+     "Recalled",
+     "Snapshot.get",
+     "Snapshot.subagents_of",
+     "TranscriptPresence",
+     "UsageRollup"
+    ]
+   },
+   {
+    "id": 7,
+    "size": 11,
+    "lines": 171,
+    "hubs": [
+     "Charter",
+     "Provenance",
+     "stated_provenance",
+     "kept_provenance",
+     "is_concern_id",
+     "_CONCERN_ID_HEX"
+    ],
+    "external_modules": [],
+    "members": [
+     "Charter",
+     "Provenance",
+     "_CHARTER_ECHOED",
+     "_CHARTER_NO",
+     "_CHARTER_UNSTATED",
+     "_CHARTER_YES",
+     "_CONCERN_ID_HEX",
+     "_HEX_DIGITS",
+     "is_concern_id",
+     "kept_provenance",
+     "stated_provenance"
+    ]
+   },
+   {
+    "id": 8,
+    "size": 9,
+    "lines": 185,
+    "hubs": [
+     "Decision",
+     "DecisionOutcome",
+     "Snapshot.decisions_readable_by",
+     "Answered",
+     "Snapshot.decisions_of",
+     "Snapshot.channel_decision_readable"
+    ],
+    "external_modules": [],
+    "members": [
+     "Answered",
+     "Decision",
+     "DecisionOutcome",
+     "Dismissed",
+     "Snapshot.channel_decision_readable",
+     "Snapshot.decisions_of",
+     "Snapshot.decisions_readable_by",
+     "Standing",
+     "Withdrawn"
+    ]
+   },
+   {
+    "id": 9,
+    "size": 9,
+    "lines": 228,
+    "hubs": [
+     "CommandRefusal",
+     "_COMMAND_REFUSAL_SENTENCES",
+     "Snapshot.detach_refusal",
+     "Snapshot.command_approval_refusal",
+     "DetachRefusal",
+     "Snapshot.commands_awaiting"
+    ],
+    "external_modules": [
+     "command:9"
+    ],
+    "members": [
+     "CommandRefusal",
+     "DetachRefusal",
+     "Snapshot.command_approval_refusal",
+     "Snapshot.commands_awaiting",
+     "Snapshot.detach_refusal",
+     "Snapshot.off_fleet",
+     "Snapshot.running_command",
+     "Snapshot.unsupervised_command",
+     "_COMMAND_REFUSAL_SENTENCES"
+    ]
+   },
+   {
+    "id": 10,
+    "size": 9,
+    "lines": 104,
+    "hubs": [
+     "Snapshot.link_refusal",
+     "LinkRefusal",
+     "_channel_refusal",
+     "Snapshot.live_channel",
+     "MAX_CHANNEL_CHARS",
+     "_CHANNEL_NAME"
+    ],
+    "external_modules": [],
+    "members": [
+     "LINK_MEMBERS",
+     "LinkRefusal",
+     "MAX_CHANNEL_CHARS",
+     "Snapshot.link_refusal",
+     "Snapshot.live_channel",
+     "_CHANNEL_NAME",
+     "_channel_refusal",
+     "channel_refusal",
+     "is_channel_name"
+    ]
+   },
+   {
+    "id": 11,
+    "size": 8,
+    "lines": 171,
+    "hubs": [
+     "AgentState",
+     "Snapshot.whose_move",
+     "MoveOwner",
+     "WhoseMove",
+     "Snapshot.wakeable",
+     "_ACTIVE_STATES"
+    ],
+    "external_modules": [],
+    "members": [
+     "AgentState",
+     "FINAL_STATES",
+     "MoveOwner",
+     "Snapshot.wakeable",
+     "Snapshot.whose_move",
+     "WhoseMove",
+     "_ACTIVE_STATES",
+     "_TERMINAL_STATES"
+    ]
+   },
+   {
+    "id": 12,
+    "size": 6,
+    "lines": 34,
+    "hubs": [
+     "withdrawal_label",
+     "withdrawal_result",
+     "REASON_EDITED",
+     "WITHDRAWN_BY_DECLARER",
+     "WITHDRAWN_BY_LEAD",
+     "withdrawal_reason"
+    ],
+    "external_modules": [],
+    "members": [
+     "REASON_EDITED",
+     "WITHDRAWN_BY_DECLARER",
+     "WITHDRAWN_BY_LEAD",
+     "withdrawal_label",
+     "withdrawal_reason",
+     "withdrawal_result"
+    ]
+   },
+   {
+    "id": 13,
+    "size": 5,
+    "lines": 156,
+    "hubs": [
+     "relative_write",
+     "_absolute",
+     "normalised_touches",
+     "Task.wrote_outside_declaration",
+     "_within"
+    ],
+    "external_modules": [],
+    "members": [
+     "Task.wrote_outside_declaration",
+     "_absolute",
+     "_within",
+     "normalised_touches",
+     "relative_write"
+    ]
+   },
+   {
+    "id": 14,
+    "size": 3,
+    "lines": 3,
+    "hubs": [
+     "MAX_CLOSE_REASON_CHARS",
+     "MAX_ANSWER_CHARS",
+     "MAX_WITHDRAWAL_REASON_CHARS"
+    ],
+    "external_modules": [],
+    "members": [
+     "MAX_ANSWER_CHARS",
+     "MAX_CLOSE_REASON_CHARS",
+     "MAX_WITHDRAWAL_REASON_CHARS"
+    ]
+   },
+   {
+    "id": 15,
+    "size": 3,
+    "lines": 33,
+    "hubs": [
+     "stated_flag",
+     "_UNSET_FLAG",
+     "stated_incident"
+    ],
+    "external_modules": [],
+    "members": [
+     "_UNSET_FLAG",
+     "stated_flag",
+     "stated_incident"
+    ]
+   },
+   {
+    "id": 16,
+    "size": 2,
+    "lines": 2,
+    "hubs": [
+     "BEFORE_RESTART",
+     "EARLIER_RUN"
+    ],
+    "external_modules": [],
+    "members": [
+     "BEFORE_RESTART",
+     "EARLIER_RUN"
+    ]
+   },
+   {
+    "id": 17,
+    "size": 2,
+    "lines": 11,
+    "hubs": [
+     "CLOSED_BY_OPERATOR",
+     "closing_result"
+    ],
+    "external_modules": [],
+    "members": [
+     "CLOSED_BY_OPERATOR",
+     "closing_result"
+    ]
+   },
+   {
+    "id": 18,
+    "size": 2,
+    "lines": 4,
+    "hubs": [
+     "MAX_PROPERTY_CHARS",
+     "property_overrun"
+    ],
+    "external_modules": [],
+    "members": [
+     "MAX_PROPERTY_CHARS",
+     "property_overrun"
+    ]
+   },
+   {
+    "id": 42,
+    "size": 1,
+    "lines": 21,
+    "hubs": [
+     "stored_as_sent"
+    ],
+    "external_modules": [
+     "drawable:1"
+    ],
+    "members": [
+     "stored_as_sent"
+    ]
+   }
+  ]
+ },
+ "store": {
+  "module": "pptmstr.store",
+  "loc": 4723,
+  "units": 149,
+  "expanded": [
+   "_apply (1358 lines -> 55 units)"
+  ],
+  "intra_edges": 144,
+  "intra_weight": 157,
+  "components": 31,
+  "largest_component": 78,
+  "singletons": 25,
+  "communities": 38,
+  "modularity": 0.815,
+  "cut_weight": 12,
+  "community_detail": [
+   {
+    "id": 0,
+    "size": 16,
+    "lines": 693,
+    "hubs": [
+     "_restored",
+     "_restored_task",
+     "_stated",
+     "_said_id",
+     "_peer_fields_hold",
+     "_restored_concern"
+    ],
+    "external_modules": [
+     "model:152",
+     "boardlog:8",
+     "drawable:7",
+     "intents:3",
+     "effects:3",
+     "board:1"
+    ],
+    "members": [
+     "_apply[case BoardRestored]",
+     "_apply[case ConcernPosted]",
+     "_channel_as_linked",
+     "_charter",
+     "_concern_wake",
+     "_damage_text",
+     "_peer_fields_hold",
+     "_restored",
+     "_restored_concern",
+     "_restored_decision",
+     "_restored_task",
+     "_said_id",
+     "_stated",
+     "_timeless_concern",
+     "_timeless_decision",
+     "_timeless_task"
+    ]
+   },
+   {
+    "id": 1,
+    "size": 15,
+    "lines": 1699,
+    "hubs": [
+     "_apply",
+     "Store",
+     "Observer",
+     "_drawable",
+     "_owing_wake_chains",
+     "_clock"
+    ],
+    "external_modules": [
+     "model:46",
+     "intents:24",
+     "command:9",
+     "effects:7",
+     "drawable:4"
+    ],
+    "members": [
+     "Observer",
+     "Store",
+     "_RUN_REPORTS",
+     "_VERBATIM",
+     "_apply",
+     "_back_on_fleet",
+     "_clock",
+     "_command_since",
+     "_drawable",
+     "_needs_you",
+     "_no_longer_recalled",
+     "_owing_wake_chains",
+     "_peer_pair",
+     "_preorder",
+     "_redescribed"
+    ]
+   },
+   {
+    "id": 2,
+    "size": 15,
+    "lines": 285,
+    "hubs": [
+     "_asker_fate",
+     "_decision_summary",
+     "_command_summary",
+     "_blocks_text",
+     "_owing_commands",
+     "_owing_decisions"
+    ],
+    "external_modules": [
+     "model:54",
+     "command:3",
+     "board:2",
+     "intents:1"
+    ],
+    "members": [
+     "_COMMAND_FATE_TEXT",
+     "_COMMAND_STATE_TEXT",
+     "_FATE_TEXT",
+     "_PLAIN_ID",
+     "_REVERSIBLE_TEXT",
+     "_SHOWN_TASKS",
+     "_STANDING_TEXT",
+     "_asker_fate",
+     "_blocks_text",
+     "_command_summary",
+     "_decision_summary",
+     "_owing_commands",
+     "_owing_decisions",
+     "_raise_refusal",
+     "blocked_tasks"
+    ]
+   },
+   {
+    "id": 3,
+    "size": 14,
+    "lines": 113,
+    "hubs": [
+     "_with_command",
+     "_apply[case CommandWithdrawn]",
+     "_apply[case CommandRequested]",
+     "_apply[case CommandEnded]",
+     "_closed",
+     "_apply[case CommandRefused]"
+    ],
+    "external_modules": [
+     "command:32",
+     "model:14",
+     "intents:10",
+     "effects:10"
+    ],
+    "members": [
+     "_apply[case CommandApproved]",
+     "_apply[case CommandEnded]",
+     "_apply[case CommandRefused]",
+     "_apply[case CommandRequested]",
+     "_apply[case CommandStopAsked]",
+     "_apply[case CommandWithdrawn]",
+     "_apply[case CommandsRead]",
+     "_approved",
+     "_closed",
+     "_command_settled",
+     "_command_withdrawal_refusal",
+     "_request_refusal",
+     "_with_command",
+     "_woken"
+    ]
+   },
+   {
+    "id": 4,
+    "size": 13,
+    "lines": 121,
+    "hubs": [
+     "_FINAL_STATES",
+     "_peer_rows",
+     "_peer_row",
+     "_apply[case ApprovalRequested]",
+     "_apply[case ApprovalResolved]",
+     "_summarised"
+    ],
+    "external_modules": [
+     "model:32",
+     "intents:7",
+     "approval:5",
+     "effects:4"
+    ],
+    "members": [
+     "_FINAL_STATES",
+     "_apply[case ApprovalRequested]",
+     "_apply[case ApprovalResolved]",
+     "_apply[case ChannelClosed]",
+     "_apply[case ChannelLinked]",
+     "_apply[case ChannelsRestored]",
+     "_apply[case StateChanged]",
+     "_apply[case SubagentProgress]",
+     "_claimed_tasks",
+     "_peer_row",
+     "_peer_rows",
+     "_summarised",
+     "_withdrawal_row"
+    ]
+   },
+   {
+    "id": 5,
+    "size": 12,
+    "lines": 219,
+    "hubs": [
+     "_settled",
+     "_withdrawer_refusal",
+     "_apply[case TaskReleased]",
+     "_may_take_claim",
+     "_apply[case TaskAmended]",
+     "_apply[case TaskCompleted]"
+    ],
+    "external_modules": [
+     "model:53",
+     "intents:5",
+     "effects:2"
+    ],
+    "members": [
+     "_amender_refusal",
+     "_apply[case TaskAmended]",
+     "_apply[case TaskCompleted]",
+     "_apply[case TaskReleased]",
+     "_apply[case TaskWithdrawn]",
+     "_has_stopped",
+     "_may_reclaim",
+     "_may_take_claim",
+     "_ownership_refusal",
+     "_root_of_its_session",
+     "_settled",
+     "_withdrawer_refusal"
+    ]
+   },
+   {
+    "id": 6,
+    "size": 11,
+    "lines": 85,
+    "hubs": [
+     "_apply[case DecisionRaised]",
+     "_filed",
+     "_decided",
+     "_ended_by_operator",
+     "_apply[case DecisionWithdrawn]",
+     "_apply[case DecisionAnswered]"
+    ],
+    "external_modules": [
+     "model:28",
+     "effects:12",
+     "intents:8"
+    ],
+    "members": [
+     "_apply[case DecisionAnswered]",
+     "_apply[case DecisionDismissed]",
+     "_apply[case DecisionRaised]",
+     "_apply[case DecisionWithdrawn]",
+     "_apply[case DecisionsRead]",
+     "_decided",
+     "_decision_settled",
+     "_ended_by_operator",
+     "_filed",
+     "_link_peer",
+     "_withdrawal_refusal"
+    ]
+   },
+   {
+    "id": 7,
+    "size": 10,
+    "lines": 628,
+    "hubs": [
+     "_peer_waking",
+     "_wakeable",
+     "_to_tell",
+     "_unheard",
+     "_owing_peer_mail",
+     "_read_covers"
+    ],
+    "external_modules": [
+     "model:57",
+     "intents:16",
+     "effects:11",
+     "approval:1"
+    ],
+    "members": [
+     "_apply[case PeerInboxRead]",
+     "_heard",
+     "_moved",
+     "_owing_peer_mail",
+     "_peer_waking",
+     "_read_covers",
+     "_still_owed",
+     "_to_tell",
+     "_unheard",
+     "_wakeable"
+    ]
+   },
+   {
+    "id": 8,
+    "size": 8,
+    "lines": 196,
+    "hubs": [
+     "_apply[case TaskDeclared]",
+     "_would_cycle",
+     "_already_behind",
+     "_as_declared",
+     "_auto_depends",
+     "_cycle"
+    ],
+    "external_modules": [
+     "model:47",
+     "intents:1"
+    ],
+    "members": [
+     "_already_behind",
+     "_apply[case TaskDeclared]",
+     "_as_asked",
+     "_as_declared",
+     "_auto_depends",
+     "_cycle",
+     "_declaration_refusal",
+     "_would_cycle"
+    ]
+   },
+   {
+    "id": 9,
+    "size": 3,
+    "lines": 49,
+    "hubs": [
+     "_apply[case ConcernWithdrawn]",
+     "_message_withdrawal_refusal",
+     "_withdraw_settled"
+    ],
+    "external_modules": [
+     "model:19",
+     "effects:4",
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case ConcernWithdrawn]",
+     "_message_withdrawal_refusal",
+     "_withdraw_settled"
+    ]
+   },
+   {
+    "id": 10,
+    "size": 3,
+    "lines": 104,
+    "hubs": [
+     "_pick_claim",
+     "_claim_refusal",
+     "_apply[case TaskClaimRequested]"
+    ],
+    "external_modules": [
+     "model:22",
+     "intents:1",
+     "effects:1"
+    ],
+    "members": [
+     "_apply[case TaskClaimRequested]",
+     "_claim_refusal",
+     "_pick_claim"
+    ]
+   },
+   {
+    "id": 11,
+    "size": 2,
+    "lines": 12,
+    "hubs": [
+     "_apply[case AgentRemoved]",
+     "_subtree"
+    ],
+    "external_modules": [
+     "model:3",
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case AgentRemoved]",
+     "_subtree"
+    ]
+   },
+   {
+    "id": 12,
+    "size": 2,
+    "lines": 32,
+    "hubs": [
+     "_apply[case CommandsRestored]",
+     "_with_restored"
+    ],
+    "external_modules": [
+     "command:7",
+     "intents:2"
+    ],
+    "members": [
+     "_apply[case CommandsRestored]",
+     "_with_restored"
+    ]
+   },
+   {
+    "id": 14,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case AgentFinished]"
+    ],
+    "external_modules": [
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case AgentFinished]"
+    ]
+   },
+   {
+    "id": 15,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case AgentResumed]"
+    ],
+    "external_modules": [
+     "intents:1",
+     "model:1"
+    ],
+    "members": [
+     "_apply[case AgentResumed]"
+    ]
+   },
+   {
+    "id": 16,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case AgentSpawned]"
+    ],
+    "external_modules": [
+     "model:2",
+     "intents:1",
+     "transcript:1",
+     "approval:1"
+    ],
+    "members": [
+     "_apply[case AgentSpawned]"
+    ]
+   },
+   {
+    "id": 17,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case BoardRead]"
+    ],
+    "external_modules": [
+     "board:2",
+     "intents:1",
+     "effects:1"
+    ],
+    "members": [
+     "_apply[case BoardRead]"
+    ]
+   },
+   {
+    "id": 18,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case CompactionObserved]"
+    ],
+    "external_modules": [
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case CompactionObserved]"
+    ]
+   },
+   {
+    "id": 19,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case ConcernEdited]"
+    ],
+    "external_modules": [
+     "intents:1",
+     "model:1"
+    ],
+    "members": [
+     "_apply[case ConcernEdited]"
+    ]
+   },
+   {
+    "id": 20,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case ContextPolled]"
+    ],
+    "external_modules": [
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case ContextPolled]"
+    ]
+   },
+   {
+    "id": 21,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case DigestRead]"
+    ],
+    "external_modules": [
+     "intents:1",
+     "effects:1",
+     "digest:1"
+    ],
+    "members": [
+     "_apply[case DigestRead]"
+    ]
+   },
+   {
+    "id": 22,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case FailedSessionClosed]"
+    ],
+    "external_modules": [
+     "model:2",
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case FailedSessionClosed]"
+    ]
+   },
+   {
+    "id": 23,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case FailureAcknowledged]"
+    ],
+    "external_modules": [
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case FailureAcknowledged]"
+    ]
+   },
+   {
+    "id": 24,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case HeldMailDismissed]"
+    ],
+    "external_modules": [
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case HeldMailDismissed]"
+    ]
+   },
+   {
+    "id": 25,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case InboxRead]"
+    ],
+    "external_modules": [
+     "intents:1",
+     "effects:1",
+     "model:1"
+    ],
+    "members": [
+     "_apply[case InboxRead]"
+    ]
+   },
+   {
+    "id": 26,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case PeerQuestionAged]"
+    ],
+    "external_modules": [
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case PeerQuestionAged]"
+    ]
+   },
+   {
+    "id": 27,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case PeerQuestionDismissed]"
+    ],
+    "external_modules": [
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case PeerQuestionDismissed]"
+    ]
+   },
+   {
+    "id": 28,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case PeerSent]"
+    ],
+    "external_modules": [
+     "model:6",
+     "effects:4",
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case PeerSent]"
+    ]
+   },
+   {
+    "id": 29,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case SessionDetached]"
+    ],
+    "external_modules": [
+     "intents:1",
+     "effects:1"
+    ],
+    "members": [
+     "_apply[case SessionDetached]"
+    ]
+   },
+   {
+    "id": 30,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case SessionRecalled]"
+    ],
+    "external_modules": [
+     "model:4",
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case SessionRecalled]"
+    ]
+   },
+   {
+    "id": 31,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case SessionSettled|WakeChainReleased|PeerWakeSent|\u2026]"
+    ],
+    "external_modules": [
+     "intents:4"
+    ],
+    "members": [
+     "_apply[case SessionSettled|WakeChainReleased|PeerWakeSent|\u2026]"
+    ]
+   },
+   {
+    "id": 32,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case SubagentDelivered]"
+    ],
+    "external_modules": [
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case SubagentDelivered]"
+    ]
+   },
+   {
+    "id": 33,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case TaskClosed]"
+    ],
+    "external_modules": [
+     "model:5",
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case TaskClosed]"
+    ]
+   },
+   {
+    "id": 34,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case TaskVersionHanded]"
+    ],
+    "external_modules": [
+     "intents:1",
+     "model:1"
+    ],
+    "members": [
+     "_apply[case TaskVersionHanded]"
+    ]
+   },
+   {
+    "id": 35,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case TopicChanged]"
+    ],
+    "external_modules": [
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case TopicChanged]"
+    ]
+   },
+   {
+    "id": 36,
+    "size": 1,
+    "lines": 1,
+    "hubs": [
+     "_apply[case UsageAccrued]"
+    ],
+    "external_modules": [
+     "intents:1"
+    ],
+    "members": [
+     "_apply[case UsageAccrued]"
+    ]
+   }
+  ]
+ },
+ "driver": {
+  "module": "pptmstr.driver",
+  "loc": 3524,
+  "units": 116,
+  "expanded": [
+   "Translator (301 lines -> 13 units)",
+   "AgentSession (2444 lines -> 62 units)"
+  ],
+  "intra_edges": 147,
+  "intra_weight": 173,
+  "components": 10,
+  "largest_component": 84,
+  "singletons": 5,
+  "communities": 14,
+  "modularity": 0.718,
+  "cut_weight": 21,
+  "community_detail": [
+   {
+    "id": 0,
+    "size": 20,
+    "lines": 510,
+    "hubs": [
+     "AgentSession._options",
+     "AgentSession._pre_tool_use",
+     "AgentSession._subagent_start",
+     "AgentSession._note_subagent_activity",
+     "AgentSession._post_tool_use",
+     "death_reason"
+    ],
+    "external_modules": [
+     "intents:6",
+     "bus:2",
+     "transcript:2",
+     "board:1",
+     "plugins:1",
+     "log:1"
+    ],
+    "members": [
+     "AgentSession._address_for",
+     "AgentSession._end_tool_call",
+     "AgentSession._mcp_servers",
+     "AgentSession._model_for_type",
+     "AgentSession._note_subagent_activity",
+     "AgentSession._options",
+     "AgentSession._post_tool_use",
+     "AgentSession._pre_compact",
+     "AgentSession._pre_tool_use",
+     "AgentSession._stderr_line",
+     "AgentSession._subagent_start",
+     "AgentSession._subagent_stop",
+     "AgentSession._take_spawn_tool_use",
+     "AgentSession.addresses",
+     "GIT_STATUS_OFF",
+     "MAX_STREAM_FRAME",
+     "_is_allow",
+     "_spawn_key",
+     "death_reason",
+     "frame_over_limit"
+    ]
+   },
+   {
+    "id": 1,
+    "size": 20,
+    "lines": 705,
+    "hubs": [
+     "AgentSession._gate_tool_use",
+     "AgentSession._park",
+     "_deny",
+     "AgentSession._write_region",
+     "AgentSession._expect_spawn",
+     "AgentSession._policy_for"
+    ],
+    "external_modules": [
+     "approval:14",
+     "model:6",
+     "log:4",
+     "bus:4",
+     "intents:3",
+     "tree:1"
+    ],
+    "members": [
+     "AgentSession._at_cap_reason",
+     "AgentSession._expect_spawn",
+     "AgentSession._gate_tool_use",
+     "AgentSession._no_reviewer_reason",
+     "AgentSession._node_for",
+     "AgentSession._outstanding_subagents",
+     "AgentSession._park",
+     "AgentSession._policy_for",
+     "AgentSession._records_refusal",
+     "AgentSession._stamp_bus_call",
+     "AgentSession._write_region",
+     "DENIED_BY_HOST",
+     "DENIED_BY_OPERATOR",
+     "DENIED_BY_POLICY",
+     "_DENIAL",
+     "_allow_with",
+     "_deny",
+     "_escapes_write_region",
+     "_hook_output",
+     "_located"
+    ]
+   },
+   {
+    "id": 2,
+    "size": 19,
+    "lines": 278,
+    "hubs": [
+     "_text_arg",
+     "Translator._assistant",
+     "Translator._task_update_topic",
+     "Translator.handle",
+     "Translator._note_task",
+     "_tool_topic"
+    ],
+    "external_modules": [
+     "intents:18",
+     "model:10",
+     "transcript:7"
+    ],
+    "members": [
+     "Translator._assistant",
+     "Translator._bind_task_id",
+     "Translator._node_of",
+     "Translator._note_task",
+     "Translator._rate_limit",
+     "Translator._result",
+     "Translator._stream",
+     "Translator._system",
+     "Translator._task_update_topic",
+     "Translator._topic_for",
+     "Translator._transcript_of",
+     "Translator._user",
+     "Translator.handle",
+     "_TASK_CREATED",
+     "_TOPIC_LIMIT",
+     "_clip",
+     "_text_arg",
+     "_tool_topic",
+     "_usage_from"
+    ]
+   },
+   {
+    "id": 3,
+    "size": 18,
+    "lines": 531,
+    "hubs": [
+     "AgentSession.run",
+     "AgentSession._check_identity",
+     "AgentSession._poll_context",
+     "SessionIdentityError",
+     "AgentSession._note_briefing_floor",
+     "resume_briefing_notice"
+    ],
+    "external_modules": [
+     "model:13",
+     "intents:10",
+     "log:6",
+     "cli_version:5",
+     "transcript:4"
+    ],
+    "members": [
+     "AgentSession._check_identity",
+     "AgentSession._finish_tagging",
+     "AgentSession._forget_pending_spawns",
+     "AgentSession._note_briefing_floor",
+     "AgentSession._poll_context",
+     "AgentSession._say_started",
+     "AgentSession._start_tagging",
+     "AgentSession._tag",
+     "AgentSession.run",
+     "AgentSession.send",
+     "CONTEXT_POLL_S",
+     "OwnCheckoutRefused",
+     "RESUME_BRIEFING_FLOOR",
+     "SESSION_TAG",
+     "SessionIdentityError",
+     "_context_from",
+     "_reported_session_id",
+     "resume_briefing_notice"
+    ]
+   },
+   {
+    "id": 4,
+    "size": 13,
+    "lines": 316,
+    "hubs": [
+     "AgentSession._await_subagents",
+     "AgentSession._settle_silent_subagents",
+     "AgentSession._settle_subagents_at_run_end",
+     "AgentSession._settle_subagent",
+     "AgentSession._sync_subagent_map",
+     "Translator"
+    ],
+    "external_modules": [
+     "model:8",
+     "intents:4",
+     "log:3",
+     "transcript:2"
+    ],
+    "members": [
+     "APPROVAL_TIMEOUT_S",
+     "AgentSession._await_subagents",
+     "AgentSession._forget_subagent_liveness",
+     "AgentSession._has_call_in_flight",
+     "AgentSession._settle_live_subagents",
+     "AgentSession._settle_silent_subagents",
+     "AgentSession._settle_subagent",
+     "AgentSession._settle_subagents_at_run_end",
+     "AgentSession._sync_subagent_map",
+     "SUBAGENT_CALL_VETO_S",
+     "SUBAGENT_POLL_S",
+     "SUBAGENT_SILENCE_S",
+     "Translator"
+    ]
+   },
+   {
+    "id": 5,
+    "size": 13,
+    "lines": 419,
+    "hubs": [
+     "AgentSession.policy",
+     "AgentSession.contained",
+     "AgentSession._own_checkout_refusal",
+     "AgentSession._uncontained_autonomy",
+     "AgentSession._team",
+     "AgentSession._system_prompt"
+    ],
+    "external_modules": [
+     "approval:6",
+     "tree:2",
+     "figures.fences:2",
+     "templates:2",
+     "intents:1",
+     "log:1"
+    ],
+    "members": [
+     "AgentSession._own_checkout_refusal",
+     "AgentSession._system_prompt",
+     "AgentSession._team",
+     "AgentSession._uncontained_autonomy",
+     "AgentSession._unpaired",
+     "AgentSession.announce",
+     "AgentSession.contained",
+     "AgentSession.containment",
+     "AgentSession.policy",
+     "AgentSession.revoke_policy",
+     "AgentSession.set_policy",
+     "OWN_CHECKOUT",
+     "UncontainedAutonomy"
+    ]
+   },
+   {
+    "id": 6,
+    "size": 4,
+    "lines": 57,
+    "hubs": [
+     "AgentSession.role_status",
+     "AgentSession._addresses_in_role",
+     "_split_address",
+     "AgentSession.known_roles"
+    ],
+    "external_modules": [
+     "model:1"
+    ],
+    "members": [
+     "AgentSession._addresses_in_role",
+     "AgentSession.known_roles",
+     "AgentSession.role_status",
+     "_split_address"
+    ]
+   },
+   {
+    "id": 7,
+    "size": 2,
+    "lines": 221,
+    "hubs": [
+     "AgentSession.__init__",
+     "DEFAULT_SUBAGENT_CAP"
+    ],
+    "external_modules": [
+     "approval:2",
+     "templates:2",
+     "transcript:2",
+     "model:1",
+     "bridge:1",
+     "settings:1"
+    ],
+    "members": [
+     "AgentSession.__init__",
+     "DEFAULT_SUBAGENT_CAP"
+    ]
+   },
+   {
+    "id": 8,
+    "size": 2,
+    "lines": 14,
+    "hubs": [
+     "AgentSession.resolve_role",
+     "ROOT_ADDRESSES"
+    ],
+    "external_modules": [
+     "model:1",
+     "board:1"
+    ],
+    "members": [
+     "AgentSession.resolve_role",
+     "ROOT_ADDRESSES"
+    ]
+   },
+   {
+    "id": 12,
+    "size": 1,
+    "lines": 26,
+    "hubs": [
+     "AgentSession.role_of"
+    ],
+    "external_modules": [
+     "model:2"
+    ],
+    "members": [
+     "AgentSession.role_of"
+    ]
+   },
+   {
+    "id": 13,
+    "size": 1,
+    "lines": 26,
+    "hubs": [
+     "AgentSession.wake"
+    ],
+    "external_modules": [
+     "transcript:1",
+     "intents:1",
+     "log:1",
+     "model:1"
+    ],
+    "members": [
+     "AgentSession.wake"
+    ]
+   }
+  ]
+ }
+}

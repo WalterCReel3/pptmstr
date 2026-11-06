@@ -1,0 +1,145 @@
+src,dst,weight
+Store,Observer,2
+Store,_apply,1
+Store,_clock,1
+_already_behind,_would_cycle,1
+_apply,_RUN_REPORTS,1
+_apply,_back_on_fleet,1
+_apply,_command_since,1
+_apply,_drawable,1
+_apply,_needs_you,1
+_apply,_no_longer_recalled,1
+_apply,_owing_commands,1
+_apply,_owing_decisions,1
+_apply,_owing_peer_mail,1
+_apply,_owing_wake_chains,1
+_apply,_peer_rows,1
+_apply,_peer_waking,1
+_apply,_preorder,1
+_apply,_redescribed,1
+_apply[case AgentRemoved],_subtree,1
+_apply[case ApprovalRequested],_FINAL_STATES,1
+_apply[case ApprovalRequested],_peer_row,1
+_apply[case ApprovalResolved],_FINAL_STATES,1
+_apply[case ApprovalResolved],_claimed_tasks,1
+_apply[case BoardRestored],_restored,1
+_apply[case ChannelClosed],_peer_rows,1
+_apply[case ChannelLinked],_peer_rows,1
+_apply[case ChannelsRestored],_peer_rows,1
+_apply[case CommandApproved],_approved,1
+_apply[case CommandApproved],_with_command,1
+_apply[case CommandEnded],_closed,1
+_apply[case CommandEnded],_with_command,1
+_apply[case CommandEnded],_woken,1
+_apply[case CommandRefused],_closed,1
+_apply[case CommandRefused],_with_command,1
+_apply[case CommandRefused],_woken,1
+_apply[case CommandRequested],_command_settled,1
+_apply[case CommandRequested],_request_refusal,1
+_apply[case CommandRequested],_with_command,1
+_apply[case CommandStopAsked],_with_command,1
+_apply[case CommandWithdrawn],_closed,1
+_apply[case CommandWithdrawn],_command_settled,1
+_apply[case CommandWithdrawn],_command_withdrawal_refusal,1
+_apply[case CommandWithdrawn],_with_command,1
+_apply[case CommandsRead],_with_command,1
+_apply[case CommandsRestored],_with_restored,1
+_apply[case ConcernPosted],_concern_wake,1
+_apply[case ConcernPosted],_peer_fields_hold,1
+_apply[case ConcernWithdrawn],_message_withdrawal_refusal,1
+_apply[case ConcernWithdrawn],_withdraw_settled,1
+_apply[case DecisionAnswered],_decided,1
+_apply[case DecisionAnswered],_ended_by_operator,1
+_apply[case DecisionDismissed],_decided,1
+_apply[case DecisionDismissed],_ended_by_operator,1
+_apply[case DecisionRaised],_decision_settled,1
+_apply[case DecisionRaised],_filed,1
+_apply[case DecisionRaised],_link_peer,1
+_apply[case DecisionRaised],_raise_refusal,1
+_apply[case DecisionWithdrawn],_decision_settled,1
+_apply[case DecisionWithdrawn],_filed,1
+_apply[case DecisionWithdrawn],_withdrawal_refusal,1
+_apply[case DecisionsRead],_filed,1
+_apply[case PeerInboxRead],_read_covers,1
+_apply[case StateChanged],_FINAL_STATES,1
+_apply[case SubagentProgress],_FINAL_STATES,1
+_apply[case TaskAmended],_amender_refusal,1
+_apply[case TaskAmended],_settled,1
+_apply[case TaskClaimRequested],_pick_claim,1
+_apply[case TaskCompleted],_ownership_refusal,1
+_apply[case TaskCompleted],_settled,1
+_apply[case TaskDeclared],_already_behind,1
+_apply[case TaskDeclared],_as_asked,1
+_apply[case TaskDeclared],_auto_depends,1
+_apply[case TaskDeclared],_declaration_refusal,1
+_apply[case TaskDeclared],_settled,1
+_apply[case TaskReleased],_may_reclaim,1
+_apply[case TaskReleased],_ownership_refusal,1
+_apply[case TaskReleased],_settled,1
+_apply[case TaskWithdrawn],_settled,1
+_apply[case TaskWithdrawn],_withdrawer_refusal,1
+_as_declared,_auto_depends,1
+_asker_fate,_FINAL_STATES,1
+_blocks_text,_PLAIN_ID,1
+_blocks_text,_SHOWN_TASKS,1
+_blocks_text,blocked_tasks,1
+_command_summary,_COMMAND_FATE_TEXT,1
+_command_summary,_COMMAND_STATE_TEXT,1
+_command_summary,_PLAIN_ID,1
+_command_summary,_asker_fate,1
+_decided,_woken,1
+_decision_summary,_FATE_TEXT,1
+_decision_summary,_PLAIN_ID,1
+_decision_summary,_REVERSIBLE_TEXT,1
+_decision_summary,_STANDING_TEXT,1
+_decision_summary,_asker_fate,1
+_decision_summary,_blocks_text,1
+_declaration_refusal,_cycle,1
+_drawable,_VERBATIM,1
+_ended_by_operator,_filed,1
+_may_reclaim,_may_take_claim,1
+_may_take_claim,_root_of_its_session,1
+_owing_commands,_asker_fate,1
+_owing_commands,_command_summary,1
+_owing_decisions,_asker_fate,1
+_owing_decisions,_decision_summary,1
+_owing_peer_mail,_wakeable,2
+_owing_wake_chains,_peer_pair,1
+_peer_fields_hold,_channel_as_linked,1
+_peer_row,_summarised,1
+_peer_row,_withdrawal_row,1
+_peer_rows,_peer_row,1
+_peer_waking,_heard,1
+_peer_waking,_moved,1
+_peer_waking,_read_covers,1
+_peer_waking,_still_owed,1
+_peer_waking,_to_tell,3
+_peer_waking,_unheard,2
+_peer_waking,_wakeable,1
+_pick_claim,_claim_refusal,2
+_raise_refusal,_asker_fate,1
+_raise_refusal,blocked_tasks,1
+_request_refusal,_asker_fate,1
+_restored,_as_declared,1
+_restored,_damage_text,1
+_restored,_restored_concern,1
+_restored,_restored_decision,1
+_restored,_restored_task,1
+_restored,_said_id,3
+_restored,_timeless_concern,2
+_restored,_timeless_decision,2
+_restored,_timeless_task,2
+_restored,_would_cycle,1
+_restored_concern,_peer_fields_hold,1
+_restored_concern,_stated,1
+_restored_decision,_channel_as_linked,1
+_restored_task,_charter,1
+_restored_task,_stated,3
+_still_owed,_wakeable,1
+_to_tell,_wakeable,1
+_unheard,_wakeable,1
+_withdrawal_row,_summarised,1
+_withdrawer_refusal,_has_stopped,1
+_withdrawer_refusal,_may_take_claim,1
+_withdrawer_refusal,_root_of_its_session,1
+_would_cycle,_cycle,1

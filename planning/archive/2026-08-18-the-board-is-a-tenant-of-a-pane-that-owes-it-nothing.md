@@ -2,7 +2,7 @@
 
 **Dated:** 2026-08-18 · **Status:** built, `59ee38c` — see "How it was settled" below ·
 **Found by:** the operator, while
-rows 1–2 of [`2026-08-17-a-team-cannot-read-its-own-board.md`](../2026-08-17-a-team-cannot-read-its-own-board.md)
+rows 1–2 of [`2026-08-17-a-team-cannot-read-its-own-board.md`](2026-08-17-a-team-cannot-read-its-own-board.md)
 were landing · **Related:**
 [`2026-08-13-an-expansion-outgrows-its-pane.md`](../2026-08-13-an-expansion-outgrows-its-pane.md)
 (the same shape, one pane over),
