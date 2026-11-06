@@ -817,9 +817,11 @@ def _holder_left_behind(snap: Snapshot, task: Task, session_id: str) -> bool:
 
     **The row's copy of ``store._may_reclaim``**, asked for the root of
     ``session_id``: true means that root's ``release_task`` on this row is one
-    the store takes, and the bus offers it on nothing else. Kept in step by a
-    test that makes the release for each kind of holder, because the store
-    cannot import this module and a second spelling of a rule drifts.
+    the store takes, and the bus offers it on nothing else. A copy and not a
+    call, because ``store`` imports this module. Kept in step by a test that
+    makes the release for each kind of holder (``tests/test_board.py``,
+    ``test_a_row_says_its_holder_was_left_behind_exactly_where_the_lead_may_release_it``),
+    because a second spelling of a rule drifts.
 
     Narrower than the store in one place, on purpose. A holder from another
     session that is of an earlier run of *that* session is False here, and the

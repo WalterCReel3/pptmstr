@@ -587,6 +587,81 @@ def test_a_file_longer_than_a_record_may_be_is_damage_and_is_not_read_whole(
     assert "over the" in log.damage.reason
 
 
+def test_a_record_name_that_is_a_link_is_damage_and_is_not_read_through(
+    tmp_path: Path,
+) -> None:
+    """
+    ``append`` only ever hard-links a regular file into place, so a symbolic
+    link under a record's name is something else's doing. The link leads to a
+    whole record that would decode, so a reader that followed it would report
+    nothing; it is refused as a name that cannot be read, as a pipe is, with what
+    follows it withheld.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    write(elsewhere, (B,))
+    log_dir = tmp_path / "log"
+    write(log_dir, (A,))
+    os.symlink(elsewhere / "00000000.json", log_dir / "00000001.json")
+    (log_dir / "00000002.json").write_text(boardlog.encode(A))
+
+    log = boardlog.read(log_dir)
+
+    assert log.records == (A,)
+    assert log.damage is not None
+    assert (log.damage.ordinal, log.damage.unread) == (1, 1)
+    assert "OSError" in log.damage.reason
+
+
+def test_a_first_record_that_is_a_link_yields_nothing(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    write(elsewhere, (A,))
+    log_dir = tmp_path / "log"
+    log_dir.mkdir()
+    os.symlink(elsewhere / "00000000.json", log_dir / "00000000.json")
+
+    log = boardlog.read(log_dir)
+
+    assert log.records == ()
+    assert log.damage is not None and log.damage.ordinal == 0
+
+
+def test_a_channel_record_under_a_link_is_not_read_through(tmp_path: Path) -> None:
+    """
+    A link's log is read by ``boardlog.read``, so the refusal is the one a board
+    gets. The planted record is a channel fact in the form ``channels`` writes.
+    """
+    from pptmstr import channels
+
+    created = channels.encode(
+        channels.LinkCreated(at=1.0, channel_id="c-1", members=("a", "b"), charter="x")
+    )
+    elsewhere = tmp_path / "elsewhere"
+    write(elsewhere, (created,))
+    log_dir = tmp_path / "link"
+    log_dir.mkdir()
+    os.symlink(elsewhere / "00000000.json", log_dir / "00000000.json")
+
+    log = boardlog.read(log_dir)
+
+    assert log.records == ()
+    assert log.damage is not None and log.damage.ordinal == 0
+
+
+def test_a_log_reached_through_a_linked_directory_reads_whole(tmp_path: Path) -> None:
+    """
+    The one link pptmstr makes is a directory: ``boardsync`` leaves the legacy
+    session directory as a link to where it moved. ``O_NOFOLLOW`` refuses a link
+    only as the last part of a path, so a log read through that link is the log.
+    """
+    moved = tmp_path / "boards" / "s-1"
+    write(moved, (A, B))
+    legacy = tmp_path / "legacy" / "s-1"
+    legacy.parent.mkdir()
+    os.symlink(os.path.relpath(moved, legacy.parent), legacy, target_is_directory=True)
+
+    assert boardlog.read(legacy) == boardlog.read(moved) == boardlog.Log(records=(A, B))
+
+
 def test_the_bound_on_a_record_is_the_one_the_request_files_use() -> None:
     """
     Two modules, one figure, for one reason. Spelled twice so neither imports the

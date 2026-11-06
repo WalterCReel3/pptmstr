@@ -336,9 +336,9 @@ def test_a_racing_writer_does_not_destroy_the_entry_that_beat_it(
     computed name is a file that listing already saw.
 
     The race is injected instead of waited for. A stale listing is exactly what a
-    writer holds when another one lands between its `read_entries` and its
-    `os.replace` -- and `os.replace` onto an existing name destroys it silently,
-    with no error to notice afterwards.
+    writer holds when another one lands between its `read_entries` and the link that
+    names its file; the link refuses an existing name, so the late writer takes the
+    next ordinal instead of replacing the entry that beat it.
     """
     brief.write_entry(tmp_path, "first")
     winner = brief.write_entry(tmp_path, "the entry that got there first")
@@ -351,6 +351,112 @@ def test_a_racing_writer_does_not_destroy_the_entry_that_beat_it(
     monkeypatch.undo()
     assert winner.read_text(encoding="utf-8").strip() == "the entry that got there first"
     assert [e.ordinal for e in brief.read_entries(tmp_path)] == [0, 1, 2]
+
+
+def test_two_writers_that_chose_the_same_name_both_keep_their_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The race a check-then-place cannot close: both writers have looked, both found
+    ``001`` free, and only then does either put its file there.
+
+    Forced rather than waited for. Whichever call places the racer's file -- a
+    rename or a link -- first lets a second writer run to completion, so the second
+    writer's listing is taken while the racer already holds its chosen name and has
+    not yet placed it. A placement that overwrites loses the second writer's entry;
+    one that refuses a taken name sends the racer to the next ordinal.
+    """
+    brief.write_entry(tmp_path, "first")
+
+    interleaved: list[Path] = []
+    entered: list[bool] = []
+
+    def _interleaving(real):  # type: ignore[no-untyped-def]
+        def place(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if not entered:
+                entered.append(True)
+                interleaved.append(brief.write_entry(tmp_path, "the writer that slipped in"))
+            return real(src, dst, *args, **kwargs)
+
+        return place
+
+    monkeypatch.setattr(os, "replace", _interleaving(os.replace))
+    monkeypatch.setattr(os, "link", _interleaving(os.link))
+
+    racer = brief.write_entry(tmp_path, "the racer")
+
+    monkeypatch.undo()
+    (slipped_in,) = interleaved
+    assert slipped_in.name == "001-amendment.md"
+    assert slipped_in.read_text(encoding="utf-8") == "the writer that slipped in\n"
+    assert racer.name == "002-amendment.md"
+    assert racer.read_text(encoding="utf-8") == "the racer\n"
+    assert [e.body for e in entries(tmp_path)] == [
+        "first",
+        "the writer that slipped in",
+        "the racer",
+    ]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "000-premises.md",
+        "001-amendment.md",
+        "002-amendment.md",
+    ]
+
+
+def test_a_writer_that_loses_the_premises_writes_an_amendment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The kind is part of the name, so it is chosen again for each ordinal tried. A
+    writer that kept the name it picked for ``000`` would land a second
+    ``premises`` at ``001``, and a reader would be told the brief has two.
+    """
+    entered: list[bool] = []
+    real_link = os.link
+
+    def link(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if not entered:
+            entered.append(True)
+            brief.write_entry(tmp_path, "the writer that slipped in")
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", link)
+
+    racer = brief.write_entry(tmp_path, "the racer")
+
+    monkeypatch.undo()
+    assert racer.name == "001-amendment.md"
+    assert [(e.ordinal, e.kind, e.body) for e in entries(tmp_path)] == [
+        (0, "premises", "the writer that slipped in"),
+        (1, "amendment", "the racer"),
+    ]
+
+
+def test_an_entry_is_on_the_device_before_it_has_a_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Without the flush a power loss can leave an entry's name over a short or empty
+    file, which a reader takes for the premise as written. Asserted as an order of
+    calls because "durable" is not observable from inside the process that wrote it.
+    """
+    calls: list[str] = []
+    real_fsync, real_link = os.fsync, os.link
+
+    def fsync(fd: int) -> None:
+        calls.append("fsync")
+        real_fsync(fd)
+
+    def link(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(f"link {Path(dst).name}")
+        real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "link", link)
+
+    brief.write_entry(tmp_path, "first")
+
+    assert calls == ["fsync", "link 000-premises.md"]
 
 
 # -- counting, for the claim reply ------------------------------------------------

@@ -5930,3 +5930,107 @@ def test_a_click_on_a_row_in_the_drawn_list_fills_the_combos_from_its_record(
     assert state.picker.selected == "a" and asked == ["a"]
     assert templates.names()[state.template_index] == "research"
     assert state.subagent_cap is None
+
+
+# ---------------------------------------------------------------------------
+# Which rungs a new session pairs with containment is approval's rule, read here
+# ---------------------------------------------------------------------------
+
+# Per rung and per directory -- allowed, or refused for being pptmstr's own
+# checkout: the rung granted, whether the mode is engaged, the hold on a
+# two-line premise and on a one-line one, and the spec's rung and whether it
+# carries containment. Spelled out rather than derived from
+# ``approval.requires_containment``, so a change to that rule or to how the
+# launcher reads it shows up here as a row that moved.
+_PER_RUNG = {
+    (Policy.STRICT, "allowed"): (Policy.STRICT, False, None, None, Policy.STRICT, False),
+    (Policy.STRICT, "refused"): (Policy.STRICT, False, None, None, Policy.STRICT, False),
+    (Policy.PERMISSIVE, "allowed"): (
+        Policy.PERMISSIVE,
+        False,
+        None,
+        None,
+        Policy.PERMISSIVE,
+        False,
+    ),
+    (Policy.PERMISSIVE, "refused"): (
+        Policy.PERMISSIVE,
+        False,
+        None,
+        None,
+        Policy.PERMISSIVE,
+        False,
+    ),
+    (Policy.AUTONOMOUS, "allowed"): (
+        Policy.AUTONOMOUS,
+        True,
+        launcher._HOLD_CHECKING,
+        launcher._HOLD_THIN,
+        Policy.AUTONOMOUS,
+        True,
+    ),
+    (Policy.AUTONOMOUS, "refused"): (Policy.STRICT, False, None, None, Policy.STRICT, False),
+}
+
+
+def _draft_in(tmp_path: Path, where: str, policy: Policy, task: str) -> LauncherState:
+    if where == "allowed":
+        cwd = tmp_path / "outside"
+        cwd.mkdir(exist_ok=True)
+        return LauncherState(task=task, cwd=str(cwd), policy=policy)
+    return LauncherState(task=task, cwd=INSIDE_THE_CHECKOUT, policy=policy)
+
+
+def test_every_rung_is_in_the_per_rung_table() -> None:
+    assert {policy for policy, _ in _PER_RUNG} == set(Policy)
+
+
+@pytest.mark.parametrize(
+    ("policy", "where"), list(_PER_RUNG), ids=[f"{p.value}-{w}" for p, w in _PER_RUNG]
+)
+def test_a_new_session_gets_its_rungs_grant_containment_and_holds(
+    tmp_path: Path, policy: Policy, where: str
+) -> None:
+    state = _draft_in(tmp_path, where, policy, A_PREMISE)
+    thin = _draft_in(tmp_path, where, policy, "one line")
+    spec = state.spec()
+
+    assert (
+        state.granted_policy,
+        state.dangerous_engaged,
+        state.launch_hold(),
+        thin.launch_hold(),
+        spec.policy,
+        spec.containment == sandbox.containment_settings(),
+    ) == _PER_RUNG[(policy, where)]
+    assert spec.containment is None or spec.containment == sandbox.containment_settings()
+
+
+def test_a_rung_the_rule_says_needs_containment_is_contained_by_a_new_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    The launcher asks ``requires_containment`` rather than naming the top rung, so a
+    rung the rule pairs with containment is engaged where the directory allows it
+    and seated at ``STRICT`` where it is refused, as ``AUTONOMOUS`` is. Without the
+    pairing, a spec carrying such a rung and no containment is one the driver
+    refuses at start.
+    """
+    monkeypatch.setattr(
+        launcher, "requires_containment", lambda policy: policy is not Policy.STRICT
+    )
+
+    allowed = _draft_in(tmp_path, "allowed", Policy.PERMISSIVE, A_PREMISE)
+    spec = allowed.spec()
+    assert allowed.dangerous_engaged
+    assert allowed.granted_policy is Policy.PERMISSIVE
+    assert (spec.policy, spec.containment) == (
+        Policy.PERMISSIVE,
+        sandbox.containment_settings(),
+    )
+
+    refused = _draft_in(tmp_path, "refused", Policy.PERMISSIVE, A_PREMISE)
+    spec = refused.spec()
+    assert not refused.dangerous_engaged
+    assert refused.granted_policy is Policy.STRICT
+    assert (spec.policy, spec.containment) == (Policy.STRICT, None)

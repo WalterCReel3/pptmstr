@@ -2808,23 +2808,25 @@ class LauncherState:
         """
         Whether this launch actually carries the mode: asked for, and not refused.
 
-        Only the top rung asks. ``PERMISSIVE`` is not a contained mode and never
-        consults the directory, so it is not "refused" here -- it is simply not this
-        question, and answering False for it is what keeps the containment machinery
-        off a rung that does not want it.
+        Only a rung that ``requires_containment`` asks, which today is the top one.
+        ``PERMISSIVE`` is not a contained mode and never consults the directory, so it
+        is not "refused" here -- it is simply not this question, and answering False
+        for it is what keeps the containment machinery off a rung that does not want
+        it.
         """
-        return self.policy is Policy.AUTONOMOUS and self.containment_refusal() is None
+        return requires_containment(self.policy) and self.containment_refusal() is None
 
     @property
     def granted_policy(self) -> Policy:
         """
         The rung this launch actually runs under, as opposed to the one asked for.
 
-        They differ in exactly one case: ``AUTONOMOUS`` asked for where containment is
-        refused. That falls back to ``STRICT`` rather than to ``PERMISSIVE``, and the
-        distance is deliberate -- an operator who reached the top rung was not asking
-        for the middle one, and quietly seating them one rung down would be a gate
-        nobody chose. The refusal is on screen; the launch is the one it describes.
+        They differ in exactly one case: a rung that ``requires_containment`` -- today
+        ``AUTONOMOUS`` -- asked for where containment is refused. That falls back to
+        ``STRICT`` rather than to ``PERMISSIVE``, and the distance is deliberate -- an
+        operator who reached the top rung was not asking for the middle one, and quietly
+        seating them one rung down would be a gate nobody chose. The refusal is on screen;
+        the launch is the one it describes.
 
         Never for a picked session: a resume the rung is refused for is held, not
         seated lower (``resume_gate_hold``), so the rung asked for is the only one
@@ -2832,7 +2834,7 @@ class LauncherState:
         """
         if self.picker.picked is not None:
             return self.policy
-        if self.policy is Policy.AUTONOMOUS and not self.dangerous_engaged:
+        if requires_containment(self.policy) and not self.dangerous_engaged:
             return Policy.STRICT
         return self.policy
 
@@ -2960,20 +2962,21 @@ class LauncherState:
         # stands: resolved again here it could name another place than the one the
         # worktree is made at, which ``LaunchSpec`` refuses.
         resolved_cwd = plan.path if plan is not None else resolved_directory(directory)
-        # Both or neither, and the pairing is the top rung. ``AUTONOMOUS`` releases
-        # every reviewed tool and the containment is the only thing bounding what a
-        # released ``Bash`` reaches, so a spec carrying that rung alone is an unattended
-        # agent with the whole machine, and one carrying the containment alone is a
-        # sandbox around a gate that is still asking. A draft that did not reach the top
-        # rung, or reached it in a directory it is refused for, produces the two
-        # defaults -- which is the spec this built before the mode existed.
+        # Both or neither, and the pairing is ``requires_containment``'s: today the top rung
+        # alone. ``AUTONOMOUS`` releases every reviewed tool and the containment is the only
+        # thing bounding what a released ``Bash`` reaches, so a spec carrying that rung
+        # alone is an unattended agent with the whole machine, and one carrying the
+        # containment alone is a sandbox around a gate that is still asking. A draft that
+        # did not reach the top rung, or reached it in a directory it is refused for,
+        # produces the two defaults -- which is the spec this built before the mode existed.
         #
         # ``PERMISSIVE`` is deliberately outside that pairing and carries no
         # containment. What the sandbox bounds is writes and network, which that rung
         # already refuses syntactically, so pairing them would cost the operator
         # working invocations to buy the gate nothing. See ``approval.Policy``.
         engaged = (
-            self.policy is Policy.AUTONOMOUS and self._read_refusal(directory, resolved_cwd) is None
+            requires_containment(self.policy)
+            and self._read_refusal(directory, resolved_cwd) is None
         )
         return LaunchSpec(
             task=self.task.strip(),
@@ -3000,7 +3003,7 @@ class LauncherState:
             containment=sandbox.containment_settings() if engaged else None,
             # ``granted_policy``'s rule, from this reading rather than from the memo.
             policy=(
-                Policy.STRICT if self.policy is Policy.AUTONOMOUS and not engaged else self.policy
+                Policy.STRICT if requires_containment(self.policy) and not engaged else self.policy
             ),
             # Unconditionally, and not gated on ``engaged`` as the containment is. The
             # policy and the containment pair because the top rung without the

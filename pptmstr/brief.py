@@ -197,17 +197,32 @@ def write_entry(
     directory: Path, body: str, *, kind: str | None = None, supersedes: tuple[int, ...] = ()
 ) -> Path:
     """
-    Append one entry. Returns the path written.
+    Append one entry. Never overwrites one, whoever else is writing. Returns the
+    path written.
 
-    The ordinal is taken from what is already on disk, so two writers racing produce
-    two entries rather than one overwriting the other -- ``os.replace`` onto a name
-    that already exists would silently destroy an entry, and a name derived from a
-    count is exactly how that happens. The loop retries on collision rather than
-    trusting the listing it just took.
+    The text goes to a temp file in the same directory, is flushed to the device,
+    and is then *linked* to its name -- ``boardlog.append``'s primitive. A name
+    therefore appears complete or not at all, and ``os.link`` fails on a name that
+    exists, atomically, in the kernel, which is the guarantee a check before a
+    rename cannot give. The writer that lost the name takes the next ordinal, so
+    two writers racing produce two entries.
+
+    The first ordinal tried is one past the highest in a listing taken here, and a
+    collision only moves up, so an entry never lands below one that was there when
+    its write began.
 
     ``kind`` defaults to ``PREMISES`` for the first entry and ``AMENDMENT`` after,
     because that is what the ordinal already implies and a caller that had to state
-    it is a caller that can state it wrongly.
+    it is a caller that can state it wrongly. The name is chosen again for each
+    ordinal tried, so a writer that loses ``000`` writes ``001-amendment``. The
+    link refuses only the exact name, so the kind is part of what collides: writers
+    on defaults always agree on the name for an ordinal and cannot share one, but
+    two that name different kinds can land on the same ordinal.
+
+    The directory entry is not flushed: losing the newest names to a power loss
+    leaves a consistent prefix. A process killed inside this leaves its
+    ``.entry-*`` temp file, which no reader takes for an entry; it is not removed
+    from here, because another writer's write in flight is a file of that shape.
 
     Raises ``OSError`` rather than swallowing it, unlike ``settings.save``. A theme
     that fails to persist costs a preference; premises that fail to persist are
@@ -217,13 +232,6 @@ def write_entry(
     existing = read_entries(directory)
     ordinal = (existing[-1].ordinal + 1) if existing else 0
 
-    while True:
-        name = kind or (PREMISES if ordinal == 0 else AMENDMENT)
-        target = directory / f"{ordinal:0{_ORDINAL_WIDTH}d}-{name}.md"
-        if not target.exists():
-            break
-        ordinal += 1
-
     fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=".entry-", suffix=".md")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -232,11 +240,19 @@ def write_entry(
                     f"supersedes: {', '.join(f'{o:0{_ORDINAL_WIDTH}d}' for o in supersedes)}\n\n"
                 )
             handle.write(body.rstrip("\n") + "\n")
-        os.replace(tmp, target)
-    except BaseException:
+            handle.flush()
+            os.fsync(handle.fileno())
+        while True:
+            name = kind or (PREMISES if ordinal == 0 else AMENDMENT)
+            target = directory / f"{ordinal:0{_ORDINAL_WIDTH}d}-{name}.md"
+            try:
+                os.link(tmp, target)
+                break
+            except FileExistsError:
+                ordinal += 1
+    finally:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
-        raise
     return target
 
 

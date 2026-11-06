@@ -1056,14 +1056,20 @@ def _file_bytes(path: Path) -> bytes:
     The bytes of a regular file no longer than a record may be. ``OSError`` for
     anything else.
 
-    Opened without blocking and checked before it is read: a FIFO under a record's
-    name would hold an ordinary open until somebody wrote to it, and a reader that
-    waits on a file is one any writer to the directory can stop.
+    Judged through the descriptor, not by a ``stat`` of the name beforehand.
+    ``O_NONBLOCK`` makes opening a FIFO return: one under a record's name would
+    hold an ordinary open until somebody wrote to it, and a reader that waits on a
+    file is one any writer to the directory can stop. ``O_NOFOLLOW`` refuses a
+    link under the name: ``append`` only ever hard-links a regular file into
+    place, so a symbolic link there is not a record, wherever it leads. It refuses
+    only the last part of the path, so a log reached through a linked directory
+    still reads. ``O_CLOEXEC`` keeps the descriptor out of any child started
+    while it is open.
 
     Read to one byte past ``MAX_RECORD_BYTES`` and no further, so the size of the
     file is never the size of the allocation.
     """
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(f"{path.name} is not a regular file")
@@ -1096,8 +1102,9 @@ def read(directory: Path) -> Log:
     was in flight.
 
     **Never raises and never waits**, whatever the files hold: text built to break
-    the parser is a record that does not decode, and a name that is not a regular
-    file, or is a longer one than ``append`` writes, is one that cannot be read.
+    the parser is a record that does not decode, and a name that is a link, is not
+    a regular file, or is a longer one than ``append`` writes, is one that cannot be
+    read.
     """
     try:
         names = os.listdir(directory)

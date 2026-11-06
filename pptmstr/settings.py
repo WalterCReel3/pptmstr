@@ -41,9 +41,10 @@ class McpConnector:
     a transport detail.
 
     ``id`` is the account's ``mcpsrv_`` identifier. It is not re-validated at launch:
-    a rotated id means the CLI does not connect that server and the operator re-runs
-    `scripts/verify_mcp_status.py`. Checking it on every launch would put a network
-    fetch of every connector in front of every session to catch a rare case.
+    a rotated id means the CLI does not connect that server, and the operator notices
+    and re-admits it by editing ``admitted_connectors`` in ``settings.json``. Nothing
+    in the tree checks an id. Checking it on every launch would put a network fetch
+    of every connector in front of every session to catch a rare case.
     """
 
     name: str

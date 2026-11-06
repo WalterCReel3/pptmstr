@@ -711,3 +711,33 @@ def test_escape_in_the_reply_box_leaves_the_box_and_keeps_the_reply(
         assert frames.compose.replies[ROOT] == "carry on, but not on main"
         assert frames.actions.send.call_count == 0
         assert not frames.review.hold.held
+
+
+# -- how head_lines counts the lines it leaves off ------------------------------------
+#
+# Plain newline-joined bodies, and ``("a\nb\n", 2)``, are tests/test_review_keys.py's.
+
+
+@pytest.mark.parametrize(
+    ("text", "limit", "expected"),
+    [
+        ("a\n", 1, ("a", 1)),
+        ("a\nb\n", 1, ("a", 2)),
+        ("\n", 0, ("", 2)),
+        ("", 0, ("", 1)),
+        ("a\r\nb", 1, ("a\r", 1)),
+        ("a\u2028b", 1, ("a\u2028b", 0)),
+    ],
+)
+def test_head_lines_counts_lines_by_newline_alone(
+    text: str, limit: int, expected: tuple[str, int]
+) -> None:
+    """
+    The count is what a pane reports as not on screen, and a nonzero count holds
+    an approve of a parked call's body. A line is what ``"\\n"`` separates: a
+    trailing newline ends one more, empty, line; ``"\\r"`` stays in the line it
+    ends; and ``"\\u2028"`` and the other separators ``str.splitlines`` honours
+    do not end a line at all. A cut built on ``splitlines`` answers differently
+    for every case here, and for ``"a\\n"`` would report nothing held back.
+    """
+    assert review.head_lines(text, limit) == expected

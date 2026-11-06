@@ -386,8 +386,9 @@ These are not refactor scope. Round 1 takes the first four.
   - `board._holder_left_behind` says the store cannot import board, but store.py:36 does. Probe
     p10 found no difference outside the documented narrowing across 27 cases.
   - `settings.py:45` cites `scripts/verify_mcp_status.py`, which does not exist.
-  - `tests/test_shellscan.py:1571` cites a planning file that does not exist,
-    `planning/2026-08-22-four-items.md`.
+  - `tests/test_shellscan.py:1571` names `planning/2026-08-22-four-items.md`, which does not
+    exist, but the name is input to `is_read_only`, which never reads the disk. It is not a
+    citation and needs no fix.
 - **The Claude.ai login credential is still read on main.** `model_catalog.py:86`
   (`CREDENTIAL_PATH`) and `:154` (`raw.get("claudeAiOauth")`) read it. The unmerged
   `feat/packaging` branch removed that read on 2026-10-17 on terms-of-use grounds. This was

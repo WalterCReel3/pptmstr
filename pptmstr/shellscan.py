@@ -6,9 +6,10 @@ deciding about, and nothing here looks at the filesystem the command names.
 
 This is the allowlist behind the `PERMISSIVE` policy
 (``planning/2026-08-11-research-phase-auto-approval.md`` §2, scopes (b) and
-(c)). It sits beside ``approval.py`` rather than inside it because the table
-plus the reason attached to each row is larger than the whole of that module,
-and ``approval.py``'s docstring commits it to being a small policy file.
+(c)). It is a module of its own, not part of ``approval.py``, because it is
+pure where ``approval.py`` is not -- that module reads the disk -- and because
+its splitter has readers besides the gate: ``command`` and ``commandtext``
+import ``_split_segments`` from here, and neither imports ``approval``.
 
 08-11 recommended (b) without (c) and deferred pipelines on the grounds that
 "the quoting edge cases are where it will be wrong". That deferral was reversed
