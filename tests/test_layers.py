@@ -588,6 +588,9 @@ STORE_DISK_EXCEPTIONS: dict[tuple[str, str], str] = {
     # approval.py:29, for config_dir, which approval's records reach resolves.
     ("pptmstr.settings", "pptmstr.approval"): "settings reads and saves settings.json;"
     " B5 removes it with approval",
+    # settings.py:28, for replace, which save writes settings.json through.
+    ("pptmstr.ondisk", "pptmstr.settings"): "settings saves settings.json through"
+    " ondisk.replace; B5 removes it with approval",
 }
 
 

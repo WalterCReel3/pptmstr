@@ -12,7 +12,9 @@ import functools
 import importlib
 import inspect
 import json
+import os
 import re
+import stat
 from collections.abc import Callable, Iterator
 from dataclasses import fields
 from pathlib import Path
@@ -166,6 +168,48 @@ def test_save_is_atomic_and_leaves_no_temp_files(tmp_path: Path) -> None:
     save(Settings(theme="dark"), path, unread=None)
     assert load(path).theme == "dark"
     assert [p.name for p in tmp_path.iterdir()] == ["settings.json"]
+
+
+def test_a_save_whose_rename_fails_leaves_the_old_file_whole_and_no_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "settings.json"
+    save(Settings(theme="ghost"), path, unread=None)
+    held = path.read_bytes()
+
+    def refuse(*args: object) -> None:
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    assert save(Settings(theme="dark"), path, unread=None) is None
+
+    assert path.read_bytes() == held
+    assert [p.name for p in tmp_path.iterdir()] == ["settings.json"]
+
+
+def test_settings_are_written_as_sorted_indented_json_and_not_flushed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "settings.json"
+    flushed: list[int] = []
+    monkeypatch.setattr(os, "fsync", flushed.append)
+    chosen = Settings(theme="café")
+
+    save(chosen, path, unread=None)
+
+    expected = json.dumps(settings_mod.encoded(chosen), indent=2, sort_keys=True) + "\n"
+    assert path.read_bytes() == expected.encode("utf-8")
+    assert flushed == []
+
+
+def test_a_saved_file_keeps_its_permission_bits(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    save(Settings(theme="ghost"), path, unread=None)
+    path.chmod(0o644)
+
+    save(Settings(theme="dark"), path, unread=None)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
 
 def test_save_creates_the_directory(tmp_path: Path) -> None:

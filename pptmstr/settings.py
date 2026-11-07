@@ -17,15 +17,15 @@ they never enter a Snapshot (I1).
 
 from __future__ import annotations
 
-import contextlib
 import json
 import math
 import os
-import tempfile
 from dataclasses import asdict, dataclass, fields, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from pptmstr import ondisk
 
 APP_NAME = "pptmstr"
 
@@ -523,10 +523,11 @@ def save(
     """
     Write settings atomically, or refuse and say why. None is not a refusal.
 
-    Written to a temporary file in the same directory and renamed over the target,
-    so an interrupted write leaves the previous file intact instead of a truncated
-    one. rename(2) is atomic within a filesystem, which is why the temp file cannot
-    just go in /tmp.
+    Renamed over the target by ``ondisk.replace``, so an interrupted write leaves the
+    previous file intact instead of a truncated one, and the file keeps its
+    permission bits. Not flushed to the device first: this runs on the UI thread, and
+    after a power loss the old file is whole only if the filesystem orders the rename
+    after the data.
 
     **Refused in two cases, and both are about ``board_log``.** The file is
     written whole from ``settings``, so a save is the one place a value nobody
@@ -554,16 +555,8 @@ def save(
         return Unsaved(target, why)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".settings-", suffix=".json")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(encoded(settings), handle, indent=2, sort_keys=True)
-                handle.write("\n")
-            os.replace(tmp, target)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+        data = (json.dumps(encoded(settings), indent=2, sort_keys=True) + "\n").encode("utf-8")
+        ondisk.replace(target, data, durable=False)
     except OSError:
         pass
     return None
