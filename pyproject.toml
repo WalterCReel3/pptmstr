@@ -99,8 +99,8 @@ dev = [
     "black>=24.1",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    # scripts/screenshot.py and scripts/mock_cards.py import this, for the
-    # glReadPixels grab.
+    # scripts/screenshot.py imports this for the glReadPixels grab, as do the
+    # probe and measure scripts that read pixels back.
     "pyopengl>=3.1",
 ]
 # Lays out ```mermaid fences, in pptmstr/figures/render.py's child process only

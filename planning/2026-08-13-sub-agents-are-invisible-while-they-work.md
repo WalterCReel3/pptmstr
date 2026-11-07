@@ -42,6 +42,9 @@ table at `:531`, and it carries the same defect (active returns `:628-630`, pip 
 `blocked` — an existing checked-in view that renders the bug, captured by someone who
 did not notice the pips had gone.
 
+*2026-11-06:* `scripts/mock_cards.py` has been deleted; see the note under step 4 of
+the plan below.
+
 ## 2. Nothing terminates a sub-agent whose parent stopped listening
 
 `_await_subagents` (`driver.py:945-961`) returns after `SUBAGENT_GRACE_S = 120` with
@@ -196,6 +199,12 @@ border.
 4. **Fix `mock_cards.py` in the same change**, or delete its card path in favour of
    importing the real one. A fixture that reproduces the defect it exists to catch is
    worse than no fixture.
+
+   *2026-11-06:* `scripts/mock_cards.py` is deleted (refactor round 2). Before that its
+   card path had already been replaced by a call to `pptmstr.ui.rail.draw`, so the
+   "lands twice" condition in §1 no longer held; what remained was a hand-drawn inbox and
+   side panes with the same drift risk, and nothing ran it. §1's fix now lands once, in
+   `rail.py`.
 
 ### What this does not give, stated plainly
 
