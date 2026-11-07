@@ -79,7 +79,14 @@ SCRATCH = Path(tempfile.mkdtemp(prefix="b1-readback-", dir=os.environ.get("TMPDI
 os.environ["XDG_CONFIG_HOME"] = str(SCRATCH / "config")
 sys.path[:0] = [str(TREE)]
 
-from pptmstr import boardlog, channels, settings  # noqa: E402
+from pptmstr import boardlog, settings  # noqa: E402
+
+# The link log is ``pptmstr.channels.log`` from B6's step 2 on, and the module
+# ``pptmstr.channels`` in the tree before B1 that ``--observe`` also runs.
+try:
+    from pptmstr.channels import log as channel_log  # noqa: E402
+except ImportError:
+    from pptmstr import channels as channel_log  # type: ignore[no-redef]  # noqa: E402
 
 assert Path(boardlog.__file__).resolve().is_relative_to(TREE), boardlog.__file__
 assert settings.config_dir().is_relative_to(SCRATCH), settings.config_dir()
@@ -118,7 +125,7 @@ except ImportError:
 
 from typing import get_args, get_type_hints  # noqa: E402
 
-Fact = channels.Fact
+Fact = channel_log.Fact
 FAILURES: list[str] = []
 
 
@@ -145,17 +152,17 @@ def _sweep(base: Path, name_: str, link_id: str) -> dict[str, str]:
     a real ``ChannelWriter`` and say which files the sweep added. A close is named by
     its kind and its channel, since the sweep stamps it with the clock.
     """
-    k = channels.LinkKey(name_, link_id)
+    k = channel_log.LinkKey(name_, link_id)
     d = base / name_ / link_id
-    store = channels.FileChannels(base)
+    store = channel_log.FileChannels(base)
     read = store.read(k)
-    judged = channels.judge(k, read)
-    owed = channels.owes_close(k, read)
+    judged = channel_log.judge(k, read)
+    owed = channel_log.owes_close(k, read)
     before = files_of(d)
-    writer = channels.ChannelWriter(store)
+    writer = channel_log.ChannelWriter(store)
     writer.submit(
-        channels.LinkKey(name_, "later"),
-        channels.LinkCreated(at=10.0, channel_id="later", members=("a", "b"), charter=""),
+        channel_log.LinkKey(name_, "later"),
+        channel_log.LinkCreated(at=10.0, channel_id="later", members=("a", "b"), charter=""),
     )
     writer.close(timeout=10.0)
     after = files_of(d)
@@ -180,12 +187,12 @@ def observe(manifest: Path, out: Path) -> int:
         if entry["type"] == "board":
             seen[label] = {"read": repr(read_board(path))}
         elif entry["type"] == "channel":
-            k = channels.LinkKey(entry["name"], entry["link_id"])
-            read = channels.FileChannels(path).read(k)
+            k = channel_log.LinkKey(entry["name"], entry["link_id"])
+            read = channel_log.FileChannels(path).read(k)
             seen[label] = {
                 "read": repr(read),
-                "judge": repr(channels.judge(k, read)),
-                "owes_close": repr(channels.owes_close(k, read)),
+                "judge": repr(channel_log.judge(k, read)),
+                "owes_close": repr(channel_log.owes_close(k, read)),
             }
         else:
             mine = SCRATCH / "sweep" / str(len(seen))
@@ -263,7 +270,7 @@ class Fixtures:
         self.entries[label] = {"type": "board", "path": str(d)}
         return d
 
-    def channel(self, label: str, kind: str, link: channels.LinkKey) -> Path:
+    def channel(self, label: str, kind: str, link: channel_log.LinkKey) -> Path:
         base = self.root / kind / str(len(self.entries))
         d = base / link.name / link.link_id
         d.mkdir(parents=True)
@@ -382,35 +389,35 @@ def damaged_logs(fx: Fixtures) -> list[Path]:
 
 def part5_6(fx: Fixtures) -> None:
     print("5. a channel log this build wrote, through FileChannels.append")
-    link = channels.LinkKey("ops", "0b3e6c1e-4f0e-4a39-9b0c-6a1d1f1c0001")
+    link = channel_log.LinkKey("ops", "0b3e6c1e-4f0e-4a39-9b0c-6a1d1f1c0001")
     directory = fx.channel("5. every link fact", "channel", link)
-    store = channels.FileChannels(directory.parent.parent)
+    store = channel_log.FileChannels(directory.parent.parent)
     facts: list[Any] = []
     for i, charter in enumerate(TEXTS):
         facts.append(
-            channels.LinkCreated(
+            channel_log.LinkCreated(
                 at=TIMES[i % len(TIMES)],
                 channel_id=f"c{i}",
                 members=LISTS[i % len(LISTS)] or ("a", "b"),
                 charter=charter,
             )
         )
-        facts.append(channels.LinkClosed(at=TIMES[(i + 1) % len(TIMES)], channel_id=f"c{i}"))
+        facts.append(channel_log.LinkClosed(at=TIMES[(i + 1) % len(TIMES)], channel_id=f"c{i}"))
     facts.append(RecordingStopped(at=9.0, reason="stopped \udc80"))
     for f in facts:
-        assert isinstance(store.append(link, f), channels.Appended)
+        assert isinstance(store.append(link, f), channel_log.Appended)
     before = files_of(directory)
     against_golden("channel", before)
     check(
         f"this build reads back the facts appended ({len(facts)})",
-        store.read(link) == channels.Read(tuple(facts)),
+        store.read(link) == channel_log.Read(tuple(facts)),
     )
-    expected = [encode(channels.encode(f)).encode() for f in facts]
+    expected = [encode(channel_log.encode(f)).encode() for f in facts]
     check("each file is the fact's encoding, byte for byte", list(before.values()) == expected)
 
     good = encode(
-        channels.encode(
-            channels.LinkCreated(at=1.0, channel_id="c", members=("a", "b"), charter="")
+        channel_log.encode(
+            channel_log.LinkCreated(at=1.0, channel_id="c", members=("a", "b"), charter="")
         )
     ).encode()
     cases = {
@@ -422,13 +429,13 @@ def part5_6(fx: Fixtures) -> None:
         "torn": b'{"kind": "link-closed", "at": 1, "channel_id": "c"}',
     }
     for label, data in cases.items():
-        k = channels.LinkKey("dmg", label.replace(" ", "-"))
+        k = channel_log.LinkKey("dmg", label.replace(" ", "-"))
         d = fx.channel(f"5. damaged channel log: {label}", "channel", k)
         (d / name(0)).write_bytes(good)
         (d / name(1)).write_bytes(data)
         (d / name(2)).write_bytes(good)
 
-    k = channels.LinkKey("foreign", "board-records")
+    k = channel_log.LinkKey("foreign", "board-records")
     d = fx.channel("6. board records in a channel's directory", "channel", k)
     (d / name(0)).write_bytes(good)
     (d / name(1)).write_bytes(encode(boardlog.Claimed(at=1.0, task_id="t", by="b")).encode())
@@ -471,14 +478,16 @@ def _whole(cls: type[Any]) -> bytes:
 
 def part6b(fx: Fixtures) -> int:
     link_id = "earlier"
-    k = channels.LinkKey("sweep", link_id)
+    k = channel_log.LinkKey("sweep", link_id)
 
     def fact(f: Any) -> bytes:
-        return encode(channels.encode(f)).encode()
+        return encode(channel_log.encode(f)).encode()
 
-    created = fact(channels.LinkCreated(at=1.0, channel_id=link_id, members=("a", "b"), charter=""))
-    closed = fact(channels.LinkClosed(at=2.0, channel_id=link_id))
-    unpaired = fact(channels.LinkCreated(at=1.0, channel_id=link_id, members=("a",), charter=""))
+    created = fact(
+        channel_log.LinkCreated(at=1.0, channel_id=link_id, members=("a", "b"), charter="")
+    )
+    closed = fact(channel_log.LinkClosed(at=2.0, channel_id=link_id))
+    unpaired = fact(channel_log.LinkCreated(at=1.0, channel_id=link_id, members=("a",), charter=""))
     stopped = encode(RecordingStopped(at=3.0, reason="r")).encode()
     skeptic = b'{"kind":"task-claimed","at":1}\n'
 

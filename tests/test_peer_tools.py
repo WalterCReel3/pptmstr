@@ -23,9 +23,9 @@ from pptmstr import bus as bus_module
 from pptmstr.boardfacts import Fact, outcomes
 from pptmstr.boardlog import Clock, Delivered, PeerPosted, PeerRetracted, Withdrawn
 from pptmstr.bus import peer_said
+from pptmstr.channels.records import EVERY_CHANNEL, PeerIdentity, PeerRefusal, PeerWithdrawRefusal
 from pptmstr.effects import (
     InboxDelivered,
-    PeerIdentity,
     PeerInboxDelivered,
     PeerSettled,
     PeerWithdrawSettled,
@@ -49,17 +49,7 @@ from pptmstr.intents import (
     PeerSent,
 )
 from pptmstr.journal import codec
-from pptmstr.model import (
-    EVERY_CHANNEL,
-    AgentState,
-    Concern,
-    ConcernState,
-    NodeId,
-    PeerRefusal,
-    PeerWithdrawRefusal,
-    Snapshot,
-    Unplaced,
-)
+from pptmstr.model import AgentState, Concern, ConcernState, NodeId, Snapshot, Unplaced
 from pptmstr.store import Store, _apply, _concern_wake
 from tests.test_bus import _live_bus
 
@@ -989,8 +979,8 @@ def test_an_answer_on_the_link_its_message_came_over_is_sent() -> None:
 
 
 def test_a_link_restored_at_startup_is_live_since_the_restore() -> None:
+    from pptmstr.channels.records import Channel
     from pptmstr.intents import ChannelsRestored
-    from pptmstr.model import Channel
 
     held = Channel("k1", "brand", frozenset({S, Z}), "charter", created_at=1_000.0)
     snap, _, _ = apply(started(), ChannelsRestored((held,)), now=4.0)
@@ -1061,8 +1051,8 @@ def _spawned(session: str, task: str) -> AgentSpawned:
 
 def _restored_with(session: str) -> Intent:
     """#brand between ``s`` and ``session``, as a log restores it: no card need be running."""
+    from pptmstr.channels.records import Channel
     from pptmstr.intents import ChannelsRestored
-    from pptmstr.model import Channel
 
     return ChannelsRestored((Channel("k1", "brand", frozenset({S, session}), "c", 0.5),))
 
@@ -1172,8 +1162,8 @@ def test_an_answer_citing_a_message_this_run_does_not_hold_is_refused() -> None:
     who never received it; the store cannot tell which link c-X came over, so
     it refuses the ``re`` rather than guess.
     """
+    from pptmstr.channels.records import Channel
     from pptmstr.intents import ChannelsRestored
-    from pptmstr.model import Channel
 
     k1 = Channel("k1", "brand", frozenset({S, Z}), "charter", created_at=1.0, closed_at=2.0)
     k2 = Channel("k2", "brand", frozenset({S, C}), "charter", created_at=3.0)
@@ -1878,8 +1868,8 @@ def test_a_parked_withdrawal_names_the_link_and_lead_its_message_went_to() -> No
     whose move it is follow the withdrawn message's link -- never "?", and
     never the other link.
     """
+    from pptmstr.channels.records import MoveOwner
     from pptmstr.intents import ApprovalRequested
-    from pptmstr.model import MoveOwner
 
     store = _hub_store()
     cid = _hub_sends(store, "site-design", "r1", "c-aaaaaaaaaaaa", subject="the deck?")
@@ -1921,8 +1911,8 @@ def test_a_parked_withdrawal_of_a_message_its_agent_did_not_send_is_on_no_link(
     Naming another lead's message must not put a row on a link the caller is
     not acting across: it is said to be refused, and is nobody's move there.
     """
+    from pptmstr.channels.records import MoveOwner
     from pptmstr.intents import ApprovalRequested
-    from pptmstr.model import MoveOwner
 
     store = _hub_store()
     cid = _hub_sends(store, "site-design", "r1", "c-aaaaaaaaaaaa")
@@ -2188,7 +2178,7 @@ def _cited(snap: Snapshot) -> Any:
 
 
 def test_a_withdrawn_answer_says_its_question_is_owed_again_only_when_it_is() -> None:
-    from pptmstr.model import CitedQuestion
+    from pptmstr.channels.records import CitedQuestion
 
     assert _cited(_z_answers(_asked())) is CitedQuestion.OWED_AGAIN
     assert _cited(_z_answers(_asked(needs_answer=False))) is CitedQuestion.ASKED_NONE
@@ -2231,7 +2221,7 @@ def test_a_withdrawn_answer_says_its_question_is_owed_again_only_when_it_is() ->
 def test_each_standing_of_a_withdrawn_answers_question_has_its_own_sentence(
     standing: str, said: str
 ) -> None:
-    from pptmstr.model import CitedQuestion
+    from pptmstr.channels.records import CitedQuestion
 
     text = bus_module._cited_text(Q, CitedQuestion[standing])
     assert text.startswith(f"It answered {Q}") and said in text

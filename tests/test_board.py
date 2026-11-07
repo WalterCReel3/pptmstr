@@ -23,6 +23,7 @@ from pptmstr.board import (
     has_board,
     role_name,
 )
+from pptmstr.channels.records import Charter
 from pptmstr.effects import ClaimSettled
 from pptmstr.intents import (
     AgentFinished,
@@ -39,7 +40,6 @@ from pptmstr.intents import (
 )
 from pptmstr.model import (
     AgentState,
-    Charter,
     ClaimRefusal,
     Concern,
     ConcernState,

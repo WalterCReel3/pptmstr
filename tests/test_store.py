@@ -8211,7 +8211,7 @@ def _two_leads() -> Store:
 
 
 def test_a_link_between_two_running_recorded_leads_is_held_open() -> None:
-    from pptmstr.model import Channel
+    from pptmstr.channels.records import Channel
 
     store = _two_leads()
     store.apply(_link())
@@ -8260,7 +8260,7 @@ def _ended(store: Store, sid: str) -> Store:
     ],
 )
 def test_a_link_is_refused_and_changes_nothing(given: str, make: Any, why: str) -> None:
-    from pptmstr.model import LinkRefusal
+    from pptmstr.channels.records import LinkRefusal
 
     store = _two_leads()
     intent = make(store)
@@ -8319,8 +8319,8 @@ def test_a_channel_is_closed_whether_or_not_its_members_still_run() -> None:
 
 
 def test_restored_channels_are_held_and_a_held_one_is_not_replaced() -> None:
+    from pptmstr.channels.records import Channel
     from pptmstr.intents import ChannelsRestored
-    from pptmstr.model import Channel
 
     store = Store()
     # No member runs: a restore is the log's account, and is not a link.

@@ -35,6 +35,18 @@ from . import drawable
 from .approval import Policy, Summary, peer_channel, summary_of
 from .board import board_concerns, board_tasks, role_name
 from .boardlog import Board, Party, RestoredConcern, RestoredDecision, RestoredTask
+from .channels.records import (
+    EVERY_CHANNEL,
+    WITHDRAW_PEER_TOOL,
+    Channel,
+    ChannelId,
+    ChannelScope,
+    PeerIdentity,
+    PeerRefusal,
+    PeerWithdrawRefusal,
+    channel_as_linked,
+    logged_charter,
+)
 from .command import (
     MAX_OPEN_PER_ASKER,
     MAX_OPEN_SUBAGENTS,
@@ -62,7 +74,6 @@ from .effects import (
     DigestDelivered,
     Effect,
     InboxDelivered,
-    PeerIdentity,
     PeerInboxDelivered,
     PeerSettled,
     PeerWithdrawSettled,
@@ -136,7 +147,6 @@ from .intents import (
 )
 from .model import (
     ALL_WRITERS,
-    EVERY_CHANNEL,
     FINAL_STATES,
     INTERRUPTED_TOPIC,
     MAX_ANSWER_CHARS,
@@ -148,7 +158,6 @@ from .model import (
     MAX_WITHDRAWALS_LISTED,
     PEER_WAKE_CHAIN,
     RECALLED_TOPIC,
-    WITHDRAW_PEER_TOOL,
     AgentRecord,
     AgentState,
     Answered,
@@ -156,10 +165,6 @@ from .model import (
     ApprovedWrites,
     AskerFate,
     Basis,
-    Channel,
-    ChannelId,
-    ChannelScope,
-    Charter,
     ClaimRefusal,
     CommandOwed,
     CommandRefusal,
@@ -177,9 +182,7 @@ from .model import (
     Obligation,
     PeerMailHeld,
     PeerQuestionUnanswered,
-    PeerRefusal,
     PeerWakes,
-    PeerWithdrawRefusal,
     PendingApproval,
     Provenance,
     QuestionPending,
@@ -199,7 +202,6 @@ from .model import (
     approved_write,
     closing_notice,
     closing_result,
-    is_channel_name,
     is_operator,
     normalised_property,
     normalised_touches,
@@ -366,7 +368,7 @@ def _clock(now: float | None) -> float:
 #   them (``command.request_refusal``, ``Snapshot.command_approval_refusal``), which
 #   has to see a NUL or a lone surrogate to refuse it.
 # - A channel's charter, which is written to the channel's log from the store
-#   and read back from it (``channels.outcomes``): the operator's text, kept as
+#   and read back from it (``channels.log.outcomes``): the operator's text, kept as
 #   typed.
 #
 # A board restore is not here because it never meets this table: ``_drawable``
@@ -4345,17 +4347,6 @@ def _stated(text: str | None) -> Basis | None:
         return None
 
 
-def _charter(text: str | None) -> Charter:
-    """
-    A logged charter mark as the member it names. One this build does not define,
-    or none, reads as unstated, for the reason ``_stated`` reads a basis so.
-    """
-    try:
-        return Charter.UNSTATED if text is None else Charter(text)
-    except ValueError:
-        return Charter.UNSTATED
-
-
 def _restored_task(
     logged: RestoredTask,
     session_id: str,
@@ -4418,7 +4409,7 @@ def _restored_task(
         # declaration the bus took fails and which is what the names are taken
         # to have passed: a channel that is one drawable directory name, an re
         # with a concern id's shape. The mark is read as an unknown basis is
-        # (``_charter``), so it is not given to the rule.
+        # (``records.logged_charter``), so it is not given to the rule.
         try:
             checked = stated_provenance(logged.channel, logged.re, None)
         except ValueError:
@@ -4428,7 +4419,9 @@ def _restored_task(
         # or an empty message id. The bus logs none of those.
         if checked is None or (checked.channel, checked.re) != (logged.channel, logged.re):
             return Unplaced.INCOHERENT
-        provenance = dataclasses.replace(checked, inside_charter=_charter(logged.inside_charter))
+        provenance = dataclasses.replace(
+            checked, inside_charter=logged_charter(logged.inside_charter)
+        )
 
     history: list[TaskVersion] = []
     for prior, following in itertools.pairwise(logged.versions):
@@ -4540,7 +4533,7 @@ def _restored_concern(
 
     **A peer message's fields are asked again by the rules ``send_to_peer``
     put them through**: a channel that is a name, an ``re`` in the concern-id
-    shape, and, where ``channels`` holds its link, the link's own name. The
+    shape, and, where ``channels.log`` holds its link, the link's own name. The
     read prints the channel inside its own words and the ``re`` beside it, so a
     record that fails one did not come from that tool, and is not placed.
     """
@@ -4589,22 +4582,6 @@ def _restored_concern(
     )
 
 
-def _channel_as_linked(
-    channel: str, link: ChannelId | None, channels: Mapping[ChannelId, Channel]
-) -> bool:
-    """
-    Whether a logged record's ``channel`` is one a step could have written for
-    ``link``: a channel name, and the link's own name where the store holds the
-    link. A link the store does not hold yet is not asked about its name here;
-    the read asks it then (``Snapshot.peer_deliverable``,
-    ``Snapshot.channel_decision_readable``).
-    """
-    if not is_channel_name(channel):
-        return False
-    held = None if link is None else channels.get(link)
-    return held is None or held.name == channel
-
-
 def _peer_fields_hold(
     channel: str | None,
     link: ChannelId | None,
@@ -4613,12 +4590,12 @@ def _peer_fields_hold(
 ) -> bool:
     """
     Whether a peer message's own fields are ones ``send_to_peer`` could have
-    filed: its channel as ``_channel_as_linked`` reads it, and an ``re`` that
+    filed: its channel as ``records.channel_as_linked`` reads it, and an ``re`` that
     is absent or in the concern-id shape the tool checks.
     """
     return (
         channel is not None
-        and _channel_as_linked(channel, link, channels)
+        and channel_as_linked(channel, link, channels)
         and (cites is None or is_concern_id(cites))
     )
 
@@ -4647,7 +4624,7 @@ def _restored_decision(
 
     A decision on a channel is a lead's (``DecisionRefusal.NOT_A_LEAD``), so one
     whose asker is a sub-agent is refused, and its channel must be its link's
-    name where the store holds the link (``_channel_as_linked``).
+    name where the store holds the link (``records.channel_as_linked``).
     """
     asker = node_of(logged.asker)
     if asker[0] != session_id:
@@ -4679,7 +4656,7 @@ def _restored_decision(
     if (not logged.link) != (logged.channel is None):
         return Unplaced.INCOHERENT
     if logged.channel is not None and (
-        asker[1] is not None or not _channel_as_linked(logged.channel, logged.link, channels)
+        asker[1] is not None or not channel_as_linked(logged.channel, logged.link, channels)
     ):
         return Unplaced.INCOHERENT
     return Decision(

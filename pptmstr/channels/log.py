@@ -78,8 +78,8 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, assert_never, get_args, get_type_hints
 
-from . import boardlog, serialworker, settings
-from .intents import (
+from .. import boardlog, serialworker, settings
+from ..intents import (
     AgentFinished,
     AgentRemoved,
     AgentResumed,
@@ -139,13 +139,14 @@ from .intents import (
     UsageAccrued,
     WakeChainReleased,
 )
-from .journal import codec, files
-from .journal.codec import RecordingStopped, Unrecognised
+from ..journal import codec, files
+from ..journal.codec import RecordingStopped, Unrecognised
 
 # Re-exported: the seam's "could not look", which the shell matches on.
-from .journal.files import Unlisted as Unlisted
-from .model import LINK_MEMBERS, Channel, ChannelId, Snapshot, is_channel_name
-from .serialworker import SerialWorker
+from ..journal.files import Unlisted as Unlisted
+from ..model import Snapshot
+from ..serialworker import SerialWorker
+from .records import LINK_MEMBERS, Channel, ChannelId, is_channel_name
 
 # The longest charter a link is made with, in characters (``app.link_leads``).
 # A character costs at most twelve bytes in a record -- an astral one is two
@@ -168,7 +169,7 @@ class LinkKey:
     """
     Which log: the channel name the link was made under, and its id. Both are
     one directory entry each, so each passes the plain-name rule
-    (``model.is_channel_name``); a uuid does.
+    (``records.is_channel_name``); a uuid does.
     """
 
     name: str
@@ -540,7 +541,7 @@ class FileChannels:
 
     def _directory(self, link: LinkKey) -> Path | None:
         # The plain-name rule is also what keeps each part one directory entry
-        # under the root (``model._channel_refusal``).
+        # under the root (``records._channel_refusal``).
         if is_channel_name(link.name) and is_channel_name(link.link_id):
             return self.root / link.name / link.link_id
         return None

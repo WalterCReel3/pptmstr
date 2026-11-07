@@ -21,6 +21,7 @@ from pptmstr import boardlog, commandbus
 from pptmstr import replies as replies_mod
 from pptmstr.bridge import Bridge
 from pptmstr.bus import CALLED_AT_KEY, FROM_KEY, build_server
+from pptmstr.channels.records import MAX_CHANNEL_CHARS, Charter
 from pptmstr.effects import BoardDelivered, ClaimSettled, InboxDelivered, TaskWriteSettled
 from pptmstr.intents import (
     BoardRead,
@@ -41,9 +42,7 @@ from pptmstr.journal import codec
 from pptmstr.journal import files as journal_files
 from pptmstr.model import (
     BEFORE_RESTART,
-    MAX_CHANNEL_CHARS,
     MAX_ID_CHARS,
-    Charter,
     ClaimRefusal,
     Concern,
     ConcernState,

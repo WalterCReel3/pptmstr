@@ -16,7 +16,8 @@ import random
 import pytest
 
 from pptmstr import bus, effects
-from pptmstr.effects import PeerIdentity, between_quotes, peer_text
+from pptmstr.channels.records import PeerIdentity
+from pptmstr.effects import between_quotes, peer_text
 
 # Probe p04's corpus (planning/2026-11-06-refactor-graph/probes/p04_decoders_quoted.py),
 # with what both copies rendered for each before the merge.

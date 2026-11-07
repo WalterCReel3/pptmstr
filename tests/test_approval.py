@@ -1465,7 +1465,7 @@ def test_a_declaration_a_peer_asked_for_keeps_its_mark_on_the_row_the_driver_bui
 
 
 def test_the_mark_leads_the_longest_channel() -> None:
-    from pptmstr.model import MAX_CHANNEL_CHARS
+    from pptmstr.channels.records import MAX_CHANNEL_CHARS
 
     row = summarize(
         _DECLARE, {"title": "x", "channel": "c" * MAX_CHANNEL_CHARS, "inside_charter": "no"}
@@ -2907,7 +2907,8 @@ def test_a_row_to_a_peer_with_a_long_card_title_keeps_its_subject_whole(
     first: the longest of ``peer_forms`` that leaves the subject whole.
     """
     from pptmstr.approval import summarize
-    from pptmstr.effects import PeerIdentity, peer_forms, peer_text
+    from pptmstr.channels.records import PeerIdentity
+    from pptmstr.effects import peer_forms, peer_text
 
     peer = PeerIdentity(
         session="0123456789abcdef", title=_LONG_CARD_TITLE, project="brand", held=True
@@ -2953,7 +2954,8 @@ def test_a_row_whose_subject_cannot_fit_beside_any_description_still_keeps_some_
     ``_SUBJECT_KEPT`` characters even where that takes the row past its width.
     """
     from pptmstr.approval import _SUBJECT_KEPT, summarize
-    from pptmstr.effects import PeerIdentity, peer_forms
+    from pptmstr.channels.records import PeerIdentity
+    from pptmstr.effects import peer_forms
 
     channel = "a" * 30
     subject = "s" * 200

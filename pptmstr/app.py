@@ -36,7 +36,6 @@ from . import (
     boardlog,
     boardsync,
     bus,
-    channels,
     cli_version,
     commandfile,
     commandrun,
@@ -57,6 +56,7 @@ from . import settings as settings_mod
 from . import version as version_mod
 from .approval import Policy, requires_containment
 from .bridge import Bridge
+from .channels import log as channel_log
 from .command import (
     COMMAND_TAG,
     Command,
@@ -968,7 +968,7 @@ class AppState:
     # The one appender of channel logs, or None where no board is recorded: a
     # link between leads is only made between sessions being recorded, so with
     # no board writer there is nothing it could record. See ``_record_channels``.
-    channel_writer: channels.ChannelWriter | None = None
+    channel_writer: channel_log.ChannelWriter | None = None
     # Why startup could not look at the channel logs, or None when it could.
     # Every link is refused while it is set: a link there may be live under the
     # name asked for, and "could not look" is not "none" (``link_leads``).
@@ -1421,7 +1421,7 @@ def _observer(state: AppState, writer: boardsync.BoardWriter | None) -> Observer
 def _record_channels(state: AppState) -> Observer:
     """
     The channel logs' half of the observer: each applied link or close, as the
-    fact ``channels.outcomes`` reads off the store, queued for the channel
+    fact ``channels.log.outcomes`` reads off the store, queued for the channel
     writer; and a link the store refused, said with the reason.
 
     The refusal is worked out from the snapshot the act met
@@ -1447,7 +1447,7 @@ def _record_channels(state: AppState) -> Observer:
             writer = state.channel_writer
             if writer is None:
                 return
-            for link, fact in channels.outcomes(before, intent, after):
+            for link, fact in channel_log.outcomes(before, intent, after):
                 writer.submit(link, fact)
         except Exception as exc:  # noqa: BLE001 - see the docstring: this must not raise
             LOG.error(
@@ -1461,7 +1461,7 @@ def _record_channels(state: AppState) -> Observer:
 
 
 def _read_channel_reports(
-    reports: tuple[channels.Report, ...], state: AppState | None = None
+    reports: tuple[channel_log.Report, ...], state: AppState | None = None
 ) -> None:
     """
     Say each link fact that did not reach its log, and what each relink's
@@ -1479,17 +1479,17 @@ def _read_channel_reports(
     """
     for report in reports:
         match report:
-            case channels.Outcome():
+            case channel_log.Outcome():
                 _read_outcome(report, state)
-            case channels.Swept():
+            case channel_log.Swept():
                 _read_sweep(report, state)
             case _:
                 assert_never(report)
 
 
-def _read_outcome(report: channels.Outcome, state: AppState | None) -> None:
+def _read_outcome(report: channel_log.Outcome, state: AppState | None) -> None:
     """Say a submitted fact that did not reach its log; one that did is not said."""
-    if not isinstance(report.result, channels.NotAppended):
+    if not isinstance(report.result, channel_log.NotAppended):
         return
     if state is not None:
         _not_done(state, _not_written(report.link, type(report.fact), report.result.reason))
@@ -1500,20 +1500,20 @@ def _read_outcome(report: channels.Outcome, state: AppState | None) -> None:
     )
 
 
-def _stopped(marker: channels.Appended | channels.NotAppended | None) -> str:
+def _stopped(marker: channel_log.Appended | channel_log.NotAppended | None) -> str:
     """What a failed fact's report adds for the stop marker tried after it."""
     match marker:
         case None:
             return ""
-        case channels.Appended():
+        case channel_log.Appended():
             return "; its log says recording stopped"
-        case channels.NotAppended():
+        case channel_log.NotAppended():
             return f"; nor could its log be marked as stopped ({marker.reason})"
         case _:
             assert_never(marker)
 
 
-def _read_sweep(report: channels.Swept, state: AppState | None) -> None:
+def _read_sweep(report: channel_log.Swept, state: AppState | None) -> None:
     """
     Say what the sweep for ``report.made`` did: the earlier links it closed, in
     LOG, and each it could not close, or that it could list none, in LOG and in
@@ -1525,14 +1525,14 @@ def _read_sweep(report: channels.Swept, state: AppState | None) -> None:
         for notice in _sweep_notices(report):
             _not_done(state, notice)
     closes = report.closes
-    if isinstance(closes, channels.Unlisted):
+    if isinstance(closes, channel_log.Unlisted):
         LOG.error(
             "channel",
             f"{made}: was linked, and no earlier link under #{name} was checked or closed:"
             f" the links under #{name} could not be listed ({closes.reason})",
         )
         return
-    closed = [str(c.link) for c in closes if isinstance(c.result, channels.Appended)]
+    closed = [str(c.link) for c in closes if isinstance(c.result, channel_log.Appended)]
     if closed:
         LOG.info(
             "channel",
@@ -1540,7 +1540,7 @@ def _read_sweep(report: channels.Swept, state: AppState | None) -> None:
             f" under #{name} that could read live again: {', '.join(closed)}",
         )
     for close in closes:
-        if isinstance(close.result, channels.NotAppended):
+        if isinstance(close.result, channel_log.NotAppended):
             LOG.error(
                 "channel",
                 f"{close.link}: the close owed it when {made} was linked did not reach its"
@@ -1556,7 +1556,7 @@ _LEFT_LIVE = (
 )
 
 
-def _sweep_notices(report: channels.Swept) -> list[str]:
+def _sweep_notices(report: channel_log.Swept) -> list[str]:
     """
     What the operator is told of a sweep: one notice when the name's links
     could not be listed, one per earlier link it could not close, and nothing
@@ -1579,7 +1579,7 @@ def _sweep_notices(report: channels.Swept) -> list[str]:
     """
     name = report.made.name
     closes = report.closes
-    if isinstance(closes, channels.Unlisted):
+    if isinstance(closes, channel_log.Unlisted):
         return [
             f"#{name} was linked, but the earlier links under #{name} could not be listed"
             f" ({drawable.text(closes.reason)}), so none was checked or closed; until #{name}"
@@ -1587,7 +1587,7 @@ def _sweep_notices(report: channels.Swept) -> list[str]:
         ]
     said: list[str] = []
     for close in closes:
-        if not isinstance(close.result, channels.NotAppended):
+        if not isinstance(close.result, channel_log.NotAppended):
             continue
         made = (
             "its creation unreadable"
@@ -1598,7 +1598,7 @@ def _sweep_notices(report: channels.Swept) -> list[str]:
             f"an earlier link under #{name} ({made}, not the one just linked) could not be"
             f" closed: {drawable.text(close.result.reason)}"
         )
-        if not isinstance(close.marker, channels.Appended):
+        if not isinstance(close.marker, channel_log.Appended):
             notice += (
                 f"; nor could it be marked as stopped, so until #{name} is linked again,"
                 f" {_LEFT_LIVE.format(what='it', name=name)}"
@@ -1607,19 +1607,19 @@ def _sweep_notices(report: channels.Swept) -> list[str]:
     return said
 
 
-def _not_written(link: channels.LinkKey, kind: type, reason: str) -> str:
+def _not_written(link: channel_log.LinkKey, kind: type, reason: str) -> str:
     """
     What the operator is told of a link fact that did not reach its log: one
     sentence for a close refused before it was queued (``close_channel``) and
     for one the writer reported, so the two read as one thing said.
     """
     what = drawable.text(reason)
-    if kind is channels.LinkClosed:
+    if kind is channel_log.LinkClosed:
         return (
             f"#{link.name}: closed for this run only; the close did not reach the link's"
             f" log ({what}), and the next start reads the link as its log left it"
         )
-    if kind is channels.LinkCreated:
+    if kind is channel_log.LinkCreated:
         return (
             f"#{link.name}: linked for this run only; the link did not reach its log"
             f" ({what}), and the next start does not restore it"
@@ -1633,7 +1633,7 @@ def _link_pressed(state: AppState, name: str, members: frozenset[str], charter: 
     emitted nothing, or None when it emitted the link.
     """
     linked = link_leads(state, name, members, charter)
-    return linked.reason if isinstance(linked, channels.Refused) else None
+    return linked.reason if isinstance(linked, channel_log.Refused) else None
 
 
 def _recording(state: AppState) -> frozenset[str]:
@@ -1643,7 +1643,7 @@ def _recording(state: AppState) -> frozenset[str]:
 
 def link_leads(
     state: AppState, name: str, members: frozenset[str], charter: str
-) -> ChannelLinked | channels.Refused:
+) -> ChannelLinked | channel_log.Refused:
     """
     Emit the operator's link of ``members`` as a channel called ``name``, and
     return it; or emit nothing, say why, and return the refusal.
@@ -1657,17 +1657,17 @@ def link_leads(
     afresh. **Two refusals live here, not in the store**, because only the
     shell knows of them:
 
-    - a charter longer than ``channels.CHARTER_CHARS``, whose first fact would
+    - a charter longer than ``channels.log.CHARTER_CHARS``, whose first fact would
       come close to the size a record may be, and fail to land;
     - any link while startup could not list the channel logs
       (``AppState.channels_unlisted``): a live link under ``name`` may be in
       what it could not see.
     """
     refused: str | None = None
-    if len(charter) > channels.CHARTER_CHARS:
+    if len(charter) > channel_log.CHARTER_CHARS:
         refused = (
             f"the charter is {len(charter)} characters, over the"
-            f" {channels.CHARTER_CHARS} a link's charter may be"
+            f" {channel_log.CHARTER_CHARS} a link's charter may be"
         )
     elif state.channels_unlisted is not None:
         refused = (
@@ -1676,7 +1676,7 @@ def link_leads(
         )
     if refused is not None:
         LOG.warn("channel", f"#{name}: the leads were not linked: {refused}")
-        return channels.Refused(refused)
+        return channel_log.Refused(refused)
     linked = ChannelLinked(
         channel_id=str(uuid.uuid4()),
         name=name,
@@ -1711,7 +1711,7 @@ def close_channel(state: AppState, channel_id: str) -> str | None:
     state.bridge.emit(ChannelClosed(channel_id=channel_id, at=time.time()))
     if held is None or not held.live or writer is None:
         return None
-    link = channels.LinkKey(held.name, held.id)
+    link = channel_log.LinkKey(held.name, held.id)
     refused = writer.refusal(link)
     if refused is not None:
         LOG.warn(
@@ -1719,15 +1719,15 @@ def close_channel(state: AppState, channel_id: str) -> str | None:
             f"{link}: closed for this run only; the close cannot be written to its"
             f" log ({refused}), and the next start reads the link as its log left it",
         )
-        _not_done(state, _not_written(link, channels.LinkClosed, refused))
+        _not_done(state, _not_written(link, channel_log.LinkClosed, refused))
     return refused
 
 
-def _restore_channels() -> tuple[channels.Restored, ...] | channels.Unlisted:
+def _restore_channels() -> tuple[channel_log.Restored, ...] | channel_log.Unlisted:
     """
     Read every link's log, once, and say each link withheld from the store and
     why: a log short or stopped, or several links live under one name. A
-    withheld link is never live (``channels.restore_all``); its log is still
+    withheld link is never live (``channels.log.restore_all``); its log is still
     there to read.
 
     ``Unlisted`` -- the logs could not be listed -- is said too, and is not
@@ -1742,11 +1742,11 @@ def _restore_channels() -> tuple[channels.Restored, ...] | channels.Unlisted:
     """
     LOG.info(
         "channel",
-        f"reading channel logs under {channels.root()}"
+        f"reading channel logs under {channel_log.root()}"
         " (a start that stops here is waiting on that directory)",
     )
-    restored = channels.restore_all(channels.FileChannels())
-    if isinstance(restored, channels.Unlisted):
+    restored = channel_log.restore_all(channel_log.FileChannels())
+    if isinstance(restored, channel_log.Unlisted):
         LOG.error(
             "channel",
             f"the channel logs could not be listed, so no link is restored and none can be"
@@ -4000,7 +4000,7 @@ def _draw_card_overlays(state: AppState) -> None:
         snap,
         _recording(state),
         link=lambda name, members, charter: _link_pressed(state, name, members, charter),
-        charter_cap=channels.CHARTER_CHARS,
+        charter_cap=channel_log.CHARTER_CHARS,
         wrap=state.settings.wrap_inputs,
     )
     details = cards.details
@@ -5893,8 +5893,8 @@ def _start(
     if recorded:
         # Builds nothing on disk: a session's directory is made by its first record.
         state.board_writer = boardsync.BoardWriter()
-        state.channel_writer = channels.ChannelWriter(channels.FileChannels())
-    if isinstance(restored, channels.Unlisted):
+        state.channel_writer = channel_log.ChannelWriter(channel_log.FileChannels())
+    if isinstance(restored, channel_log.Unlisted):
         state.channels_unlisted = restored.reason
     elif restored is not None:
         # First in the queue: ahead of every recalled card and every launch.

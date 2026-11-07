@@ -23,7 +23,8 @@ from dataclasses import dataclass
 from imgui_bundle import imgui
 
 from .. import drawable
-from ..model import MAX_CHANNEL_CHARS, LinkRefusal, Snapshot
+from ..channels.records import MAX_CHANNEL_CHARS, LinkRefusal
+from ..model import Snapshot
 from ..theme import P
 from . import session_menu, widgets
 

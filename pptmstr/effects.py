@@ -42,11 +42,10 @@ from pathlib import PurePath
 
 from . import drawable
 from .board import BoardConcern, BoardTask
+from .channels.records import Channel, CitedQuestion, PeerIdentity, PeerRefusal, PeerWithdrawRefusal
 from .command import Command, CommandId, RequestRefusal
 from .digest import Digest
 from .model import (
-    Channel,
-    CitedQuestion,
     ClaimRefusal,
     CommandRefusal,
     Concern,
@@ -55,8 +54,6 @@ from .model import (
     DecisionRefusal,
     DetachRefusal,
     NodeId,
-    PeerRefusal,
-    PeerWithdrawRefusal,
     Snapshot,
     Task,
     TaskId,
@@ -98,35 +95,6 @@ class InboxDelivered:
 
     request_id: str
     concerns: tuple[Concern, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class PeerIdentity:
-    """
-    Who a lead is, as another lead's link names it: its session id, its card's
-    title and its project. Derived from the store's root record for the session
-    (``peer_identity``) each time it is asked, never stored, so a session id
-    names one lead alike in every reply and across a resume that restores the
-    record.
-
-    ``title`` is the card's title as the fleet draws it for a root
-    (``ui.session_menu.card_title``): the record's task, typed by the operator or
-    an agent, and never this tool's words. ``project`` is the last component of
-    the directory the session's writes are measured from (``session_base``, or
-    ``cwd`` on a record that has none) -- the name the fleet's project lane
-    shows (``ui.projects.project_key``) without the filesystem read the lane
-    makes. Either is empty where the store holds no such fact, and ``held`` is
-    False when it holds no root record for the session at all.
-
-    Both are drawable (``drawable.text``): the record holds its task and its
-    directories verbatim (``store._VERBATIM``), and this value is what carries
-    them into a lead's tool replies, its wakes and the operator's rows.
-    """
-
-    session: str
-    title: str = ""
-    project: str = ""
-    held: bool = False
 
 
 def peer_identity(snap: Snapshot, session_id: str) -> PeerIdentity:

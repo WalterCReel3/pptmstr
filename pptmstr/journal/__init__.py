@@ -2,7 +2,7 @@
 A journal: facts appended one record per file to a directory, and read back as the
 ordered prefix that is whole.
 
-The board log (``boardlog``) and a channel's log (``channels``) are both journals.
+The board log (``boardlog``) and a channel's log (``channels.log``) are both journals.
 What they share is here, in two modules split by what they require:
 
 - ``codec``: pure. One record as text and back, under a kind table the caller

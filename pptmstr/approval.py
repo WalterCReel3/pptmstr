@@ -137,7 +137,7 @@ _BUS_WITHDRAW_PEER = f"mcp__{_BUS_SERVER}__withdraw_peer_message"
 
 # The two calls across a link that name their channel (``peer_channel``), by
 # the names the gate is handed, for a reader that says which a parked call is.
-# The third, a withdrawal, names none: ``model.WITHDRAW_PEER_TOOL``.
+# The third, a withdrawal, names none: ``records.WITHDRAW_PEER_TOOL``.
 PEER_MESSAGE_TOOL = _BUS_PEER
 PEER_DECISION_TOOL = _BUS_DECIDE
 
@@ -1680,7 +1680,8 @@ def edited_provenance(
     if not states_provenance(tool_name) or not is_edit(draft, original):
         return None
     # Imported here for the reason ``summarize`` gives.
-    from .model import Charter, Provenance, kept_provenance
+    from .channels.records import Charter
+    from .model import Provenance, kept_provenance
 
     stated = _provenance_read(draft)
     if isinstance(stated, _Refused):

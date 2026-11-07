@@ -154,7 +154,7 @@ class Declared:
     # ``model.Task.provenance``, flattened: the channel the request arrived on, or
     # None for a declaration with no provenance -- which is also what a record
     # with no such key reads as -- and beside it the message it answers and the
-    # declarer's charter mark, a ``model.Charter`` value. The mark is text and not
+    # declarer's charter mark, a ``channels.records.Charter`` value. The mark is text and not
     # a bool, for the reason ``basis`` is: a word this build does not know reads
     # as unstated, where a value of another type would make the record unreadable
     # and end the log at it. ``re`` and ``inside_charter`` say nothing without a

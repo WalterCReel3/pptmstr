@@ -19,21 +19,12 @@ import pytest
 from pptmstr import boardlog, drawable
 from pptmstr.boardfacts import Fact, outcomes
 from pptmstr.boardlog import Clock, RestoredTask
+from pptmstr.channels.records import MAX_CHANNEL_CHARS, Charter
 from pptmstr.ids import is_concern_id
 from pptmstr.intents import AgentSpawned, BoardRestored, Intent, TaskAmended, TaskDeclared
 from pptmstr.journal import codec
 from pptmstr.journal import files as journal_files
-from pptmstr.model import (
-    MAX_CHANNEL_CHARS,
-    Charter,
-    NodeId,
-    NotPlaced,
-    Provenance,
-    Snapshot,
-    Task,
-    Unplaced,
-    stated_provenance,
-)
+from pptmstr.model import NodeId, NotPlaced, Provenance, Snapshot, Task, Unplaced, stated_provenance
 from pptmstr.store import _apply
 
 S = "s"
@@ -241,7 +232,7 @@ def test_the_channel_rule_matches_the_whole_name() -> None:
     ``stated_provenance`` trims before the rule runs, so this asks the rule
     itself: a pattern anchored with ``$`` would pass a name ending in a newline.
     """
-    from pptmstr.model import _channel_refusal
+    from pptmstr.channels.records import _channel_refusal
 
     assert _channel_refusal("brand") is None
     assert _channel_refusal("brand\n") is not None
@@ -283,15 +274,15 @@ _NAMES = (
 @pytest.mark.parametrize("name", _NAMES)
 def test_every_channel_name_is_a_name_a_directory_can_have(name: str) -> None:
     """
-    ``model._channel_refusal`` does not import ``requests.address_refusal``
-    (``requests`` imports ``model``), and is narrower than it by construction.
+    ``records._channel_refusal`` does not import ``requests.address_refusal``
+    (``records`` imports nothing from pptmstr), and is narrower than it by construction.
     This keeps the narrowing true: whatever the directory rule refuses, the
     channel rule refuses, and every name the channel rule takes is its own
     drawable form, so the name checked is the name stored and logged. The empty
     name is refused before either runs: a blank channel is no channel.
     """
     from pptmstr import requests
-    from pptmstr.model import _channel_refusal
+    from pptmstr.channels.records import _channel_refusal
 
     if not name:
         assert stated_provenance(name, None, None) is None

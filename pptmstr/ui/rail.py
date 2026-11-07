@@ -45,10 +45,10 @@ from typing import assert_never
 from imgui_bundle import imgui
 
 from .. import drawable
+from ..channels.records import Channel
 from ..model import (
     AgentRecord,
     AgentState,
-    Channel,
     EndedHow,
     NodeId,
     Obligation,

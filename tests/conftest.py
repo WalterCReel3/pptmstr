@@ -54,7 +54,6 @@ import pytest
 from pptmstr import (
     boardsync,
     brief,
-    channels,
     model_catalog,
     pairing,
     sessionfile,
@@ -62,6 +61,7 @@ from pptmstr import (
     theme,
     version,
 )
+from pptmstr.channels import log as channel_log
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import gate, views
 from tests.mcp_wire import versions_line
@@ -577,16 +577,16 @@ def _no_session_directory_under_the_real_config(
     legacy_root`` is not reached; the modules' own calls are, since each looks the
     name up when it runs.
 
-    **The channels root is the third**, ``channels.root()``, where a link
+    **The channels root is the third**, ``channels.log.root()``, where a link
     between leads is read at startup and appended. It is redirected beside the
-    other two for the same reason, and ``channels.FileChannels`` built without a
+    other two for the same reason, and ``channels.log.FileChannels`` built without a
     root asks it.
 
     The replacement directory is made on first use.
     """
     under: Callable[[Path | None], Path] = sessionfile._under
     legacy: Callable[[], Path] = boardsync.legacy_root
-    channel_root: Callable[[], Path] = channels.root
+    channel_root: Callable[[], Path] = channel_log.root
     scratch: list[Path] = []
 
     def inside(path: Path, name: str) -> Path:
@@ -604,7 +604,7 @@ def _no_session_directory_under_the_real_config(
 
     monkeypatch.setattr(sessionfile, "_under", redirected_under)
     monkeypatch.setattr(boardsync, "legacy_root", redirected_legacy)
-    monkeypatch.setattr(channels, "root", lambda: inside(channel_root(), "channels"))
+    monkeypatch.setattr(channel_log, "root", lambda: inside(channel_root(), "channels"))
 
 
 @pytest.fixture(autouse=True)

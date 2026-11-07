@@ -20,11 +20,12 @@ import pytest
 from pptmstr import boardlog
 from pptmstr.boardfacts import outcomes
 from pptmstr.boardlog import Clock, Delivered, PeerPosted
+from pptmstr.channels.records import EVERY_CHANNEL
 from pptmstr.effects import InboxDelivered
 from pptmstr.intents import AgentSpawned, BoardRestored, ConcernPosted, InboxRead, Intent
 from pptmstr.journal import codec
 from pptmstr.journal.codec import Unrecognised
-from pptmstr.model import EVERY_CHANNEL, Concern, ConcernState, NodeId, Snapshot
+from pptmstr.model import Concern, ConcernState, NodeId, Snapshot
 from pptmstr.store import _apply
 
 S, Z = "s", "z"

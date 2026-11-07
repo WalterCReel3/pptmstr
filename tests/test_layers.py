@@ -3,7 +3,7 @@ The layer rules the tree states in prose, checked against its imports.
 
 Each rule below was a sentence in a docstring, in ``STYLE.md`` or in a planning
 record, and nothing held the code to it (``planning/2026-11-06-modules-are-named-
-for-what-they-require.md``, T3, T7 and A7). Eight are checked here:
+for-what-they-require.md``, T3, T7 and A7). Nine are checked here:
 
 1. A module whose docstring says it imports no ImGui imports no ``imgui_bundle``,
    directly in any form, and does not reach it through the imports that run when
@@ -19,6 +19,9 @@ for-what-they-require.md``, T3, T7 and A7). Eight are checked here:
 7. ``serialworker`` imports nothing from pptmstr (B3).
 8. ``ids`` imports nothing from pptmstr and calls no clock, and it is the one
    module that imports ``uuid`` or ``secrets`` (B6).
+9. ``pptmstr.channels`` imports nothing, ``channels.records`` imports nothing from
+   pptmstr, only ``app`` imports ``channels.log``, and a name ``records`` defines
+   is imported from ``records`` alone (B6).
 
 **Read from the source, never imported.** Every import is collected with ``ast``,
 including those inside a function (``lazy``) and those under ``if TYPE_CHECKING:``
@@ -791,6 +794,10 @@ PURE: dict[str, Claim] = {
     "pptmstr.boardlog": Claim(
         "pptmstr/boardlog.py", "**Pure: no IO, no clock, and nothing here is in the snapshot.**"
     ),
+    # channels/records.py:9
+    "pptmstr.channels.records": Claim(
+        "pptmstr/channels/records.py", "It is pure: no disk, no clock, no entropy"
+    ),
     # ui/clip.py:4
     "pptmstr.ui.clip": Claim("pptmstr/ui/clip.py", "Pure: one function of a string and a limit"),
     # figures/__init__.py:4
@@ -949,3 +956,73 @@ def test_only_ids_imports_an_entropy_source() -> None:
         f"{source} -> {target}" for source, target in sorted(stale)
     )
     assert any(edge.target == "uuid" for edge in imports_of(IDS)), "ids no longer mints"
+
+
+# -- 9. channels: one package, one module per requirement --------------------------
+
+CHANNELS = "pptmstr.channels"
+RECORDS = "pptmstr.channels.records"
+CHANNEL_LOG = "pptmstr.channels.log"
+
+
+def test_the_channels_package_imports_nothing() -> None:
+    """
+    ``model`` imports ``channels.records``, which runs ``channels/__init__`` first.
+    An import there -- of ``log`` above all -- would have ``model`` reach the disk
+    and a thread through it, so the package's ``__init__`` is a docstring only.
+    """
+    found = imports_of(CHANNELS)
+    assert not found, ", ".join(f"{edge.target} ({edge.kind}, line {edge.line})" for edge in found)
+
+
+def test_channel_records_import_nothing_from_pptmstr() -> None:
+    """
+    ``model`` imports ``records``, so an edge into the package of any kind is a
+    cycle back through ``model`` or a disk reader under it.
+    """
+    found = [edge for edge in imports_of(RECORDS) if edge.target.startswith("pptmstr")]
+    assert not found, ", ".join(f"{edge.target} ({edge.kind}, line {edge.line})" for edge in found)
+
+
+def test_only_app_imports_the_channel_log() -> None:
+    """
+    The log holds the disk and a thread; ``app`` is the composition root that
+    restores from it at startup and hands it the store's outcomes.
+    """
+    importers = {
+        edge.source
+        for edge in imports()
+        if edge.target == CHANNEL_LOG and not edge.source.startswith(CHANNEL_LOG)
+    }
+    assert importers == {"pptmstr.app"}, sorted(importers)
+
+
+def _defined_at_top(module: str) -> frozenset[str]:
+    names: set[str] = set()
+    for node in tree_of(module).body:
+        if isinstance(node, ast.ClassDef | ast.FunctionDef):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return frozenset(names)
+
+
+def test_nothing_reaches_a_channel_record_through_another_module() -> None:
+    """
+    No shim: ``model``, ``effects`` and ``store`` import the records they use, and
+    every other module imports a record from ``records`` too, never through them.
+    """
+    defined = _defined_at_top(RECORDS)
+    assert {"Channel", "ChannelId", "Charter", "PeerIdentity"} <= defined
+    found = [
+        f"{module} line {node.lineno}: {alias.name} from {_from(module, False, node)}"
+        for module in modules()
+        for node in ast.walk(tree_of(module))
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name in defined
+        and _from(module, modules()[module].name == "__init__.py", node) != RECORDS
+    ]
+    assert not found, "imports a channel record through another module: " + ", ".join(found)

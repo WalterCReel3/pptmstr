@@ -40,6 +40,13 @@ from pptmstr import app, boardlog, bus, digest
 from pptmstr.boardfacts import outcomes
 from pptmstr.boardlog import Clock
 from pptmstr.bridge import Bridge
+from pptmstr.channels.records import (
+    EVERY_CHANNEL,
+    WITHDRAW_PEER_TOOL,
+    Channel,
+    MoveOwner,
+    WhoseMove,
+)
 from pptmstr.effects import SessionWoken, WakeReason
 from pptmstr.intents import (
     AgentFinished,
@@ -62,14 +69,10 @@ from pptmstr.intents import (
 )
 from pptmstr.journal import codec
 from pptmstr.model import (
-    EVERY_CHANNEL,
-    WITHDRAW_PEER_TOOL,
     AgentState,
     ApprovalNeeded,
-    Channel,
     ConcernState,
     DetachRefusal,
-    MoveOwner,
     NodeId,
     Obligation,
     ObligationKind,
@@ -81,7 +84,6 @@ from pptmstr.model import (
     Snapshot,
     TranscriptPresence,
     WakeChainHeld,
-    WhoseMove,
 )
 from pptmstr.settings import Settings
 from pptmstr.store import Store, _apply

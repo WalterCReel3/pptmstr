@@ -23,8 +23,8 @@ import pytest
 
 from pptmstr import ids
 from pptmstr.bridge import Bridge
+from pptmstr.channels.records import is_channel_name
 from pptmstr.intents import ChannelLinked
-from pptmstr.model import is_channel_name
 from pptmstr.store import Store
 from tests.test_bus import DEV, LEAD, _live_bus, _raised, _team
 from tests.test_commandbus import _desk
@@ -105,7 +105,7 @@ def test_a_command_id_is_its_utc_second_and_twelve_hex() -> None:
 
 def test_a_channel_id_is_a_name_a_link_log_can_live_under() -> None:
     """
-    A channel's id names its log's directory (``channels.LinkKey``), so the id
+    A channel's id names its log's directory (``channels.log.LinkKey``), so the id
     ``link_leads`` mints must pass the plain-name rule the log lister reads
     directories back by.
     """

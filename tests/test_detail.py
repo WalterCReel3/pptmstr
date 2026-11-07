@@ -3762,7 +3762,8 @@ def test_each_message_is_marked_from_its_state_then_its_times() -> None:
     and then withdrawn (``delivered_at`` set, WITHDRAWN). Neither is read off
     the state alone or the time alone.
     """
-    from pptmstr.model import ConcernState, ThreadMark, ThreadMessage
+    from pptmstr.channels.records import ThreadMark
+    from pptmstr.model import ConcernState, ThreadMessage
 
     q1 = f"c-{1:012x}"
     snap = _with(
@@ -3792,7 +3793,8 @@ def test_each_message_is_marked_from_its_state_then_its_times() -> None:
 
 
 def test_a_withdrawn_reply_answers_nothing_and_a_reply_from_the_asker_is_not_an_answer() -> None:
-    from pptmstr.model import ConcernState, ThreadMark, ThreadMessage
+    from pptmstr.channels.records import ThreadMark
+    from pptmstr.model import ConcernState, ThreadMessage
 
     q1 = f"c-{1:012x}"
     snap = _with(
@@ -3809,7 +3811,8 @@ def test_a_withdrawn_reply_answers_nothing_and_a_reply_from_the_asker_is_not_an_
 
 
 def test_a_withdrawn_question_stays_withdrawn_when_a_reply_cites_it() -> None:
-    from pptmstr.model import ConcernState, ThreadMark, ThreadMessage
+    from pptmstr.channels.records import ThreadMark
+    from pptmstr.model import ConcernState, ThreadMessage
 
     q1 = f"c-{1:012x}"
     snap = _with(
@@ -3851,8 +3854,9 @@ def test_a_recalled_side_resumed_through_the_store_is_held() -> None:
     the recalled root, and the record it files carries no ``recalled``, so the
     side reads as held from then on and not as "not in this store" for good.
     """
+    from pptmstr.channels.records import Channel
     from pptmstr.intents import AgentSpawned, ChannelsRestored, SessionRecalled
-    from pptmstr.model import Channel, Recalled, ThreadSide
+    from pptmstr.model import Recalled, ThreadSide
     from pptmstr.store import Store
 
     # A startup: the link from its log and the recalled card first, then a
@@ -3956,7 +3960,7 @@ def test_every_call_that_parks_on_a_link_has_a_kind_the_thread_names() -> None:
     bare tool name. A renamed peer tool leaves no stale entry behind.
     """
     from pptmstr.bus import offered_tools
-    from pptmstr.model import WITHDRAW_PEER_TOOL
+    from pptmstr.channels.records import WITHDRAW_PEER_TOOL
 
     snap = _waiting_on_you()
     args = {
@@ -3987,7 +3991,8 @@ def test_what_waits_on_the_operator_is_a_row_in_the_thread_in_time_order() -> No
     wake, is a row at its instant; the calls that act across no link, or
     another, are not. One reading for both (``parked_on``).
     """
-    from pptmstr.model import MoveOwner, ThreadMessage, ThreadParked, ThreadWakeHeld
+    from pptmstr.channels.records import MoveOwner, ThreadWakeHeld
+    from pptmstr.model import ThreadMessage, ThreadParked
 
     snap = _waiting_on_you()
     link = snap.channels["k1"]

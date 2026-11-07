@@ -26,6 +26,7 @@ import pytest
 from pptmstr import boardlog, fleetsync, sessionfile
 from pptmstr.approval import Policy
 from pptmstr.boardlog import Clock
+from pptmstr.channels.records import EVERY_CHANNEL
 from pptmstr.command import Command, End, Exited, Lapsed
 from pptmstr.fleetsync import Change, FleetWriter, Latched, Outcome, Spent, changes
 from pptmstr.intents import (
@@ -89,7 +90,6 @@ from pptmstr.intents import (
     WakeChainReleased,
 )
 from pptmstr.model import (
-    EVERY_CHANNEL,
     AgentState,
     Concern,
     ContextSnapshot,

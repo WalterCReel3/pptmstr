@@ -31,13 +31,11 @@ from dataclasses import dataclass
 
 from .approval import Policy
 from .boardlog import Board, Clock
+from .channels.records import Channel, ChannelId, ChannelScope
 from .command import Command, CommandId, End
 from .model import (
     AgentState,
     Basis,
-    Channel,
-    ChannelId,
-    ChannelScope,
     Concern,
     ConcernId,
     ContextSnapshot,
@@ -440,7 +438,7 @@ class ConcernWithdrawn:
 
     ``peer_only`` is set by ``withdraw_peer_message``, which withdraws a
     message between teams and nothing else: the store then refuses a concern
-    inside a team (``model.PeerWithdrawRefusal.TEAM_MAIL``) after the sender
+    inside a team (``records.PeerWithdrawRefusal.TEAM_MAIL``) after the sender
     check, and the agent form without it may still withdraw its own team
     concern while it waits. Run-only, like the reason: no log record carries
     it (``boardfacts`` reads only the concern's state).
@@ -1289,7 +1287,7 @@ class ChannelLinked:
     same way, or link a session whose board nobody writes.
 
     The fact goes to the channel's own log from the shell, never from here
-    (``channels.outcomes``).
+    (``channels.log.outcomes``).
     """
 
     channel_id: ChannelId
@@ -1320,7 +1318,7 @@ class ChannelClosed:
 class ChannelsRestored:
     """
     The links the channel logs held that restore as they were, read once at
-    startup before any session can start (``channels.restore_all``). A link
+    startup before any session can start (``channels.log.restore_all``). A link
     withheld there -- its log short or stopped, or several live under one name
     -- is not here, and so never enters the store. A channel the store already holds
     under an id is left as the store has it. The shell's, with no node; every

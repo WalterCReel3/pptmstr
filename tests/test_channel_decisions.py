@@ -19,7 +19,8 @@ import pytest
 from pptmstr import boardlog
 from pptmstr.boardfacts import outcomes
 from pptmstr.boardlog import Clock
-from pptmstr.effects import DecisionSettled, PeerIdentity, SessionWoken, WakeReason
+from pptmstr.channels.records import Channel, PeerIdentity
+from pptmstr.effects import DecisionSettled, SessionWoken, WakeReason
 from pptmstr.intents import (
     AgentSpawned,
     BoardRestored,
@@ -33,15 +34,7 @@ from pptmstr.intents import (
     Intent,
 )
 from pptmstr.journal import codec
-from pptmstr.model import (
-    Channel,
-    Decision,
-    DecisionRefusal,
-    NodeId,
-    Snapshot,
-    Standing,
-    Unplaced,
-)
+from pptmstr.model import Decision, DecisionRefusal, NodeId, Snapshot, Standing, Unplaced
 from pptmstr.store import Store, _apply
 from tests.test_bus import _live_bus
 

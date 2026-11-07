@@ -20,7 +20,8 @@ import pytest
 from pptmstr import app, boardlog, bus
 from pptmstr.boardlog import Clock, PeerPosted
 from pptmstr.bridge import Bridge
-from pptmstr.effects import PeerIdentity, PeerInboxDelivered, SessionWoken, WakeReason
+from pptmstr.channels.records import EVERY_CHANNEL, PeerIdentity
+from pptmstr.effects import PeerInboxDelivered, SessionWoken, WakeReason
 from pptmstr.intents import (
     AgentFinished,
     AgentSpawned,
@@ -49,7 +50,6 @@ from pptmstr.intents import (
     WakeChainReleased,
 )
 from pptmstr.model import (
-    EVERY_CHANNEL,
     PEER_WAKE_CHAIN,
     AgentState,
     Basis,

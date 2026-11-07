@@ -101,6 +101,14 @@ from .boardgraph import (
     is_open,
 )
 from .bridge import Bridge
+from .channels.records import (
+    EVERY_CHANNEL,
+    CitedQuestion,
+    PeerIdentity,
+    PeerRefusal,
+    PeerWithdrawRefusal,
+    channel_refusal,
+)
 from .digest import (
     EARLIER_INCIDENTS,
     ChangeKind,
@@ -128,7 +136,6 @@ from .effects import (
     DigestDelivered,
     Effect,
     InboxDelivered,
-    PeerIdentity,
     PeerInboxDelivered,
     PeerSettled,
     PeerWithdrawSettled,
@@ -161,7 +168,6 @@ from .intents import (
 from .model import (
     ALL_WRITERS,
     BEFORE_RESTART,
-    EVERY_CHANNEL,
     MAX_BLOCKED_TASKS,
     MAX_DECISION_TEXT_CHARS,
     MAX_ID_CHARS,
@@ -171,7 +177,6 @@ from .model import (
     MAX_WITHDRAWAL_REASON_CHARS,
     Answered,
     Basis,
-    CitedQuestion,
     ClaimRefusal,
     Concern,
     ConcernId,
@@ -181,8 +186,6 @@ from .model import (
     Dismissed,
     NodeId,
     ObligationKind,
-    PeerRefusal,
-    PeerWithdrawRefusal,
     Provenance,
     Snapshot,
     Standing,
@@ -191,7 +194,6 @@ from .model import (
     TaskRefusal,
     TaskState,
     Withdrawn,
-    channel_refusal,
     closing_result,
     is_closing_notice,
     is_operator,

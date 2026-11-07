@@ -24,6 +24,7 @@ from pptmstr import boardfacts, boardlog
 from pptmstr.board import FOREIGN, UNKNOWN, role_name
 from pptmstr.boardfacts import Fact, outcomes
 from pptmstr.boardlog import Clock, RestoredConcern, RestoredDecision, RestoredTask
+from pptmstr.channels.records import EVERY_CHANNEL
 from pptmstr.command import Command, End, Exited, Lapsed
 from pptmstr.intents import (
     AgentFinished,
@@ -88,7 +89,6 @@ from pptmstr.intents import (
 from pptmstr.model import (
     ALL_WRITERS,
     EARLIER_RUN,
-    EVERY_CHANNEL,
     AgentState,
     Answered,
     ApprovedWrites,

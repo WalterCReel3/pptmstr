@@ -91,14 +91,13 @@ from ..approval import (
     diff_line_kind,
 )
 from ..bridge import Bridge
+from ..channels.records import WITHDRAW_PEER_TOOL, Channel, ThreadMark, ThreadWakeHeld
 from ..command import CommandId
 from ..effects import peer_identity, peer_text
 from ..ids import is_concern_id
 from ..model import (
-    WITHDRAW_PEER_TOOL,
     Answered,
     ApprovalNeeded,
-    Channel,
     CommandOwed,
     ConcernState,
     Decision,
@@ -114,10 +113,8 @@ from ..model import (
     SessionFailed,
     Snapshot,
     ThreadDecision,
-    ThreadMark,
     ThreadMessage,
     ThreadParked,
-    ThreadWakeHeld,
     WakeChainHeld,
     Withdrawn,
     stated_flag,
