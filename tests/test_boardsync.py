@@ -11,6 +11,7 @@ is what the real one wrote.
 from __future__ import annotations
 
 import os
+import queue
 import threading
 import time
 from collections.abc import Iterator
@@ -442,7 +443,7 @@ def test_the_marker_lands_when_the_reason_for_the_stop_is_itself_too_long_to_log
     assert isinstance(stopped, Stopped) and stopped.reason == essay
     assert isinstance(stopped.marker, Written)
     said = _marker(writer, "alpha")
-    assert said.reason == essay[: boardsync.MARKER_REASON_CHARS]
+    assert said.reason == essay[: codec.MARKER_REASON_CHARS]
     assert len(codec.encode(said)) < journal_files.MAX_RECORD_BYTES // 100
 
 
@@ -800,7 +801,7 @@ def test_close_gives_up_at_its_bound_and_names_every_record_that_did_not_land(
 
     # What was reported as not written stays unwritten once the append lets go.
     release.set()
-    worker = writer._worker
+    worker = writer._serial._worker
     assert worker is not None
     worker.join(10)
     assert not worker.is_alive()
@@ -825,8 +826,46 @@ def test_closing_a_writer_that_was_never_used_starts_no_thread_and_makes_no_dire
     writer = BoardWriter(tmp_path / "sessions", tmp_path / "boards")
 
     assert writer.close(timeout=10) == ()
-    assert writer._worker is None
+    assert writer._serial._worker is None
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_record_the_worker_never_took_up_is_reported_not_written_and_never_lands(
+    writer: BoardWriter,
+) -> None:
+    """
+    The worker is held before its first ``get``, so at ``close`` the oldest
+    record is pending and not in flight. "May still reach disk" would be a guess
+    there; "not written" is what the worker then does.
+    """
+    waiting, release = threading.Event(), threading.Event()
+
+    class Held(queue.SimpleQueue[tuple[str, Record] | None]):
+        def get(
+            self, block: bool = True, timeout: float | None = None
+        ) -> tuple[str, Record] | None:
+            waiting.set()
+            assert release.wait(30)
+            return super().get(block, timeout)
+
+    writer._serial._queue = Held()
+    writer.submit("alpha", _declared(0))
+    writer.submit("alpha", _declared(1))
+    assert waiting.wait(10)
+
+    outcomes = _outcomes(writer.close(timeout=0.05))
+    release.set()
+    worker = writer._serial._worker
+    assert worker is not None
+    worker.join(10)
+    assert not worker.is_alive()
+
+    assert [o.record for o in outcomes] == [_declared(0), _declared(1)]
+    assert [o.result for o in outcomes] == [
+        Unwritten("still queued when the writer closed; not written")
+    ] * 2
+    directory = writer.directory("alpha")
+    assert directory is not None and not directory.exists()
 
 
 # -- where the files go ----------------------------------------------------------------

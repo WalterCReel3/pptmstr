@@ -3,7 +3,7 @@ The layer rules the tree states in prose, checked against its imports.
 
 Each rule below was a sentence in a docstring, in ``STYLE.md`` or in a planning
 record, and nothing held the code to it (``planning/2026-11-06-modules-are-named-
-for-what-they-require.md``, T3, T7 and A7). Six are checked here:
+for-what-they-require.md``, T3, T7 and A7). Seven are checked here:
 
 1. A module whose docstring says it imports no ImGui imports no ``imgui_bundle``,
    directly in any form, and does not reach it through the imports that run when
@@ -16,6 +16,7 @@ for-what-they-require.md``, T3, T7 and A7). Six are checked here:
 5. ``bus`` and ``commandbus`` import nothing of each other (A6).
 6. ``naming`` imports nothing from pptmstr, so it reaches neither ``board`` nor
    ``ui`` (A1).
+7. ``serialworker`` imports nothing from pptmstr (B3).
 
 **Read from the source, never imported.** Every import is collected with ``ast``,
 including those inside a function (``lazy``) and those under ``if TYPE_CHECKING:``
@@ -876,3 +877,18 @@ def test_nothing_reaches_a_moved_name_through_board() -> None:
         and any(alias.name in moved for alias in node.names)
     ]
     assert not found, "imports a naming name through board: " + ", ".join(found)
+
+
+# -- 7. serialworker imports nothing of pptmstr ------------------------------------
+
+
+def test_serialworker_imports_nothing_from_pptmstr() -> None:
+    """
+    The worker is the loop two journal writers share and knows nothing of either:
+    no path, no log, no record type. An edge into the package of any kind is
+    domain knowledge moving into the loop.
+    """
+    found = [
+        edge for edge in imports_of("pptmstr.serialworker") if edge.target.startswith("pptmstr")
+    ]
+    assert not found, ", ".join(f"{edge.target} ({edge.kind}, line {edge.line})" for edge in found)

@@ -9994,10 +9994,7 @@ def _settle_channel_writer(state: Any) -> None:
 
     writer = state.channel_writer
     deadline = time.monotonic() + 5.0
-    while True:
-        with writer._changed:
-            if not writer._pending:
-                break
+    while writer.outstanding:
         assert time.monotonic() < deadline, "the channel writer never settled"
         time.sleep(0.01)
     app.apply_intents(state)

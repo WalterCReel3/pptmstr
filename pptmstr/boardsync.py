@@ -134,36 +134,26 @@ another process can, and that is the limit above. A directory that could not be
 listed is not one that holds no record: the session is refused, since what would be
 written behind is unknown.
 
-The worker is a daemon thread and not an executor. An executor's worker is joined
-when the interpreter exits, with no bound, so an append held by a dead network mount
-would hold the exit. A daemon thread ended mid-append tears nothing: a record's name
-is linked only once its bytes are complete.
+The queue, the worker thread and ``close``'s bound are ``serialworker.SerialWorker``'s,
+which the writer holds; what an append is and what its failure means are this
+module's. The worker is a daemon thread, and one ended mid-append tears nothing: a
+record's name is linked only once its bytes are complete.
 """
 
 from __future__ import annotations
 
 import os
-import queue
 import stat
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import boardlog, sessionfile, settings
+from . import boardlog, serialworker, sessionfile, settings
 from .boardlog import Board, Record
 from .journal import codec, files
 from .journal.files import Unwritten, Written
-
-# The most of a failure's reason a ``RecordingStopped`` carries. A reason is an
-# exception's text and has no bound of its own, and the marker has to land in the
-# case where the record it stands for was too long to.
-MARKER_REASON_CHARS = 400
-
-# How long ``close`` waits for queued records unless told otherwise. An append is
-# milliseconds, so this is a bound on a wedged filesystem and not a budget.
-CLOSE_TIMEOUT = 5.0
+from .serialworker import SerialWorker
 
 
 def legacy_root() -> Path:
@@ -525,6 +515,10 @@ class Stopped:
 Report = Outcome | Stopped
 
 
+def _given_up(session_id: str, record: Record, reason: str) -> Outcome:
+    return Outcome(session_id, record, Unwritten(reason))
+
+
 class BoardWriter:
     """
     The one appender. ``submit`` from any thread, ``drain`` on the owner's schedule,
@@ -539,17 +533,13 @@ class BoardWriter:
 
     def __init__(self, root: Path | None = None, legacy: Path | None = None) -> None:
         self.root, self.legacy = _places(root, legacy)
-        self._changed = threading.Condition(threading.Lock())
-        # Read and written only with ``_changed`` held, down to ``_abandoned``.
-        self._queue: queue.SimpleQueue[tuple[str, Record] | None] = queue.SimpleQueue()
-        self._pending: deque[tuple[str, Record]] = deque()
-        self._reports: list[Report] = []
+        self._serial: SerialWorker[str, Record, Report] = SerialWorker(
+            "boardsync", self._settle, _given_up
+        )
+        # Written by ``adopt`` on the owner's thread and read by the worker; read
+        # and written only with ``_admission`` held.
+        self._admission = threading.Lock()
         self._admitted: set[str] = set()
-        self._worker: threading.Thread | None = None
-        # Whether the worker is inside an append for the oldest pending record.
-        self._in_flight = False
-        self._closed = False
-        self._abandoned = False
         # The worker's alone. ``_whole`` is the sessions found to have no record
         # under the legacy root, and ``_split`` the ones found to have some.
         self._stopped: dict[str, Stopped] = {}
@@ -564,17 +554,7 @@ class BoardWriter:
 
         After ``close`` the record is not queued, and its outcome says so.
         """
-        with self._changed:
-            if self._closed:
-                self._reports.append(
-                    Outcome(session_id, record, Unwritten("submitted after the writer was closed"))
-                )
-                return
-            self._pending.append((session_id, record))
-            self._queue.put((session_id, record))
-            if self._worker is None:
-                self._worker = threading.Thread(target=self._run, name="boardsync", daemon=True)
-                self._worker.start()
+        self._serial.submit(session_id, record)
 
     def directory(self, session_id: str) -> Path | None:
         """
@@ -597,7 +577,7 @@ class BoardWriter:
         It does not admit a session ``find`` reported as ``unrecorded``: the worker
         looks under the legacy root itself.
         """
-        with self._changed:
+        with self._admission:
             self._admitted.add(session_id)
 
     def drain(self) -> tuple[Report, ...]:
@@ -605,18 +585,14 @@ class BoardWriter:
         Everything settled since the last call, oldest first. Never waits on an
         append: empty when none has finished.
         """
-        with self._changed:
-            settled = tuple(self._reports)
-            self._reports.clear()
-        return settled
+        return self._serial.drain()
 
     @property
     def outstanding(self) -> int:
         """How many submitted records have no outcome yet."""
-        with self._changed:
-            return len(self._pending)
+        return self._serial.outstanding
 
-    def close(self, timeout: float = CLOSE_TIMEOUT) -> tuple[Report, ...]:
+    def close(self, timeout: float = serialworker.CLOSE_TIMEOUT) -> tuple[Report, ...]:
         """
         Stop taking records, wait at most ``timeout`` seconds for the queued ones,
         and return everything not yet drained.
@@ -630,47 +606,9 @@ class BoardWriter:
         A second call waits for nothing and returns what has been reported since,
         which is nothing unless ``submit`` was called in between.
         """
-        with self._changed:
-            self._closed = True
-            if not self._abandoned:
-                self._changed.wait_for(lambda: not self._pending, timeout=max(timeout, 0.0))
-                self._abandoned = True
-                for position, (session_id, record) in enumerate(self._pending):
-                    reason = (
-                        "its append had begun and had not returned when the writer closed;"
-                        " it may still reach disk"
-                        if position == 0 and self._in_flight
-                        else "still queued when the writer closed; not written"
-                    )
-                    self._reports.append(Outcome(session_id, record, Unwritten(reason)))
-                self._pending.clear()
-                self._queue.put(None)
-            settled = tuple(self._reports)
-            self._reports.clear()
-        return settled
+        return self._serial.close(timeout)
 
     # -- the worker's side ---------------------------------------------------------
-
-    def _run(self) -> None:
-        while True:
-            item = self._queue.get()
-            if item is None:
-                return
-            with self._changed:
-                if self._abandoned:
-                    return
-                self._in_flight = True
-            session_id, record = item
-            reports = self._settle(session_id, record)
-            with self._changed:
-                if self._abandoned:
-                    # ``close`` has already reported this record. The next item
-                    # off the queue ends the loop above.
-                    continue
-                self._in_flight = False
-                self._pending.popleft()
-                self._reports.extend(reports)
-                self._changed.notify_all()
 
     def _settle(self, session_id: str, record: Record) -> tuple[Report, ...]:
         earlier = self._stopped.get(session_id)
@@ -701,11 +639,11 @@ class BoardWriter:
         is the answer.
         """
         directory = self.directory(session_id)
-        with self._changed:
+        with self._admission:
             admitted = session_id in self._admitted
         if directory is None or not admitted or session_id in self._split:
             return None
-        marker = codec.RecordingStopped(at=time.time(), reason=reason[:MARKER_REASON_CHARS])
+        marker = codec.RecordingStopped(at=time.time(), reason=reason[: codec.MARKER_REASON_CHARS])
         try:
             return files.append(directory, marker)
         except Exception as exc:
@@ -724,14 +662,14 @@ class BoardWriter:
                 held = files.next_ordinal(directory) != 0
                 return Unwritten(f"not appended: {_refusal(directory, old, held)}")
             self._whole.add(session_id)
-        with self._changed:
+        with self._admission:
             admitted = session_id in self._admitted
         if not admitted:
             # No record in the listing is "this process is starting the log": a
             # directory that is missing, empty, or holds only another append's
             # temp file has no history to write behind.
             found = files.next_ordinal(directory)
-            with self._changed:
+            with self._admission:
                 # ``adopt`` may have been called while the listing ran.
                 admitted = found == 0 or session_id in self._admitted
                 if admitted:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import queue
 import random
 import threading
 import time
@@ -718,6 +719,157 @@ def test_a_fact_that_does_not_land_stops_its_link_and_restores_it_not_live(
     restored = _restored(inner)
     assert restored[K1].withheld is not None
     assert restored[other].withheld is None
+
+
+def _worker(writer: channels.ChannelWriter) -> threading.Thread:
+    worker = writer._serial._worker
+    assert worker is not None
+    return worker
+
+
+def _joined(writer: channels.ChannelWriter) -> None:
+    worker = _worker(writer)
+    worker.join(10)
+    assert not worker.is_alive()
+
+
+def test_a_fact_the_worker_never_took_up_is_reported_not_written_and_never_lands(
+    tmp_path: Path,
+) -> None:
+    """
+    The worker is held before its first ``get``, so at ``close`` the oldest
+    fact is pending and not in flight. "May still reach disk" would be a guess
+    there; "not written" is what the worker then does.
+    """
+    log = FileChannels(tmp_path)
+    writer = channels.ChannelWriter(log)
+    waiting, release = threading.Event(), threading.Event()
+
+    class Held(queue.SimpleQueue[tuple[LinkKey, channels.Fact] | None]):
+        def get(
+            self, block: bool = True, timeout: float | None = None
+        ) -> tuple[LinkKey, channels.Fact] | None:
+            waiting.set()
+            assert release.wait(30)
+            return super().get(block, timeout)
+
+    writer._serial._queue = Held()
+    writer.submit(K1, _created())
+    writer.submit(K1, LinkClosed(at=2.0, channel_id="k1"))
+    assert waiting.wait(10)
+
+    reports = writer.close(timeout=0.05)
+    release.set()
+    _joined(writer)
+
+    assert reports == (
+        Outcome(K1, _created(), NotAppended("still queued when the writer closed; not written")),
+        Outcome(
+            K1,
+            LinkClosed(at=2.0, channel_id="k1"),
+            NotAppended("still queued when the writer closed; not written"),
+        ),
+    )
+    assert log.read(K1).facts == ()
+
+
+class _Wedged(_Failing):
+    """A log whose append of one fact waits for ``release``; every other lands."""
+
+    def __init__(self, inner: ChannelLog, wedged: channels.Fact) -> None:
+        super().__init__(inner, LinkKey("none", "k0"))
+        self.wedged = wedged
+        self.entered, self.release = threading.Event(), threading.Event()
+
+    def append(self, link: LinkKey, fact: channels.Fact) -> Appended | NotAppended:
+        if fact == self.wedged:
+            self.entered.set()
+            assert self.release.wait(30)
+        return self.inner.append(link, fact)
+
+
+def test_close_gives_up_at_its_bound_and_names_every_fact_that_did_not_land(
+    tmp_path: Path,
+) -> None:
+    inner = FileChannels(tmp_path)
+    links = [LinkKey(f"name{n}", f"k{n}") for n in range(4)]
+    facts = [_created(link.link_id, float(n)) for n, link in enumerate(links)]
+    log = _Wedged(inner, facts[1])
+    writer = channels.ChannelWriter(log)
+    for link, fact in zip(links, facts, strict=True):
+        writer.submit(link, fact)
+    assert log.entered.wait(10)
+
+    began = time.monotonic()
+    reports = writer.close(timeout=0.2)
+    took = time.monotonic() - began
+
+    assert 0.15 < took < 5
+    outcomes = _outcomes(reports)
+    assert len(outcomes) == len(reports)
+    assert [(o.link, o.fact) for o in outcomes] == list(zip(links, facts, strict=True))
+    assert outcomes[0].result == Appended()
+    assert all(isinstance(o.result, NotAppended) for o in outcomes[1:])
+    in_flight, *queued = (
+        o.result.reason for o in outcomes[1:] if isinstance(o.result, NotAppended)
+    )
+    assert "may still reach disk" in in_flight
+    assert queued and all("not written" in reason for reason in queued)
+
+    log.release.set()
+    _joined(writer)
+    assert [inner.read(link).facts for link in links[2:]] == [(), ()]
+
+
+def test_a_stop_marker_carries_at_most_the_bounded_part_of_a_long_reason(
+    tmp_path: Path,
+) -> None:
+    inner = FileChannels(tmp_path)
+    essay = "no room " * journal_files.MAX_RECORD_BYTES
+
+    class Verbose(_Failing):
+        def append(self, link: LinkKey, fact: channels.Fact) -> Appended | NotAppended:
+            if link == self.failing and self.fail and not isinstance(fact, RecordingStopped):
+                self.fail = False
+                return NotAppended(essay)
+            return self.inner.append(link, fact)
+
+    writer = channels.ChannelWriter(Verbose(inner, K1))
+    writer.submit(K1, _created())
+    (outcome,) = _outcomes(writer.close())
+
+    assert outcome.result == NotAppended(essay) and outcome.marker == Appended()
+    (marker,) = inner.read(K1).facts
+    assert isinstance(marker, RecordingStopped)
+    assert marker.reason == essay[: codec.MARKER_REASON_CHARS]
+
+
+def test_a_fact_submitted_after_close_is_reported_and_not_appended(tmp_path: Path) -> None:
+    log = FileChannels(tmp_path)
+    writer = channels.ChannelWriter(log)
+    writer.submit(K1, _created())
+    writer.close()
+
+    writer.submit(K1, LinkClosed(at=2.0, channel_id="k1"))
+
+    assert writer.drain() == (
+        Outcome(
+            K1,
+            LinkClosed(at=2.0, channel_id="k1"),
+            NotAppended("submitted after the writer was closed"),
+        ),
+    )
+    assert log.read(K1).facts == (_created(),)
+
+
+def test_closing_a_writer_that_was_never_used_starts_no_thread_and_makes_nothing(
+    tmp_path: Path,
+) -> None:
+    writer = channels.ChannelWriter(FileChannels(tmp_path / "channels"))
+
+    assert writer.close() == ()
+    assert writer._serial._worker is None
+    assert list(tmp_path.iterdir()) == []
 
 
 # -- linking a name closes what was left under it ------------------------------------

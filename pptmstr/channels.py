@@ -69,17 +69,16 @@ from __future__ import annotations
 import json
 import math
 import os
-import queue
 import stat
 import threading
 import time
-from collections import Counter, deque
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, assert_never, get_args, get_type_hints
 
-from . import boardlog, settings
+from . import boardlog, serialworker, settings
 from .intents import (
     AgentFinished,
     AgentRemoved,
@@ -146,12 +145,7 @@ from .journal.codec import RecordingStopped, Unrecognised
 # Re-exported: the seam's "could not look", which the shell matches on.
 from .journal.files import Unlisted as Unlisted
 from .model import LINK_MEMBERS, Channel, ChannelId, Snapshot, is_channel_name
-
-# How long ``ChannelWriter.close`` waits for queued facts unless told otherwise.
-CLOSE_TIMEOUT = 5.0
-
-# The longest reason a stop marker carries, as ``boardsync.MARKER_REASON_CHARS``.
-MARKER_REASON_CHARS = 400
+from .serialworker import SerialWorker
 
 # The longest charter a link is made with, in characters (``app.link_leads``).
 # A character costs at most twelve bytes in a record -- an astral one is two
@@ -907,6 +901,10 @@ class Swept:
 Report = Outcome | Swept
 
 
+def _given_up(link: LinkKey, fact: Fact, reason: str) -> Outcome:
+    return Outcome(link, fact, NotAppended(reason))
+
+
 @dataclass(frozen=True, slots=True)
 class Refused:
     """An operator's act the shell did not emit, and why."""
@@ -1002,16 +1000,13 @@ class ChannelWriter:
 
     def __init__(self, log: ChannelLog) -> None:
         self.log = log
-        self._changed = threading.Condition(threading.Lock())
-        # Read and written only with ``_changed`` held.
-        self._queue: queue.SimpleQueue[tuple[LinkKey, Fact] | None] = queue.SimpleQueue()
-        self._pending: deque[tuple[LinkKey, Fact]] = deque()
-        self._reports: list[Report] = []
-        self._worker: threading.Thread | None = None
-        self._closed = False
-        self._abandoned = False
-        # Written by the worker alone, read by ``refusal`` from any thread: the
-        # links whose recording stopped in this process, and why.
+        self._serial: SerialWorker[LinkKey, Fact, Report] = SerialWorker(
+            "channels", self._settle, _given_up
+        )
+        # Written by the worker alone, read by ``refusal`` from any thread, and
+        # held under ``_stopping``: the links whose recording stopped in this
+        # process, and why.
+        self._stopping = threading.Lock()
         self._stopped: dict[LinkKey, str] = {}
         # The worker's alone: earlier links no sweep will ever close.
         self._settled: set[LinkKey] = set()
@@ -1021,74 +1016,39 @@ class ChannelWriter:
         Why a fact for ``link`` would be refused now, or None when it would be
         appended. Performs no IO; callable from any thread.
         """
-        with self._changed:
+        with self._stopping:
             stopped = self._stopped.get(link)
         if stopped is not None:
             return f"this link stopped being recorded at an earlier fact ({stopped})"
         return None
 
     def submit(self, link: LinkKey, fact: Fact) -> None:
-        """Queue one fact and return. Performs no IO."""
-        with self._changed:
-            if self._closed:
-                self._reports.append(
-                    Outcome(link, fact, NotAppended("submitted after the writer was closed"))
-                )
-                return
-            self._pending.append((link, fact))
-            self._queue.put((link, fact))
-            if self._worker is None:
-                self._worker = threading.Thread(target=self._run, name="channels", daemon=True)
-                self._worker.start()
+        """
+        Queue one fact and return. Performs no IO. After ``close`` the fact is
+        not queued, and its outcome says so.
+        """
+        self._serial.submit(link, fact)
 
     def drain(self) -> tuple[Report, ...]:
         """Everything settled since the last call, oldest first. Never waits."""
-        with self._changed:
-            settled = tuple(self._reports)
-            self._reports.clear()
-        return settled
+        return self._serial.drain()
 
-    def close(self, timeout: float = CLOSE_TIMEOUT) -> tuple[Report, ...]:
+    @property
+    def outstanding(self) -> int:
+        """How many submitted facts have no outcome yet."""
+        return self._serial.outstanding
+
+    def close(self, timeout: float = serialworker.CLOSE_TIMEOUT) -> tuple[Report, ...]:
         """
         Stop taking facts, wait at most ``timeout`` seconds for the queued ones,
         and return everything not yet drained.
 
         A fact still queued when the wait ends is given up and reported as not
-        appended; the oldest of them may be mid-append, and its reason says it
-        may still reach disk.
+        appended, and the worker appends nothing further for it. The one fact
+        the worker had already begun is reported the same way, and it alone may
+        still reach disk afterwards: its reason says so.
         """
-        with self._changed:
-            self._closed = True
-            if not self._abandoned:
-                self._changed.wait_for(lambda: not self._pending, timeout=max(timeout, 0.0))
-                self._abandoned = True
-                for position, (link, fact) in enumerate(self._pending):
-                    reason = (
-                        "its append may have begun when the writer closed; it may still"
-                        " reach disk"
-                        if position == 0
-                        else "still queued when the writer closed; not written"
-                    )
-                    self._reports.append(Outcome(link, fact, NotAppended(reason)))
-                self._pending.clear()
-                self._queue.put(None)
-            settled = tuple(self._reports)
-            self._reports.clear()
-        return settled
-
-    def _run(self) -> None:
-        while (item := self._queue.get()) is not None:
-            with self._changed:
-                if self._abandoned:
-                    return
-            settled = self._settle(*item)
-            with self._changed:
-                if self._abandoned:
-                    # ``close`` has already reported this fact.
-                    return
-                self._pending.popleft()
-                self._reports.extend(settled)
-                self._changed.notify_all()
+        return self._serial.close(timeout)
 
     def _settle(self, link: LinkKey, fact: Fact) -> tuple[Report, ...]:
         """
@@ -1139,10 +1099,11 @@ class ChannelWriter:
         result = self._append(link, fact)
         if isinstance(result, Appended):
             return Outcome(link, fact, result)
-        with self._changed:
+        with self._stopping:
             self._stopped[link] = result.reason
         marker = self._append(
-            link, RecordingStopped(at=time.time(), reason=result.reason[:MARKER_REASON_CHARS])
+            link,
+            RecordingStopped(at=time.time(), reason=result.reason[: codec.MARKER_REASON_CHARS]),
         )
         return Outcome(link, fact, result, marker)
 

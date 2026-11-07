@@ -1940,7 +1940,7 @@ def _stop_recording_everything(state: AppState, writer: boardsync.BoardWriter, r
         )
         writer.submit(
             session_id,
-            codec.RecordingStopped(at=time.time(), reason=reason[: boardsync.MARKER_REASON_CHARS]),
+            codec.RecordingStopped(at=time.time(), reason=reason[: codec.MARKER_REASON_CHARS]),
         )
 
 
@@ -5211,7 +5211,7 @@ def _shut_down(state: AppState) -> None:
 def _close_channel_log(state: AppState) -> None:
     """
     Let the channel writer finish what is queued, for at most
-    ``channels.CLOSE_TIMEOUT``, and log every fact that did not reach its log.
+    ``serialworker.CLOSE_TIMEOUT``, and log every fact that did not reach its log.
     Beside ``_close_board_log`` and for its reasons; it raises nothing.
     """
     writer = state.channel_writer
@@ -5225,7 +5225,7 @@ def _close_channel_log(state: AppState) -> None:
 
 def _close_board_log(state: AppState) -> None:
     """
-    Let the writer finish what is queued, for at most ``boardsync.CLOSE_TIMEOUT``,
+    Let the writer finish what is queued, for at most ``serialworker.CLOSE_TIMEOUT``,
     and log every record that did not reach its log.
 
     Ahead of the pool's shutdown and not behind it. The frame loop has returned,

@@ -31,6 +31,11 @@ from typing import Any, ClassVar, Generic, Protocol, TypeVar, get_type_hints
 # thing from a flag whose False claims nothing (``boardlog.Raised.reversible``).
 _FIELD_TYPES: tuple[Any, ...] = (str, str | None, float, int, bool, bool | None, tuple[str, ...])
 
+# The most of a failure's reason a ``RecordingStopped`` carries. A reason is an
+# exception's text and has no bound of its own, and the marker has to land in the
+# case where the record it stands for was too long to.
+MARKER_REASON_CHARS = 400
+
 
 @dataclass(frozen=True, slots=True)
 class RecordingStopped:
