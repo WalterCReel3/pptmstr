@@ -38,8 +38,7 @@ The decisions this builds are in
 from __future__ import annotations
 
 import time
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
 from typing import Any, Protocol, assert_never
 
 from . import commandfile, drawable, ids
@@ -85,6 +84,7 @@ from .replies import (
     MAX_PATH_CHARS,
     WAKE_SAID,
     WAKE_SAID_SUBAGENT,
+    Tool,
     _age,
     _argument,
     _cost,
@@ -1012,18 +1012,6 @@ async def withdraw_command(
 
 # -- what the registration wires -----------------------------------------------------
 
-Handler = Callable[[Roles, Bridge, NodeId, dict[str, Any]], Awaitable[str]]
-
-
-@dataclass(frozen=True, slots=True)
-class Tool:
-    """One tool as ``bus.build_server`` announces it, and the handler behind it."""
-
-    name: str
-    description: str
-    schema: dict[str, Any]
-    handler: Handler
-
 
 REQUEST_COMMAND = Tool(
     "request_command",
@@ -1110,7 +1098,7 @@ WITHDRAW_COMMAND = Tool(
     withdraw_command,
 )
 
-TOOLS: tuple[Tool, ...] = (REQUEST_COMMAND, READ_COMMANDS, WITHDRAW_COMMAND)
+TOOLS: tuple[Tool[Roles], ...] = (REQUEST_COMMAND, READ_COMMANDS, WITHDRAW_COMMAND)
 
 
 def _woken(command: Command) -> str:

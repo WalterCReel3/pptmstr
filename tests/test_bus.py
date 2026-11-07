@@ -1151,9 +1151,8 @@ def test_the_gate_and_the_bus_agree_on_tool_names() -> None:
 @pytest.mark.parametrize("contained", [False, True])
 def test_every_tool_the_server_offers_is_one_the_gate_stamps(contained: bool) -> None:
     """
-    The lists are kept beside the server rather than derived from it, and the
-    driver stamps a sender only on the names ``offered_tools`` gives it for the
-    session. A tool on the server and not on the list reaches its handler
+    The driver stamps a sender only on the names ``offered_tools`` gives it for
+    the session. A tool on the server and not on the list reaches its handler
     unstamped and raises on every call. Held for both kinds of session, since the
     two have different servers.
     """
@@ -1163,6 +1162,23 @@ def test_every_tool_the_server_offers_is_one_the_gate_stamps(contained: bool) ->
 
     assert announced == set(offered_tools(contained))
     assert offered_tools(False) == BUS_TOOLS | PEER_TOOLS
+
+
+def test_the_stamped_names_are_read_off_the_table_and_the_peer_names_are_on_it() -> None:
+    """
+    ``BUS_TOOLS`` is the table less the peer tools, so a record added to
+    ``TOOLS`` is stamped without a second list to remember. ``PEER_TOOLS`` is
+    still spelled, because ``templates.BUS_TOOL_NAMES`` gives a restricted role
+    ``BUS_TOOLS`` and not these; a spelling that matched no record would subtract
+    nothing and hand a worker the peer tools, so each one must name a record.
+    """
+    from pptmstr.bus import BUS_TOOLS, PEER_TOOLS, TOOLS, qualified
+
+    on_table = {qualified(spec.name) for spec in TOOLS}
+
+    assert len(on_table) == len(TOOLS)
+    assert PEER_TOOLS <= on_table
+    assert BUS_TOOLS == on_table - PEER_TOOLS
 
 
 def test_a_message_between_agents_is_reviewed() -> None:

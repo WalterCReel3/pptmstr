@@ -1,6 +1,7 @@
 """
 What every bus reply is laid out with: the marks, the helpers that lay a text out
-behind one, and the bounds every reply is held to.
+behind one, and the bounds every reply is held to; and ``Tool``, the record each
+bus tool is registered from.
 
 ``bus`` and ``commandbus`` both write replies an agent reads, and the two must lay
 an agent's words out the same way: the legend one reply states describes every
@@ -14,11 +15,15 @@ The underscore on a name says "not for a caller outside the bus"; ``bus`` and
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from .effects import between_quotes
-from .model import TaskId
+from .model import NodeId, TaskId
+
+if TYPE_CHECKING:  # pragma: no cover - the record names the bridge and never calls it
+    from .bridge import Bridge
 
 # -- the marks --------------------------------------------------------------------
 
@@ -210,3 +215,28 @@ def _schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[
     stamped call the bus runs on.
     """
     return {"type": "object", "properties": properties, "required": list(required)}
+
+
+# The session a tool's handler is handed. Contravariant because a handler only
+# takes it: a table written against a narrower session (``commandbus.Roles``) can
+# be registered by a caller holding a wider one (``bus.Team``), which is what lets
+# ``bus.build_server`` take ``commandbus.TOOLS`` without importing ``commandbus``.
+S = TypeVar("S", contravariant=True)
+
+
+@dataclass(frozen=True, slots=True)
+class Tool(Generic[S]):
+    """
+    One bus tool as ``bus.build_server`` announces it, and the handler behind it.
+
+    ``name``, ``description`` and ``schema`` are handed to the SDK as written; a
+    ``schema`` that is not a JSON Schema object is expanded by the SDK into one
+    with every key required, which is what ``_schema`` exists to avoid. The
+    handler is given the session, its bridge, the sender the gate stamped, and
+    the call's arguments, and returns the reply's text.
+    """
+
+    name: str
+    description: str
+    schema: dict[str, Any]
+    handler: Callable[[S, Bridge, NodeId, dict[str, Any]], Awaitable[str]]
