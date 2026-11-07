@@ -168,6 +168,7 @@ from ..model import (
 )
 from ..theme import Color, P
 from . import typeset, widgets
+from .clip import clip
 from .focus import FocusState
 from .typeset import Kind, Part, Weight
 from .widgets import CTRL_ENTER_SUBMITS, closed_line, ellipsis, multiline_input, section
@@ -2189,19 +2190,6 @@ def clipped_parts(text: str, limit: int) -> tuple[Part, ...]:
         note = f"... {dropped} more character(s) not shown"
         parts += (Part(note, Kind.WRAPPED, "text_dim"),)
     return parts
-
-
-def clip(text: str, limit: int) -> tuple[str, int]:
-    """
-    Bound a string, reporting how much was dropped.
-
-    Returns the count rather than appending an ellipsis, so the caller can render
-    the omission as its own coloured line. A silent cap in a pane whose premise is
-    "the board is readable" is worse than no pane.
-    """
-    if len(text) <= limit:
-        return text, 0
-    return text[:limit], len(text) - limit
 
 
 def bound_rows(rows: Sequence[_T], limit: int, *, tail: bool = False) -> tuple[tuple[_T, ...], int]:

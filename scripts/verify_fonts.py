@@ -39,6 +39,7 @@ def main() -> int:
     from imgui_bundle import hello_imgui, imgui, immapp
 
     from pptmstr import theme
+    from pptmstr.ui import typeset
 
     failures: list[str] = []
     notes: list[str] = []
@@ -101,7 +102,7 @@ def main() -> int:
     params.imgui_window_params.default_imgui_window_type = (
         hello_imgui.DefaultImGuiWindowType.no_default_window
     )
-    params.callbacks.load_additional_fonts = theme.load_fonts
+    params.callbacks.load_additional_fonts = typeset.load_application_fonts
     params.callbacks.show_gui = gui
     params.fps_idling.enable_idling = False
     immapp.run(params)

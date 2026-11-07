@@ -74,10 +74,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import displaylist as dlm
-from . import fences, mermaid, render
-from .displaylist import DisplayList, PathItem, TextRun
-from .sanitise import Refused
+from ...figures import displaylist as dlm
+from ...figures import fences, mermaid, render
+from ...figures.displaylist import DisplayList, PathItem, TextRun
+from ...figures.sanitise import Refused
 
 RETRY_AFTER_S = 5.0
 """
@@ -255,7 +255,7 @@ def fence_text(said: str, text: str) -> str:
 
 
 def _log_click(sha: str, node_id: str) -> None:
-    from ..log import LOG
+    from ...log import LOG
 
     LOG.info("figures", f"node {node_id!r} clicked in figure {sha[:10]}")
 
@@ -762,8 +762,9 @@ class FigureWidget:
         sha = self._mark.sha
         if sha in _STATE.laying or sha in _STATE.failures or not _may_ask(sha):
             return
+        renderer = _STATE.renderer()
         _STATE.laying.add(sha)
-        _STATE.renderer().lay_out((_LAYOUT, sha), source)
+        renderer.lay_out((_LAYOUT, sha), source)
 
     def size_for(self, width_px: float) -> tuple[float, float]:
         """
@@ -802,7 +803,7 @@ class FigureWidget:
         im.push_clip_rect(im.ImVec2(at.x, at.y), im.ImVec2(at.x + wide, at.y + h), True)
         try:
             if display is None:
-                from .. import theme
+                from ... import theme
 
                 dl = im.get_window_draw_list()
                 dl.add_rect(
@@ -820,7 +821,7 @@ class FigureWidget:
         The geometry to draw at ``scale``: built now if it is the first, or if this
         figure's turn to rebuild has come (``_may_rebuild``), else the last one.
         """
-        from ..ui import typeset
+        from .. import typeset
 
         font = typeset.imfont(typeset.Weight.REGULAR) or im.get_font()
         bold = typeset.imfont(typeset.Weight.BOLD) or font
@@ -840,7 +841,7 @@ class FigureWidget:
         return self._geometry
 
     def _paints(self, im: Any, geo: _Geometry) -> list[int]:
-        from .. import theme
+        from ... import theme
 
         palette = theme.current()
         ground = _ground(im)
@@ -851,7 +852,7 @@ class FigureWidget:
             noted = (self._mark.sha, palette.name, ground)
             if notes and noted not in _STATE.noted:
                 _keep(_STATE.noted, noted, None, _NOTED_KEPT)
-                from ..log import LOG
+                from ...log import LOG
 
                 said = "; ".join(
                     f"{what} #{before:06x} drawn #{after:06x} (contrast {ratio:.1f})"
@@ -869,12 +870,12 @@ class FigureWidget:
     ) -> None:
         from imgui_bundle.imgui import internal as imi
 
-        from .. import theme
+        from ... import theme
 
         scale = w / display.width
         geo = self._geometry_for(im, display, scale)
         if geo is None:
-            from .. import theme
+            from ... import theme
 
             dlist = im.get_window_draw_list()
             dlist.add_rect(im.ImVec2(x, y), im.ImVec2(x + w, y + h), theme.P.border.u32)
@@ -942,7 +943,7 @@ class FigureWidget:
                 else:
                     tx, top, size, text, is_bold = op[3]
                     if regular is None:
-                        from ..ui import typeset
+                        from .. import typeset
 
                         regular = typeset.imfont(typeset.Weight.REGULAR) or im.get_font()
                         bold = typeset.imfont(typeset.Weight.BOLD) or regular
@@ -993,7 +994,7 @@ class FigureWidget:
         whole of a wrapped text every frame to size itself, where the draw list's
         text stops at the bottom of the clip.
         """
-        from .. import theme
+        from ... import theme
 
         said, source = self._failed_heights(reason, wide)
         bottom = y + said + _spacing() + source

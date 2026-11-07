@@ -55,7 +55,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import SystemPromptCustom, SystemPromptPreset
 
-from . import plugins
+from . import commandbus, plugins
 from .approval import (
     Disposition,
     Policy,
@@ -69,7 +69,6 @@ from .approval import (
     requires_containment,
     summarize,
 )
-from .board import ROOT_NAMES, address_for
 from .bridge import Bridge
 from .bus import CALLED_AT_KEY, EDITED_KEY, FROM_KEY, SERVER_NAME, build_server, offered_tools
 from .cli_version import BelowFloor, MeetsFloor, Unreadable, VersionRead, check_floor
@@ -104,6 +103,7 @@ from .model import (
     UsageRollup,
     written_path,
 )
+from .naming import ROOT_NAMES, address_for
 from .settings import McpConnector
 from .templates import SOLO, WorkTemplate, lead_briefing, worker_prompt
 from .transcript import SegmentKind, Transcript
@@ -238,8 +238,8 @@ SESSION_TAG = "pptmstr"
 
 # The names that mean the root session, and so can never be allocated to a
 # sub-agent. A worker calls the agent that gave it the job by whichever of these
-# comes to mind, and all three have to land on the same node. The board's own
-# tuple, because ``board.address_for`` is what steps over them.
+# comes to mind, and all three have to land on the same node. ``naming``'s own
+# tuple, because ``naming.address_for`` is what steps over them.
 ROOT_ADDRESSES = ROOT_NAMES
 
 # pptmstr's own source tree, which a session that writes unattended is never started
@@ -1567,7 +1567,7 @@ class AgentSession:
         """
         The address a sub-agent answers to, allocated once and never moved.
 
-        Decided by ``board.address_for`` over ``addresses()``, which is the
+        Decided by ``naming.address_for`` over ``addresses()``, which is the
         function and the table the board names the same agent from: the name
         mail is routed by and the name every board read shows are one answer.
 
@@ -2498,7 +2498,7 @@ class AgentSession:
         Keyed by the operator's own name for the server, which is what the CLI
         prefixes its tools with and therefore what the operator sees on a parked call.
         """
-        servers: dict[str, Any] = {SERVER_NAME: build_server(self)}
+        servers: dict[str, Any] = {SERVER_NAME: build_server(self, commandbus.TOOLS)}
         for connector in self.connectors:
             servers[connector.name] = cast(
                 Any, {"type": "claudeai-proxy", "url": connector.url, "id": connector.id}

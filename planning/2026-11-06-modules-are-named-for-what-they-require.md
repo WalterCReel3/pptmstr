@@ -341,8 +341,9 @@ items share no files, so they run in parallel:
 **Round 2: A7 first, then A1–A6 and A8.** This round also takes in:
 - the D-a line for STYLE.md;
 - closing `channels.outcomes` (D-c, from B4);
-- deleting `scripts/mock_cards.py`, carried from 2026-08-10-layout-proposals, whose own docstring
-  says to delete it.
+- deleting `scripts/mock_cards.py`, carried from 2026-08-10-layout-proposals. Its docstring
+  calls it "Throwaway" and does not itself ask for deletion. Nothing runs it, and its hand-made
+  inbox and side panes can drift from the real ones.
 
 Cold files go first and `app.py` last. Every move updates its patch sites in the same commit, with
 no shims.
@@ -350,6 +351,49 @@ no shims.
 **Round 3: B1–B7 and B9 as design tasks.** Each produces a written design, not code, and starts
 from its stated condition (for example B1's byte-for-byte read-back of existing logs). B5's
 `gate/` goes last.
+
+## Round 2 outcomes (2026-11-06)
+
+What landed, and where it differs from the proposals above:
+
+- **A7** `tests/test_layers.py` enforces the layer rules by AST. It found that two recorded
+  rules were already false (see Open).
+- **A2** `ondisk.read_regular`. The four copies had identical flags; only the limit differed.
+  Allocating the whole limit per read, error shapes and message wording were drift, and each
+  took the strongest form. Refusal messages no longer repeat the file name.
+- **A3** `ui/clip.py`.
+- **A5** `jsonfields.py` (six decoders), and `effects.between_quotes`, which equals the old
+  `bus._said` on 212,321 generated strings.
+- **A6a** The figures/theme/ui.typeset knot is gone, and no module outside `ui` imports `ui`:
+  - `figures/host.py` became `ui/typeset/figure_host.py`;
+  - `render.install(fonts)` must be called first, and the renderer raises `NotInstalled` before
+    that;
+  - `typeset.load_application_fonts` is the font callback, and seven scripts were switched to
+    it.
+- **A6b** `bus` and `commandbus` import nothing of each other. The shared marks live in
+  `replies.py`, and `build_server(session, command_tools)` takes the tools from `driver`.
+- **A8** `ui/panes.py` is the one dock table. `app.py`'s titles and `typeset.PANE_LABELS` derive
+  from it; `typeset.Pane` stays as the persisted settings enum.
+- **A1, partial.** `naming.py` holds `LEAD`, `ROOT_NAMES`, `address_for` and `reserved`, and
+  `boardlog` and `driver` no longer import `board`. `role_name` and `address_in_session` stay
+  in `board`: they need a `Snapshot`, and every module that supplies one reaches `board` through
+  `approval.py:1383`'s lazy import of `board`'s label helpers. Removing that lazy import is what
+  lets the rest of A1 move.
+- **D-a** is in STYLE.md, and **D-c** closed `channels.outcomes`. `scripts/mock_cards.py` is
+  deleted.
+- **Follow-ups from the Round 2 review.** None blocks anything.
+  - The UI spells the bus's marks and `_one_line` again (`ui/widgets.py`, `decision_view`,
+    `command_view`), and tests hold the copies equal. Those modules now live in `replies`, which
+    is pure, so the UI could import them instead.
+  - `scripts/font_raster_probe.py` still wraps `theme.load_fonts`, which no longer runs after the
+    library's faces, so its "after everything pptmstr loads" premise is false. It needs to wrap
+    `typeset.load_application_fonts` instead.
+  - `test_layers` finds disk readers by their direct calls. It does not follow
+    `ondisk.read_regular`, so a module that reads disk only through it would be invisible to the
+    store rule.
+  - `theme.py` spells the bold font path twice.
+- **A4 is deferred.** Two builders declined it because the premises file holds no operator
+  entry for code edits, only the relayed approval. It waits for that entry; nothing depends on it.
 
 ## Defects found on the way
 
@@ -423,6 +467,17 @@ carries it until that file is archived, and after that it needs a new file.
 
 ## Open
 
+- **The store already imports disk readers** (run, `tests/test_layers.py`, 2026-11-06).
+  `planning/2026-09-01-the-gates-measurement-outlives-the-approval.md:55-57` records that the
+  store imports board, effects, intents and model and never a module that reads disk. It doesn't
+  hold: `store.py:35` imports `approval` (which reads with `Path.read_text`) and `store.py:37`
+  imports `boardlog` (which reads and writes with `os.open`), both at top level. The layer test
+  lists both as named exceptions, so the gap is now visible rather than closed. The fix is the
+  same kind as B1: split each module's pure half (the policy table, the record codec) from its
+  disk half, so the store imports only the pure half. Do that as part of B1 and B5, not as a
+  separate move.
+- `ui/typeset/parts.py` says it imports no ImGui, but importing it pulls ImGui in through
+  `theme.Color`. A6a's work on the theme↔typeset knot may settle it.
 - B1's byte-for-byte read-back of existing board and channel logs.
 - `channels._cannot_be_read` with `O_NOFOLLOW`. A planted symlink is damage, not a transient
   failure, and that needs a decision and a test.

@@ -5,12 +5,15 @@ fold, the startup read, what the store's steps write, and the appender.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+import random
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -32,9 +35,11 @@ from pptmstr.channels import (
     SweptClose,
     Whole,
 )
-from pptmstr.intents import AgentSpawned, ChannelClosed, ChannelLinked
+from pptmstr.intents import AgentSpawned, ChannelClosed, ChannelLinked, Intent
 from pptmstr.model import Snapshot
 from pptmstr.store import Store
+from pptmstr.store import _apply as store_apply
+from tests import test_boardfacts as bf
 
 A, B, C = "sess-a", "sess-b", "sess-c"
 K1 = LinkKey("brand", "k1")
@@ -549,6 +554,83 @@ def test_a_refused_link_writes_nothing() -> None:
 
     assert after.channels == {}
     assert channels.outcomes(before, refused, after) == ()
+
+
+def _live_link() -> Snapshot:
+    """``test_boardfacts``' two running sessions, with one live link between them."""
+    both = frozenset({bf.S, bf.Z})
+    snap, _ = store_apply(
+        bf.started(), ChannelLinked("k1", "brand", both, "charter", 1.0, both), 1.0
+    )
+    assert snap.channels["k1"].live
+    return snap
+
+
+# One instance of each intent, drawn by ``test_boardfacts``' makers except where
+# a draw over the live link would not reach the arm that writes.
+_REPRESENTATIVE: dict[type, Intent] = {
+    ChannelLinked: ChannelLinked(
+        "k2", "ops", frozenset({bf.S, bf.Z}), "the ops work", 5.0, frozenset({bf.S, bf.Z})
+    ),
+    ChannelClosed: ChannelClosed("k1", 5.0),
+}
+
+# What each writes over ``_live_link()``. Every intent not named writes nothing.
+_WRITES: dict[type, tuple[tuple[LinkKey, channels.Known], ...]] = {
+    ChannelLinked: ((LinkKey("ops", "k2"), LinkCreated(5.0, "k2", (bf.S, bf.Z), "the ops work")),),
+    ChannelClosed: ((LinkKey("brand", "k1"), LinkClosed(5.0, "k1")),),
+}
+
+
+@pytest.mark.parametrize("kind", get_args(Intent), ids=lambda kind: kind.__name__)
+def test_only_a_link_and_its_close_write_a_link_log(kind: type) -> None:
+    before = _live_link()
+    intent = _REPRESENTATIVE.get(kind) or bf._MAKERS[kind](random.Random(0), before, 5.0)
+    assert type(intent) is kind
+    after, _ = store_apply(before, intent, 5.0)
+
+    assert channels.outcomes(before, intent, after) == _WRITES.get(kind, ())
+
+
+def test_no_generated_step_writes_a_link_log_but_a_link_or_its_close() -> None:
+    written: set[type] = set()
+    for seed in range(4):
+        snap = bf.started()
+        for step in bf.steps(seed):
+            if channels.outcomes(snap, step.intent, step.after):
+                written.add(type(step.intent))
+            snap = step.after
+    assert written == {ChannelLinked, ChannelClosed}
+
+
+def _arms(function: ast.FunctionDef) -> tuple[set[str], ast.match_case]:
+    """The class names ``function``'s one ``match`` has a case for, and its last case."""
+    (match,) = [node for node in ast.walk(function) if isinstance(node, ast.Match)]
+    names: set[str] = set()
+    for case in match.cases:
+        for pattern in ast.walk(case.pattern):
+            if isinstance(pattern, ast.MatchClass) and isinstance(pattern.cls, ast.Name):
+                names.add(pattern.cls.id)
+    return names, match.cases[-1]
+
+
+def test_every_intent_has_a_case_in_outcomes_and_the_default_is_assert_never() -> None:
+    """
+    mypy is what refuses an intent with no case; this says the same in the suite,
+    so an intent added to the union is a failure here until ``outcomes`` says
+    what it writes.
+    """
+    module = ast.parse(Path(channels.__file__).read_text(encoding="utf-8"))
+    (function,) = [
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "outcomes"
+    ]
+    names, last = _arms(function)
+
+    assert names == {kind.__name__ for kind in get_args(Intent)}
+    assert isinstance(last.pattern, ast.MatchAs) and last.pattern.pattern is None
+    assert ast.unparse(last.body[0]) == "assert_never(intent)"
 
 
 # -- the appender -------------------------------------------------------------------

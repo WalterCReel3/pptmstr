@@ -24,6 +24,9 @@ those answers live here once.
 - ``diffs``: the diff model of a parked call, a view of it, which fences are
   honest diffs, and who draws a diff (``diff_adopted``, and of one diff
   ``diffs.unfit``).
+- ``figure_host``: a ```` ```mermaid ```` fence drawn as a figure with ImGui,
+  from the display list ``figures.render`` lays out in its child process, set in
+  the faces ``figure_fonts`` names.
 
 ## A pane asks first
 
@@ -89,7 +92,9 @@ from .gate import (
     available,
     can_draw,
     face_font,
+    load_application_fonts,
     load_fonts,
+    load_fonts_in_callback,
     obtainable,
     pre_frame,
     unavailable_reason,
@@ -140,6 +145,7 @@ from .views import (
     Stream,
     ViewCache,
     document,
+    figure_fonts,
     follow_links,
     font,
     imfont,
@@ -197,6 +203,7 @@ __all__ = [
     "document",
     "enabled",
     "face_font",
+    "figure_fonts",
     "find_marks",
     "find_matches",
     "follow_links",
@@ -206,7 +213,9 @@ __all__ = [
     "label",
     "legacy",
     "line_height",
+    "load_application_fonts",
     "load_fonts",
+    "load_fonts_in_callback",
     "markdown",
     "mono",
     "multiline_kind",

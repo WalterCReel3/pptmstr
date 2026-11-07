@@ -508,11 +508,6 @@ def test_concerns_keep_the_tail_because_a_conversation_is_watched_at_its_end() -
     assert (kept, dropped) == ((7, 8, 9), 7)
 
 
-def test_a_clipped_specification_reports_what_it_dropped() -> None:
-    assert board_pane.clip("abcdef", 4) == ("abcd", 2)
-    assert board_pane.clip("abc", 4) == ("abc", 0)
-
-
 def test_the_board_bounds_are_real_numbers_not_placeholders() -> None:
     assert board_pane.bound_rows(tuple(range(300)), board_pane._MAX_BOARD_TASKS)[1] == 300 - 120
     assert board_pane.bound_rows(tuple(range(300)), board_pane._MAX_BOARD_CONCERNS)[1] == 300 - 80

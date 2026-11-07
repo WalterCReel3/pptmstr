@@ -1212,7 +1212,7 @@ def test_the_frame_loop_gives_the_seam_its_turn_between_frames(
 
 def test_the_frame_loop_pumps_the_figures_every_frame(monkeypatch: pytest.MonkeyPatch) -> None:
     """
-    ``figures.host.pump`` is where a figure's pixels arrive, where a render past its
+    ``figure_host.pump`` is where a figure's pixels arrive, where a render past its
     time is stopped, and where textures are let go of. Nothing else calls it: unwired,
     a hostile render runs on with no figure on screen and every test of the host,
     which pumps the way the app does, still passes.
@@ -1948,6 +1948,24 @@ def test_quitting_ends_the_figure_render_process(monkeypatch: pytest.MonkeyPatch
     _, raised = _quit(None)
     assert raised is None
     assert ended == [1]
+
+
+def test_main_wires_the_font_callback_and_installs_the_figure_renderer() -> None:
+    """
+    ``main`` needs a window and is not run here, so its wiring is read: the font
+    callback loads the text library's faces after the chrome's
+    (``typeset.load_application_fonts``; ``theme.load_fonts`` alone does not), and
+    the figure renderer is installed with the typeset seam's faces, which
+    ``figures`` cannot name itself.
+    """
+    import inspect
+
+    from pptmstr import app
+
+    source = inspect.getsource(app.main)
+    assert "runner.callbacks.load_additional_fonts = typeset.load_application_fonts" in source
+    assert "figure_render.install(typeset.figure_fonts)" in source
+    assert source.index("figure_render.install(") < source.index("immapp.run(runner)")
 
 
 def test_quitting_waits_for_the_pool_longer_than_the_pool_waits_for_its_runs() -> None:
@@ -10395,3 +10413,54 @@ def test_the_inbox_is_handed_go_to_and_resume_that_reach_the_shell(
     actions.go_to(("s-z", None))
     actions.resume(("s-z", None))
     assert reached == [("go_to", ("s-z", None)), ("resume", ("s-z", None))]
+
+
+# -- the docks' titles --------------------------------------------------------------
+
+# Byte for byte: a window's title is its ImGui id, which the saved layout ini keys
+# on, so a changed title is an operator's arrangement lost.
+_TITLES = (
+    "FLEET",
+    "NEEDS YOU",
+    "CONTEXT",
+    "DETAIL",
+    "BOARD",
+    "DIGEST",
+    "BRIEF",
+    "SESSION",
+    "HEALTH",
+    "LOG",
+)
+_TRIAGE = ("FLEET", "NEEDS YOU", "DETAIL", "BOARD", "DIGEST", "BRIEF", "CONTEXT", "LOG")
+_FOCUS = ("FLEET", "SESSION", "HEALTH", "DETAIL", "BOARD", "DIGEST", "BRIEF", "LOG")
+
+
+def test_the_panes_are_the_docks_the_app_has_always_drawn() -> None:
+    from pptmstr import app
+
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    assert tuple(app._panels(state)) == _TITLES
+
+
+def test_the_app_draws_every_dock_the_table_names_and_no_other() -> None:
+    """
+    ``panes.DOCKS`` is the table the titles come from, so a dock added to it and
+    not drawn by ``_panels``, or drawn and not added, fails here and not in a
+    window an operator has to notice is missing.
+    """
+    from pptmstr import app
+    from pptmstr.ui import panes
+
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    assert tuple(app._panels(state)) == tuple(dock.title for dock in panes.DOCKS)
+
+
+@pytest.mark.parametrize("layout, titles", [("_triage_layout", _TRIAGE), ("_focus_layout", _FOCUS)])
+def test_each_layout_declares_its_windows_under_the_titles_the_ini_keys_on(
+    layout: str, titles: tuple[str, ...]
+) -> None:
+    from pptmstr import app
+
+    panels = {title: (lambda: None) for title in _TITLES}
+    windows = getattr(app, layout)(panels).dockable_windows
+    assert tuple(window.label for window in windows) == titles

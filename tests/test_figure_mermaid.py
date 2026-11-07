@@ -22,10 +22,12 @@ from typing import Any
 
 import pytest
 
-from pptmstr.figures import displaylist, host, mermaid, render
+from pptmstr.figures import displaylist, mermaid, render
 from pptmstr.figures.render import Failed, Laid, Renderer, Result
 from pptmstr.figures.sanitise import Refused, Sanitised, sanitise
 from pptmstr.ui import typeset
+from pptmstr.ui.typeset import figure_host as host
+from pptmstr.ui.typeset import views
 
 needs_merman = pytest.mark.skipif(
     mermaid.version() is None, reason="the optional 'mermaid' extra (merman) is not installed"
@@ -110,7 +112,7 @@ def wait_for(renderer: Renderer, key: Hashable, seconds: float = 30.0) -> Result
 
 @pytest.fixture(scope="module")
 def child() -> Iterator[Renderer]:
-    renderer = Renderer()
+    renderer = Renderer(fonts=views.figure_fonts)
     yield renderer
     renderer.shutdown()
 
@@ -160,7 +162,7 @@ def test_a_child_where_merman_cannot_be_imported_answers_with_the_extras_reason(
     shadow.mkdir()
     (shadow / "__init__.py").write_text("raise ImportError('made unimportable by the test')\n")
     monkeypatch.syspath_prepend(str(tmp_path))
-    renderer = Renderer()
+    renderer = Renderer(fonts=views.figure_fonts)
     try:
         renderer.lay_out(("layout", "x"), BODY)
         failed = wait_for(renderer, ("layout", "x"))

@@ -1633,7 +1633,7 @@ class Basis(enum.Enum):
 # instead. 300 is a judgement with two measurements behind it: the sentences this
 # was built from ran 119 and 137 characters, so the limit is twice the longest with
 # room to spare; and forty rows at the limit cost 12,000 characters, which leaves
-# more than half of ``bus._MAX_BOARD_CHARS`` for everything that is not a property.
+# more than half of ``replies._MAX_BOARD_CHARS`` for everything that is not a property.
 MAX_PROPERTY_CHARS = 300
 
 

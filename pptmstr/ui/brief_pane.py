@@ -63,6 +63,7 @@ from .. import brief
 from ..model import Snapshot
 from ..theme import P
 from . import typeset
+from .clip import clip
 from .focus import FocusState
 from .widgets import CTRL_ENTER_SUBMITS, author_text, closed_line, multiline_input, section
 
@@ -336,10 +337,3 @@ def compose_hint(supersedes: set[int]) -> str:
         return "Ctrl+Enter appends. Nothing is overturned unless you tick an entry above."
     marked = ", ".join(f"{o:03d}" for o in sorted(supersedes))
     return f"Ctrl+Enter appends, overturning {marked}."
-
-
-def clip(text: str, limit: int) -> tuple[str, int]:
-    """Bound a body, reporting what was dropped rather than eliding it silently."""
-    if len(text) <= limit:
-        return text, 0
-    return text[:limit], len(text) - limit

@@ -33,7 +33,7 @@ from typing import assert_never
 
 from . import drawable
 from .approval import Policy, Summary, peer_channel, summary_of
-from .board import ROOT_NAMES, board_concerns, board_tasks, role_name
+from .board import board_concerns, board_tasks, role_name
 from .boardlog import Board, Party, RestoredConcern, RestoredDecision, RestoredTask
 from .command import (
     MAX_OPEN_PER_ASKER,
@@ -212,6 +212,7 @@ from .model import (
     withdrawal_notice,
     withdrawal_result,
 )
+from .naming import ROOT_NAMES
 from .transcript import Transcript
 
 # The ends an ordinary status update cannot undo. ``model.FINAL_STATES`` says

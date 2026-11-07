@@ -334,7 +334,7 @@ _AUTONOMOUS_AUTO = _REVIEW
 # may be recorded as done, and a parked or refused completion strands a claim and
 # everything waiting on it. Both are rendered as the claimer's own account for that
 # reason, and quoted line by line so neither can be read as a line the board wrote
-# (`bus._board_line`, `bus._quoted`).
+# (`bus._board_line`, `replies._quoted`).
 #
 # **The three decision tools are here because a decision is addressed to the
 # operator, and one of them is not private to the operator.** `raise_decision` puts

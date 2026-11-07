@@ -136,19 +136,6 @@ def test_a_non_string_argument_keeps_its_quoting() -> None:
     assert detail.render_value(["x"]) == "['x']"
 
 
-# -- bounds --------------------------------------------------------------------
-
-
-def test_a_bound_reports_what_it_dropped() -> None:
-    text, omitted = detail.clip("abcdef", 4)
-    assert text == "abcd"
-    assert omitted == 2
-
-
-def test_a_string_within_the_bound_is_untouched() -> None:
-    assert detail.clip("abc", 4) == ("abc", 0)
-
-
 # -- the clipboard rendering ---------------------------------------------------
 
 

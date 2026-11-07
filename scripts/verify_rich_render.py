@@ -538,7 +538,9 @@ def _run(
     params.imgui_window_params.default_imgui_window_type = (
         hello_imgui.DefaultImGuiWindowType.no_default_window  # type: ignore[attr-defined]
     )
-    params.callbacks.load_additional_fonts = theme.load_fonts  # type: ignore[attr-defined]
+    from pptmstr.ui import typeset
+
+    params.callbacks.load_additional_fonts = typeset.load_application_fonts
     params.callbacks.show_gui = gui
     params.fps_idling.enable_idling = False
     immapp.run(params)  # type: ignore[attr-defined]

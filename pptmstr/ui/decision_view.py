@@ -72,6 +72,7 @@ from ..model import (
 )
 from ..theme import P
 from . import board_pane, widgets
+from .clip import clip
 from .widgets import format_elapsed, multiline_input
 
 # One text of a decision as the inbox row shows it. The row is scanned; DETAIL
@@ -86,10 +87,10 @@ _ROW_BODY_LINES = 16.0
 _ANSWER_BOX_HEIGHT = 72.0
 
 # What a line of the asker's is behind on the clipboard, and what a line of the
-# operator's answer is behind. The bus's two marks (``bus._QUOTE``, ``bus._ANSWER``)
-# spelled again, because importing the bus would bring the SDK into the UI layer;
-# a test holds each pair to one answer. Using the operator's mark for the asker
-# would make a copied decision read as answered by whoever pasted it.
+# operator's answer is behind. The bus's two marks (``replies._QUOTE``,
+# ``replies._ANSWER``) spelled again; a test holds each pair to one answer. Using
+# the operator's mark for the asker would make a copied decision read as answered by
+# whoever pasted it.
 ASKER_MARK = "| "
 ANSWER_MARK = "> "
 
@@ -673,7 +674,7 @@ def _authored(text: str, limit: int, rest: str, empty: str = NOTHING_WRITTEN) ->
     if not text.strip():
         imgui.text_disabled(empty)
         return
-    shown, dropped = board_pane.clip(text, limit)
+    shown, dropped = clip(text, limit)
     board_pane.author(shown)
     if dropped:
         imgui.text_colored(P.warn.vec4, f"... {dropped:,} more characters not shown here - {rest}")

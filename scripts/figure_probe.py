@@ -782,7 +782,7 @@ def main() -> int:
     )
     params.ini_disable = True
     params.fps_idling.enable_idling = False
-    params.callbacks.load_additional_fonts = theme.load_fonts
+    params.callbacks.load_additional_fonts = typeset.load_application_fonts
     params.callbacks.pre_new_frame = pre_frame
     params.callbacks.show_gui = gui
     params.callbacks.before_swap = before_swap

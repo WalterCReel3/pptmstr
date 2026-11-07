@@ -75,14 +75,73 @@ from collections import Counter, deque
 from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, ClassVar, Protocol, get_args, get_type_hints
+from typing import Any, ClassVar, Protocol, assert_never, get_args, get_type_hints
 
 from . import boardlog, settings
 from .boardlog import RecordingStopped, Unrecognised
 
 # Re-exported: the seam's "could not look", which the shell matches on.
 from .boardlog import Unlisted as Unlisted
-from .intents import ChannelClosed, ChannelLinked, Intent
+from .intents import (
+    AgentFinished,
+    AgentRemoved,
+    AgentResumed,
+    AgentSpawned,
+    ApprovalRequested,
+    ApprovalResolved,
+    BoardRead,
+    BoardRestored,
+    ChannelClosed,
+    ChannelLinked,
+    ChannelsRestored,
+    CommandApproved,
+    CommandEnded,
+    CommandRefused,
+    CommandRequested,
+    CommandsRead,
+    CommandsRestored,
+    CommandStopAsked,
+    CommandWithdrawn,
+    CompactionObserved,
+    ConcernEdited,
+    ConcernPosted,
+    ConcernWithdrawn,
+    ContextPolled,
+    DecisionAnswered,
+    DecisionDismissed,
+    DecisionRaised,
+    DecisionsRead,
+    DecisionWakeSent,
+    DecisionWithdrawn,
+    DigestRead,
+    FailedSessionClosed,
+    FailureAcknowledged,
+    HeldMailDismissed,
+    InboxRead,
+    Intent,
+    PeerInboxRead,
+    PeerQuestionAged,
+    PeerQuestionDismissed,
+    PeerSent,
+    PeerWakeSent,
+    SessionDetached,
+    SessionRecalled,
+    SessionSettled,
+    StateChanged,
+    SubagentDelivered,
+    SubagentProgress,
+    TaskAmended,
+    TaskClaimRequested,
+    TaskClosed,
+    TaskCompleted,
+    TaskDeclared,
+    TaskReleased,
+    TaskVersionHanded,
+    TaskWithdrawn,
+    TopicChanged,
+    UsageAccrued,
+    WakeChainReleased,
+)
 from .model import LINK_MEMBERS, Channel, ChannelId, Snapshot, is_channel_name
 
 # How long ``ChannelWriter.close`` waits for queued facts unless told otherwise.
@@ -588,7 +647,7 @@ def _cannot_be_read(path: Path) -> bool:
     later read may get past -- as against read and found not to be a record.
 
     ``boardlog.read`` says both as one damage, in words. Opened without
-    blocking for its reason (``boardlog._file_bytes``): a FIFO under a record's
+    blocking for its reason (``ondisk.read_regular``): a FIFO under a record's
     name is not a regular file, which no later read gets past either.
     """
     try:
@@ -722,8 +781,68 @@ def outcomes(
             if was is None or now is None or not was.live or now.closed_at is None:
                 return ()
             return ((LinkKey(now.name, now.id), LinkClosed(at=now.closed_at, channel_id=now.id)),)
-        case _:
+        case (
+            AgentSpawned()
+            | FailureAcknowledged()
+            | StateChanged()
+            | TopicChanged()
+            | UsageAccrued()
+            | ContextPolled()
+            | CompactionObserved()
+            | ApprovalRequested()
+            | ApprovalResolved()
+            | AgentFinished()
+            | SubagentProgress()
+            | SubagentDelivered()
+            | AgentResumed()
+            | AgentRemoved()
+            | ConcernPosted()
+            | InboxRead()
+            | PeerSent()
+            | PeerInboxRead()
+            | ConcernEdited()
+            | ConcernWithdrawn()
+            | TaskAmended()
+            | TaskVersionHanded()
+            | TaskDeclared()
+            | TaskClaimRequested()
+            | TaskCompleted()
+            | TaskReleased()
+            | TaskClosed()
+            | TaskWithdrawn()
+            | BoardRead()
+            | DigestRead()
+            | BoardRestored()
+            | DecisionRaised()
+            | DecisionAnswered()
+            | DecisionDismissed()
+            | DecisionWithdrawn()
+            | DecisionsRead()
+            | CommandRequested()
+            | CommandApproved()
+            | CommandRefused()
+            | CommandWithdrawn()
+            | CommandStopAsked()
+            | CommandEnded()
+            | CommandsRead()
+            | CommandsRestored()
+            | SessionRecalled()
+            | SessionDetached()
+            | FailedSessionClosed()
+            | ChannelsRestored()
+            | SessionSettled()
+            | WakeChainReleased()
+            | PeerWakeSent()
+            | DecisionWakeSent()
+            | PeerQuestionAged()
+            | HeldMailDismissed()
+            | PeerQuestionDismissed()
+        ):
+            # A restore is read back from these logs, so it writes nothing to
+            # them; nothing else here is about a link.
             return ()
+        case _:
+            assert_never(intent)
 
 
 # -- the appender ------------------------------------------------------------------

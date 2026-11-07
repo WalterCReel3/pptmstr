@@ -30,8 +30,9 @@ import pytest
 
 from pptmstr import theme
 from pptmstr.figures import displaylist as D
-from pptmstr.figures import host, mermaid
+from pptmstr.figures import mermaid
 from pptmstr.figures.sanitise import NAMED_COLOURS, Sanitised
+from pptmstr.ui.typeset import figure_host as host
 
 needs_merman = pytest.mark.skipif(
     mermaid.version() is None, reason="the optional 'mermaid' extra (merman) is not installed"

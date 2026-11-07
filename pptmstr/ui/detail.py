@@ -127,6 +127,7 @@ from ..transcript import SegmentKind, Transcript
 from . import command_view, decision_view, inbox, review, rich_pane, typeset, widgets
 from .blocks import Block, BlockCursor
 from .board_pane import author
+from .clip import clip
 from .focus import FocusState, OnLink
 from .session_menu import whose_move_text
 from .widgets import format_elapsed
@@ -1432,19 +1433,6 @@ def shown_value(tool_name: str, key: str, value: Any) -> str:
     """
     shown = command_shown(tool_name, key, value)
     return render_value(value) if shown is None else shown
-
-
-def clip(text: str, limit: int) -> tuple[str, int]:
-    """
-    Bound a string, reporting how much was dropped.
-
-    Returns the count rather than appending an ellipsis, so the caller can render
-    the omission as its own coloured line. A silent cap in a pane whose premise is
-    "nothing is lost" is worse than no pane.
-    """
-    if len(text) <= limit:
-        return text, 0
-    return text[:limit], len(text) - limit
 
 
 def narration_tail(prose: str, limit: int) -> tuple[str, int]:

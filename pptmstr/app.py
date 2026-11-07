@@ -31,7 +31,6 @@ from typing import assert_never
 
 from imgui_bundle import hello_imgui, imgui, immapp
 
-from . import board as board_mod
 from . import (
     boardfacts,
     boardlog,
@@ -47,6 +46,7 @@ from . import (
     layout_ini,
     links,
     model_catalog,
+    naming,
     sessionfile,
     templates,
     theme,
@@ -71,7 +71,6 @@ from .command import (
 from .command import Withdrawn as CommandWithdrawnEnd
 from .driver import AgentSession, UncontainedAutonomy
 from .fake_driver import FakeDriver
-from .figures import host as figure_host
 from .figures import render as figure_render
 from .intents import (
     BoardRestored,
@@ -122,6 +121,7 @@ from .ui import (
     launcher,
     link_form,
     main_menu,
+    panes,
     rail,
     resume_form,
     review,
@@ -134,6 +134,7 @@ from .ui import (
     widgets,
 )
 from .ui import focus as focus_mod
+from .ui.typeset import figure_host
 from .ui.widgets import flat_line, format_elapsed
 
 # The two arrangements of C. Same panels in both; the rail is in the same place in
@@ -2349,7 +2350,7 @@ def guarded(name: str, draw: Callable[[], None]) -> Callable[[], None]:
 # The panes that show a parked call, by the label each is docked under, and the
 # name each reports to the review state by. A draw of one of these that raises
 # holds every approve (``review.withheld``).
-_REVIEW_PANES = {"NEEDS YOU": review.INBOX, "DETAIL": review.DETAIL}
+_REVIEW_PANES = {panes.NEEDS_YOU.title: review.INBOX, panes.DETAIL.title: review.DETAIL}
 
 _APPROVE_HELD = (
     "nothing is approved while this pane cannot draw: a, A and the approve buttons "
@@ -2796,7 +2797,7 @@ def _addresses_of(board: boardlog.Board, session_id: str) -> dict[str, str | Non
     A party an older log knows by address alone is in it with no id. Nothing can
     be handed that address back, and nothing else may take it either.
 
-    Built by ``board.reserved``, as the board's own copy of this table is from
+    Built by ``naming.reserved``, as the board's own copy of this table is from
     the ``Restore.parties`` the store makes of the same log (``board._addresses``):
     the driver allocates from this one and the board names agents from that one,
     so they have to be one table.
@@ -2819,7 +2820,7 @@ def _addresses_of(board: boardlog.Board, session_id: str) -> dict[str, str | Non
     for concern in board.concerns:
         bare(concern.sender)
         bare(concern.recipient)
-    return board_mod.reserved(named)
+    return naming.reserved(named)
 
 
 def _carried_addresses(state: AppState, session_id: str | None) -> dict[str, str | None]:
@@ -2831,7 +2832,7 @@ def _carried_addresses(state: AppState, session_id: str | None) -> dict[str, str
     that run allocated.
 
     One table and not the first that is found, because the two are different
-    facts about the same names and ``board.reserved`` is what says how they
+    facts about the same names and ``naming.reserved`` is what says how they
     combine.
     """
     if session_id is None:
@@ -2841,7 +2842,7 @@ def _carried_addresses(state: AppState, session_id: str | None) -> dict[str, str
         state.restored_addresses.get(session_id, {}),
         {} if earlier is None else earlier.addresses(),
     )
-    return board_mod.reserved(pair for table in tables for pair in table.items())
+    return naming.reserved(pair for table in tables for pair in table.items())
 
 
 def _open_board_log(state: AppState, session_id: str, logged: _Logged | None) -> None:
@@ -3857,7 +3858,7 @@ def _show_health(state: AppState, node: NodeId) -> None:
     state.focus.to_node(snap, (node[0], None), scope=focus_mod.Scope.SESSION)
     if hello_imgui.current_layout_name() != FOCUS:
         state.pending_layout = FOCUS
-    state.pending_pane = "HEALTH"
+    state.pending_pane = panes.HEALTH.title
 
 
 def _go_to_session(state: AppState, node: NodeId) -> None:
@@ -3875,7 +3876,7 @@ def _go_to_session(state: AppState, node: NodeId) -> None:
     state.focus.to_node(snap, (node[0], None), scope=focus_mod.Scope.SESSION)
     if hello_imgui.current_layout_name() != FOCUS:
         state.pending_layout = FOCUS
-    state.pending_pane = "SESSION"
+    state.pending_pane = panes.SESSION.title
 
 
 def _show_thread(state: AppState) -> None:
@@ -3885,7 +3886,7 @@ def _show_thread(state: AppState) -> None:
     link's thread, and in FOCUS it shares its space with HEALTH. The layout is
     left as it is, since both layouts dock DETAIL.
     """
-    state.pending_pane = "DETAIL"
+    state.pending_pane = panes.DETAIL.title
 
 
 def _resume_session(state: AppState, node: NodeId) -> None:
@@ -4179,7 +4180,7 @@ def _menu_facts(state: AppState) -> main_menu.Facts:
     )
 
 
-_LOG_PANES = ("CONTEXT", "SESSION")
+_LOG_PANES = (panes.CONTEXT.title, panes.SESSION.title)
 """The panes that draw the focused card's log with its find row."""
 
 
@@ -4693,7 +4694,7 @@ def _fleet_window(fn: Callable[[], None]) -> hello_imgui.DockableWindow:
         _hold_fleet()
         fn()
 
-    w = _window("FLEET", "RailSpace", held)
+    w = _window(panes.FLEET.title, "RailSpace", held)
     w.can_be_closed = False
     w.is_visible = True
     # Shown whatever a saved layout says: one saved with the pane closed, from
@@ -4949,16 +4950,16 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         )
 
     return {
-        "FLEET": rail_pane,
-        "NEEDS YOU": _reviewing(state, "NEEDS YOU", inbox_pane),
-        "CONTEXT": context_pane,
-        "DETAIL": _reviewing(state, "DETAIL", detail_pane),
-        "BOARD": board_pane_fn,
-        "DIGEST": digest_pane_fn,
-        "BRIEF": brief_pane_fn,
-        "SESSION": session_pane,
-        "HEALTH": health_pane,
-        "LOG": _log_panel,
+        panes.FLEET.title: rail_pane,
+        panes.NEEDS_YOU.title: _reviewing(state, panes.NEEDS_YOU.title, inbox_pane),
+        panes.CONTEXT.title: context_pane,
+        panes.DETAIL.title: _reviewing(state, panes.DETAIL.title, detail_pane),
+        panes.BOARD.title: board_pane_fn,
+        panes.DIGEST.title: digest_pane_fn,
+        panes.BRIEF.title: brief_pane_fn,
+        panes.SESSION.title: session_pane,
+        panes.HEALTH.title: health_pane,
+        panes.LOG.title: _log_panel,
     }
 
 
@@ -5062,14 +5063,14 @@ def _triage_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.Docking
         _split("MainDockSpace", "ContextSpace", d.right, 0.32),
     ]
     params.dockable_windows = [
-        _fleet_window(panels["FLEET"]),
-        _window("NEEDS YOU", "MainDockSpace", panels["NEEDS YOU"]),
+        _fleet_window(panels[panes.FLEET.title]),
+        _window(panes.NEEDS_YOU.title, "MainDockSpace", panels[panes.NEEDS_YOU.title]),
         # First tab in the space, and deliberately in front of CONTEXT: the pane
         # answering "what exactly am I approving" outranks the one answering "what
         # was this agent doing beforehand", and the queue is what the operator is
         # here for. A tab-mate rather than a fourth split -- the 0.32 width was
         # already chosen so the inbox keeps room for identity, wait and summary.
-        _window("DETAIL", "ContextSpace", panels["DETAIL"]),
+        _window(panes.DETAIL.title, "ContextSpace", panels[panes.DETAIL.title]),
         # Behind DETAIL as a starting position: the queue is what the operator is
         # here for, and a team's board is context for a decision rather than the
         # decision. Only a default -- layout_condition is first_use_ever, so an
@@ -5077,19 +5078,19 @@ def _triage_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.Docking
         # ini keeps it. Absent in the common case without any layout help -- most
         # sessions are solo, and the pane draws its own "not a team" line rather
         # than an empty table.
-        _window("BOARD", "ContextSpace", panels["BOARD"]),
+        _window(panes.BOARD.title, "ContextSpace", panels[panes.BOARD.title]),
         # The tab after BOARD: a reading of that board, organised with it and not
         # in it. Declared in BOARD's space in both layouts, and ``main`` is what
         # puts it in BOARD's node for a layout saved before it existed.
-        _window("DIGEST", "ContextSpace", panels["DIGEST"]),
+        _window(panes.DIGEST.title, "ContextSpace", panels[panes.DIGEST.title]),
         # Behind BOARD. A brief is written once and amended rarely, where the board
         # moves every few minutes -- the resident tab should be the one that changes.
-        _window("BRIEF", "ContextSpace", panels["BRIEF"]),
-        _window("CONTEXT", "ContextSpace", panels["CONTEXT"]),
+        _window(panes.BRIEF.title, "ContextSpace", panels[panes.BRIEF.title]),
+        _window(panes.CONTEXT.title, "ContextSpace", panels[panes.CONTEXT.title]),
         # Reachable, not resident. LOG is a debugging surface, and its old status as
         # tab-mate to the review queue -- in front of it, at that -- was precisely
         # the inversion this layout exists to correct.
-        _window("LOG", "ContextSpace", panels["LOG"]),
+        _window(panes.LOG.title, "ContextSpace", panels[panes.LOG.title]),
     ]
     return params
 
@@ -5110,21 +5111,21 @@ def _focus_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.DockingP
         _split("MainDockSpace", "HealthSpace", d.right, 0.26),
     ]
     params.dockable_windows = [
-        _fleet_window(panels["FLEET"]),
-        _window("SESSION", "MainDockSpace", panels["SESSION"], SESSION_FLAGS),
-        _window("HEALTH", "HealthSpace", panels["HEALTH"]),
+        _fleet_window(panels[panes.FLEET.title]),
+        _window(panes.SESSION.title, "MainDockSpace", panels[panes.SESSION.title], SESSION_FLAGS),
+        _window(panes.HEALTH.title, "HealthSpace", panels[panes.HEALTH.title]),
         # Behind HEALTH here, in front of CONTEXT in TRIAGE. The pane is the same
         # object either way; what differs is what the arrangement is for. FOCUS is
         # for steering one session, and its facts -- cost, cwd, context headroom --
         # are the ones worth resident space.
-        _window("DETAIL", "HealthSpace", panels["DETAIL"]),
+        _window(panes.DETAIL.title, "HealthSpace", panels[panes.DETAIL.title]),
         # FOCUS is for steering one session, and a team's board is a fact about
         # that session in the same class as its cost and its context headroom --
         # which is why it sits with HEALTH here rather than with the queue.
-        _window("BOARD", "HealthSpace", panels["BOARD"]),
-        _window("DIGEST", "HealthSpace", panels["DIGEST"]),
-        _window("BRIEF", "HealthSpace", panels["BRIEF"]),
-        _window("LOG", "HealthSpace", panels["LOG"]),
+        _window(panes.BOARD.title, "HealthSpace", panels[panes.BOARD.title]),
+        _window(panes.DIGEST.title, "HealthSpace", panels[panes.DIGEST.title]),
+        _window(panes.BRIEF.title, "HealthSpace", panels[panes.BRIEF.title]),
+        _window(panes.LOG.title, "HealthSpace", panels[panes.LOG.title]),
     ]
     return params
 
@@ -5140,7 +5141,7 @@ def _keep_saved_layouts(ini: Path) -> None:
     the cost is that rebuild, which is a layout to drag back and not a session lost.
     """
     try:
-        done = layout_ini.keep_layout_for(ini, "DIGEST", "BOARD")
+        done = layout_ini.keep_layout_for(ini, panes.DIGEST.title, panes.BOARD.title)
     except (OSError, UnicodeDecodeError) as exc:
         LOG.warn(
             "app",
@@ -5176,7 +5177,7 @@ def _before_exit() -> None:
     The runner's last call with the GL and ImGui contexts still current.
 
     The text library's context goes before the ImGui context its fonts are on.
-    Figures hold no GL object (``figures.host`` draws on the draw list), so
+    Figures hold no GL object (``figure_host`` draws on the draw list), so
     nothing of theirs is released here; their render child is ended in
     ``_shut_down``.
     """
@@ -6129,7 +6130,7 @@ def main(argv: list[str] | None = None) -> int:
         working = snap is not None and snap.any_active
         runner.fps_idling.enable_idling = not working
 
-    runner.callbacks.load_additional_fonts = theme.load_fonts
+    runner.callbacks.load_additional_fonts = typeset.load_application_fonts
     runner.callbacks.post_init = post_init
     # Guarded too: an exception here would stop intents being applied, which is
     # bad, but killing the window loses every session, which is worse.
@@ -6180,6 +6181,7 @@ def main(argv: list[str] | None = None) -> int:
     # link it refuses says why under the mouse. Before the loop, where no view
     # exists yet: a change of handler makes every view again (``follow_links``).
     typeset.follow_links(links.follow, refusal=links.followable)
+    figure_render.install(typeset.figure_fonts)
     the_loop_returned = exit_on_signals(_ask_window_to_close)
     try:
         immapp.run(runner)

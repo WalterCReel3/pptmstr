@@ -682,10 +682,11 @@ def _run_handler(session, arguments: dict) -> None:
     """Feed the gate's approved arguments to the real post_concern handler."""
     import asyncio
 
+    from pptmstr import commandbus
     from pptmstr.bus import build_server
     from tests.mcp_wire import call_tool
 
-    server = build_server(session)["instance"]
+    server = build_server(session, commandbus.TOOLS)["instance"]
     result = asyncio.run(call_tool(server, "post_concern", arguments))
     assert not result.is_error, result.content
 

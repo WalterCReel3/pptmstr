@@ -1692,7 +1692,7 @@ NATIVE = _Native()
 
 
 def native_figure_class() -> Any:
-    from pptmstr.figures import host
+    from pptmstr.ui.typeset import figure_host as host
 
     class NativeFigure(host.FigureWidget):  # type: ignore[misc, valid-type]
         """A mermaid fence drawn from its display list: no card, no texture."""
@@ -1989,8 +1989,9 @@ def _historical_run() -> int:
     from imgui_bundle import hello_imgui, imgui, immapp
 
     from pptmstr import theme
-    from pptmstr.figures import host, render
+    from pptmstr.figures import render
     from pptmstr.ui import typeset
+    from pptmstr.ui.typeset import figure_host as host
 
     OUT.mkdir(parents=True, exist_ok=True)
     Native = native_figure_class()
@@ -2461,12 +2462,13 @@ def _historical_run() -> int:
     )
     params.ini_disable = True
     params.fps_idling.enable_idling = False
-    params.callbacks.load_additional_fonts = theme.load_fonts
+    params.callbacks.load_additional_fonts = typeset.load_application_fonts
     params.callbacks.pre_new_frame = pre_frame
     params.callbacks.show_gui = gui
     params.callbacks.before_swap = before_swap
     theme.set_theme("dark")
     typeset.configure(typeset=True, mono=False)
+    render.install(typeset.figure_fonts)
     try:
         immapp.run(params)
     finally:

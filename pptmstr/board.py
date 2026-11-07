@@ -27,7 +27,6 @@ Imports no imgui, so the derivation is testable without a GL context.
 from __future__ import annotations
 
 import builtins
-from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 
 from .model import (
@@ -46,6 +45,7 @@ from .model import (
     is_operator,
     withdrawal_label,
 )
+from .naming import LEAD, address_for, reserved
 from .templates import SOLO, by_name
 
 # What a node with no record in the snapshot is called.
@@ -58,13 +58,6 @@ from .templates import SOLO, by_name
 # says only what is known: nothing here answers to this id.
 UNKNOWN = "(unknown)"
 
-# What the root session of a team is called. Not read from the record: the driver
-# emits the root's `AgentSpawned` with no `agent_type` at all, so the usual
-# `record.agent_type or record.task` idiom would put the operator's entire task
-# prompt in a name column. `role_of` answers "lead" for this node, and an agent_id
-# of None is the same fact without reaching into the driver.
-LEAD = "lead"
-
 # What qualifies a node belonging to a different session than the board showing it.
 # Reachable because the task map is fleet-wide and ``store._pick_claim`` applies no
 # session filter, so a worker in one session can claim work another declared.
@@ -73,11 +66,6 @@ LEAD = "lead"
 # broken, because it is neither: it is a real agent doing real work, under a role
 # name that is correct in its own session and misleading in this one.
 FOREIGN = "another session"
-
-# The names that mean the root of a session and so are never a sub-agent's address.
-# Here and not in the driver, which imports this: the driver pulls in the agent SDK,
-# and this module is testable without a runtime.
-ROOT_NAMES = (LEAD, "main", "root")
 
 
 def basis_label(basis: Basis | None) -> str:
@@ -559,80 +547,6 @@ def address_in_session(snap: Snapshot, node: NodeId) -> str:
         # always has a type. A record without one is not worth a paragraph here.
         return node[1]
     return _addresses(snap, node[0]).get(node, record.agent_type.lower())
-
-
-def address_for(
-    agent_id: str,
-    agent_type: str,
-    held: Mapping[str, str | None],
-    declared: Collection[str],
-) -> str:
-    """
-    The address a sub-agent answers to. **The one place that is decided.**
-
-    ``held`` is every address of the session that is spoken for, with the agent
-    id it belongs to: the ones allocated so far in this process, and the ones an
-    earlier process's log names (``reserved``). The driver asks this when a
-    sub-agent starts and routes mail by the answer; ``_addresses`` asks it once
-    per record in spawn order and that is what every board read, the pane and
-    the log's records show. Two callers of one function over the same table and
-    the same order cannot name an agent differently, and neither has a rule of
-    its own to drift.
-
-    An id ``held`` already names gets that address back, wherever in the order it
-    starts: a sub-agent woken under its id keeps its name, in this process or in
-    one that restored the log.
-
-    Otherwise the first agent of a type takes the bare role name and later ones
-    ``builder-2``, ``builder-3`` -- the convention ``templates.lead_briefing``
-    hands the lead. A candidate that is in ``held``, that is one of the root's
-    names, or that another role in the template is called (``declared``) is
-    stepped over: an address in ``held`` under another id, or under none, is
-    never handed out again.
-    """
-    for address, holder in held.items():
-        if holder == agent_id:
-            return address
-    base = agent_type.strip().lower() or "agent"
-    ordinal = 1
-    while True:
-        candidate = base if ordinal == 1 else f"{base}-{ordinal}"
-        spoken_for = (
-            candidate in held
-            or candidate in ROOT_NAMES
-            or (candidate != base and candidate in declared)
-        )
-        if not spoken_for:
-            return candidate
-        ordinal += 1
-
-
-def reserved(named: Iterable[tuple[str, str | None]]) -> dict[str, str | None]:
-    """
-    The table ``address_for`` is given, from ``(address, agent id)`` pairs in any
-    order: each address once, as an agent types it, with the one agent id it
-    belongs to.
-
-    The id is None where no pair gives one, and **None where two pairs give
-    different ones**. An address two agents were written under belongs to
-    neither as far as anything here can tell, so neither is handed it back and
-    nobody new takes it. Deciding by which pair came first would make the answer
-    depend on the order of the source, and the two sources of one session's
-    table -- a log's ``Board.addresses`` and the ``Restore.parties`` the store
-    made of the same log -- do not share an order.
-
-    An empty address and the root's names are left out: nothing is ever
-    allocated either, so neither is a thing to reserve.
-    """
-    ids: dict[str, set[str]] = {}
-    for address, agent_id in named:
-        key = address.strip().lower()
-        if not key or key in ROOT_NAMES:
-            continue
-        known = ids.setdefault(key, set())
-        if agent_id is not None:
-            known.add(agent_id)
-    return {key: next(iter(known)) if len(known) == 1 else None for key, known in ids.items()}
 
 
 def restored_table(snap: Snapshot, session_id: str) -> dict[str, str | None]:

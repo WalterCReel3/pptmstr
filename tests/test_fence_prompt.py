@@ -18,8 +18,9 @@ import pytest
 
 from pptmstr.bridge import Bridge
 from pptmstr.driver import AgentSession
-from pptmstr.figures import fences, host, mermaid, sanitise
+from pptmstr.figures import fences, mermaid, sanitise
 from pptmstr.templates import FEATURE, lead_briefing, worker_prompt
+from pptmstr.ui.typeset import figure_host as host
 from pptmstr.ui.typeset import views
 
 RESUMED = "11111111-2222-3333-4444-555555555555"

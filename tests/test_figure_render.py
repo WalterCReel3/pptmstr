@@ -548,3 +548,34 @@ def test_a_reason_the_child_gives_is_one_drawable_line_within_the_bound() -> Non
     assert "\n" not in shown and shown.endswith("…")
     assert len(shown) <= render.MAX_REASON_CHARS + len("\\udc80\\u0000") - 2
     assert not drawable.undrawable(shown)
+
+
+# -- the process's renderer -------------------------------------------------------------
+
+
+def test_the_process_renderer_asked_before_install_refuses_and_names_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A renderer nobody installed has no faces to set a figure in, and there is no
+    default to fall back to: the refusal says what to call.
+    """
+    monkeypatch.setattr(render, "_RENDERER", None)
+    with pytest.raises(render.NotInstalled, match=r"render\.install"):
+        render.renderer()
+
+
+def test_install_makes_the_renderer_with_the_fonts_given_and_ends_the_one_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fonts() -> Fonts:
+        return Fonts((), "sans", "mono")
+
+    ended: list[int] = []
+    before = scripted()
+    monkeypatch.setattr(before, "shutdown", lambda: ended.append(1))
+    monkeypatch.setattr(render, "_RENDERER", before)
+    render.install(fonts)
+    made = render.renderer()
+    assert made is not before and ended == [1]
+    assert made._fonts is fonts

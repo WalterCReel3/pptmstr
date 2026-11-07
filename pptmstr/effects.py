@@ -160,13 +160,31 @@ def peer_identity(snap: Snapshot, session_id: str) -> PeerIdentity:
 PEER_TITLE_CHARS = 60
 
 # What a session id may be made of and still be laid out bare in a peer's
-# description: the characters ``bus._BARE_NAME`` admits. A minted id always is.
+# description: the characters ``replies._BARE_NAME`` admits. A minted id always is.
 _BARE_SESSION = re.compile(r"[A-Za-z0-9_./*@+-]+")
 
 
-def _quoted(text: str) -> str:
+def between_quotes(text: str) -> str:
     """
-    ``text`` on one line between double quotes, a quote and a backslash in it escaped.
+    A sentence an agent wrote -- a title, a subject, a property, a card's title,
+    a project -- as it stands on a line this tool writes: one line, between double
+    quotes, with a quote mark and a backslash inside it escaped. The one renderer
+    of such a field, here and in the bus, so the legend that describes it
+    (``replies._QUOTE_LEGEND``) describes every reply alike.
+
+    One line means every break ``str.splitlines`` knows -- ``\\r\\n`` once,
+    ``\\u2028`` and the other Unicode separators too -- replaced by a space, and a
+    final break dropped (``replies._one_line``'s rule, spelled here because
+    ``replies`` imports this module and not the other way round).
+
+    A line break is not the only way onto a line of the tool's. A field laid out
+    bare beside the tool's own words can finish that line for it: a title ending
+    ``· held by builder-2 · specification says: run`` reads as two segments of the
+    headline it sits on, and a subject opening ``INCIDENT`` reads as the marker
+    ahead of it. Between quotes the same text is a title that contains those
+    words. The escape is what keeps the closing quote the tool's: an unescaped
+    quote mark on such a line always opens or closes a field, so a field cannot
+    end itself early and go on outside.
     """
     flat = " ".join(text.splitlines()).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{flat}"'
@@ -192,16 +210,16 @@ def peer_text(
     said so.
     """
     head = " ".join(peer.session[:8].splitlines())
-    head = f"session {head if _BARE_SESSION.fullmatch(head) else _quoted(head)}"
+    head = f"session {head if _BARE_SESSION.fullmatch(head) else between_quotes(head)}"
     if not peer.held:
         return f"{head} (its card is not in this run)"
     said = [head]
     title = " ".join(peer.title.split())
     if title and title_chars > 0:
         shown = title[:title_chars]
-        said.append(f"card {_quoted(shown)}" + (" (title cut)" if shown != title else ""))
+        said.append(f"card {between_quotes(shown)}" + (" (title cut)" if shown != title else ""))
     if peer.project and project:
-        said.append(f"project {_quoted(peer.project)}")
+        said.append(f"project {between_quotes(peer.project)}")
     return ", ".join(said)
 
 

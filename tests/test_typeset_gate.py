@@ -238,7 +238,7 @@ _LOAD_IN_A_BARE_CONTEXT = (
     "fonts = Path(imgui_bundle.__file__).parent / 'assets' / 'fonts'\n"
     "io.fonts.add_font_from_file_ttf(str(fonts / 'Inconsolata-Medium.ttf'), 16.0)\n"
     "typeset.configure(typeset=True, panes={})\n"
-    "theme._load_typeset_faces()\n"
+    "typeset.load_fonts_in_callback(theme.BOLD_FILE)\n"
     "typeset.pre_frame()\n"
     "print(typeset.can_draw(), typeset.available())\n"
     "print([pane.value for pane in typeset.Pane if typeset.enabled(pane)])\n"
@@ -400,7 +400,7 @@ def test_a_font_load_that_raises_leaves_pptmstr_drawing_and_the_reason_said(
 ) -> None:
     """
     The callback hello_imgui calls for fonts is not one an exception may leave:
-    ``theme.load_fonts`` reaches the gate from inside it. Whatever the library
+    ``typeset.load_application_fonts`` reaches the gate from inside it. Whatever the library
     raises there, the call returns, every pane is on its own renderer, and the
     sentence carries what was raised.
     """
@@ -413,7 +413,7 @@ def test_a_font_load_that_raises_leaves_pptmstr_drawing_and_the_reason_said(
     typeset.configure(typeset=True, panes={})
 
     assert typeset.load_fonts(BOLD) is False, "the gate's own call returns"
-    theme._load_typeset_faces()
+    typeset.load_fonts_in_callback(theme.BOLD_FILE)
 
     assert not typeset.can_draw() and not typeset.obtainable()
     assert not typeset.enabled() and not any(typeset.enabled(pane) for pane in Pane)

@@ -111,7 +111,6 @@ import json
 import math
 import os
 import re
-import stat
 import tempfile
 import types
 from collections.abc import Iterable
@@ -120,7 +119,6 @@ from pathlib import Path
 from typing import Any, ClassVar, assert_never, get_args, get_type_hints
 
 from . import model
-from .board import ROOT_NAMES
 from .model import (
     ApprovedWrites,
     ConcernState,
@@ -129,6 +127,8 @@ from .model import (
     closing_result,
     withdrawal_result,
 )
+from .naming import ROOT_NAMES
+from .ondisk import read_regular
 
 # `00000042.json`. The name is the ordinal and nothing else: a kind in the name
 # would let two writers link two different names for one ordinal, and exclusivity
@@ -1051,39 +1051,6 @@ class Log:
     damage: Damage | None = None
 
 
-def _file_bytes(path: Path) -> bytes:
-    """
-    The bytes of a regular file no longer than a record may be. ``OSError`` for
-    anything else.
-
-    Judged through the descriptor, not by a ``stat`` of the name beforehand.
-    ``O_NONBLOCK`` makes opening a FIFO return: one under a record's name would
-    hold an ordinary open until somebody wrote to it, and a reader that waits on a
-    file is one any writer to the directory can stop. ``O_NOFOLLOW`` refuses a
-    link under the name: ``append`` only ever hard-links a regular file into
-    place, so a symbolic link there is not a record, wherever it leads. It refuses
-    only the last part of the path, so a log reached through a linked directory
-    still reads. ``O_CLOEXEC`` keeps the descriptor out of any child started
-    while it is open.
-
-    Read to one byte past ``MAX_RECORD_BYTES`` and no further, so the size of the
-    file is never the size of the allocation.
-    """
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"{path.name} is not a regular file")
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            held = handle.read(MAX_RECORD_BYTES + 1)
-        if len(held) > MAX_RECORD_BYTES:
-            raise OSError(f"{path.name} is over the {MAX_RECORD_BYTES} bytes a record may be")
-        return held
-    finally:
-        if fd != -1:
-            os.close(fd)
-
-
 def read(directory: Path) -> Log:
     """
     Every record up to the first one that cannot be read, oldest first.
@@ -1120,7 +1087,7 @@ def read(directory: Path) -> Log:
         if ordinal != position:
             return Log(tuple(records), Damage(position, "missing", unread))
         try:
-            text = _file_bytes(directory / _name(ordinal)).decode("utf-8")
+            text = read_regular(directory / _name(ordinal), MAX_RECORD_BYTES).decode("utf-8")
         except (OSError, ValueError) as exc:
             return Log(tuple(records), Damage(ordinal, f"{type(exc).__name__}: {exc}", unread - 1))
         record = decode(text)

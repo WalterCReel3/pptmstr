@@ -73,7 +73,7 @@ run, which stays a stream after its turn ends, draws a diff fence as DETAIL's
 settled document of the same text does.
 
 **A ```` ```mermaid ```` fence is a figure once it has settled**
-(``figures.host``): in a settled document, and in a stream once the stream has
+(``figure_host``): in a settled document, and in a stream once the stream has
 committed the fence or closed, open or not (``_Captioned``). Until then it is code.
 One where merman is not installed stays code, under a line in the warn ink saying
 why. A ```` ```svg ```` fence is code, as any language outside ``figures.fences``
@@ -1450,13 +1450,13 @@ def is_math_fence(said: str) -> bool:
 def settles_rendered(said: str) -> bool:
     """
     Whether a fence with this info string becomes something other than code once
-    it has settled: a figure (``figures.host.is_figure_fence``) or a formula
+    it has settled: a figure (``figure_host.is_figure_fence``) or a formula
     (``is_math_fence``), the two kinds of row in ``figures.fences.RENDERED``. The
     rule ``_Captioned`` keeps such a fence's answer by, so that its answer changes
     at commit (probe S1), and the rule under which ``_captioned(figures=True)``
     turns one.
     """
-    from ...figures import host as figures_host
+    from . import figure_host as figures_host
 
     return figures_host.is_figure_fence(said) or is_math_fence(said)
 
@@ -1731,7 +1731,7 @@ def _formula_block(block: Any, said: str, theme: Any) -> tuple[Any, ...]:
     """
     from imscribe import TypesetUnavailable
 
-    from ...figures import host as figures_host
+    from . import figure_host as figures_host
 
     made, why = gate.formula(block.text, theme)
     if made is not None:
@@ -1779,9 +1779,9 @@ def _captioned(
     warn ink (``_Warned``).
 
     With ``figures``, a fence whose info string asks for a figure
-    (``figures.host.is_figure_fence``) and that ``figures.host.mark`` accepts keeps
+    (``figure_host.is_figure_fence``) and that ``figure_host.mark`` accepts keeps
     the text it was written with and is marked for the figure host
-    (``figures.host.FigureMark``). One it refuses is captioned code as any other,
+    (``figure_host.FigureMark``). One it refuses is captioned code as any other,
     under a block of its own saying why in the warn ink.
 
     With ``figures``, a ```` ```math ```` fence (``is_math_fence``) is the display
@@ -1789,8 +1789,8 @@ def _captioned(
     given), or captioned code under a line in the warn ink saying why the
     library would not set it (``_formula_block``).
     """
-    from ...figures import host as figures_host
     from . import diffs
+    from . import figure_host as figures_host
 
     out: list[Any] = []
     for block in blocks:
@@ -1958,7 +1958,7 @@ class _Hosts:
     """
     What a markdown view's ``host_for`` is, in a settled document and a stream
     alike: a block ``_captioned`` marked as a figure goes to the figure host
-    (``figures.host.figure_for``), and where ``diffs`` a block it marked for a
+    (``figure_host.figure_for``), and where ``diffs`` a block it marked for a
     diff view goes to ``_Fences``. Nothing else is hosted.
 
     ``diffs`` is the diff rule as it was: a settled document's views where the
@@ -1973,7 +1973,7 @@ class _Hosts:
         self.diffs = diffs
 
     def __call__(self, view: Any, number: int, block: Any) -> Any:
-        from ...figures import host as figures_host
+        from . import figure_host as figures_host
 
         if isinstance(getattr(block, "language", None), figures_host.FigureMark):
             return figures_host.figure_for(view, number, block)

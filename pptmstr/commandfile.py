@@ -81,7 +81,6 @@ import contextlib
 import io
 import itertools
 import json
-import math
 import os
 import stat
 import tempfile
@@ -90,7 +89,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, assert_never
 
-from . import drawable, sessionfile
+from . import drawable, jsonfields, sessionfile
 from .command import (
     MAX_CGROUP_CHARS,
     Cancelled,
@@ -111,6 +110,7 @@ from .command import (
     is_tag_digest,
     is_valid_id,
 )
+from .ondisk import read_regular
 
 # The format this build writes, and the newest whose directory it adds to.
 FORMAT = 1
@@ -217,13 +217,9 @@ def command_dir(session_id: str, command_id: str, root: Path | None = None) -> P
     return base / command_id
 
 
-def _shown(value: object) -> str:
-    text = repr(value)
-    return text if len(text) <= 60 else text[:57] + "..."
-
-
 def _no_directory(session_id: str, command_id: object) -> str:
-    return f"{_shown(session_id)} / {_shown(command_id)} does not name a command's directory"
+    shown = f"{jsonfields.shown(session_id)} / {jsonfields.shown(command_id)}"
+    return f"{shown} does not name a command's directory"
 
 
 def _is_real_dir(path: Path) -> bool:
@@ -243,32 +239,13 @@ def _is_regular(path: Path) -> bool:
 
 # -- values at the boundary -------------------------------------------------------
 
-_BAD: Any = object()
-
-
-def _text(value: object) -> Any:
-    return value if isinstance(value, str) else _BAD
-
-
-def _number(value: object) -> Any:
-    # ``bool`` is an ``int`` to ``isinstance``, and ``true`` is not a time.
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return _BAD
-    try:
-        number = float(value)
-    except OverflowError:
-        return _BAD
-    return number if math.isfinite(number) else _BAD
-
-
-def _whole(value: object) -> Any:
-    return value if isinstance(value, int) and not isinstance(value, bool) else _BAD
-
 
 def _pids(value: object) -> Any:
-    if isinstance(value, list) and all(_whole(pid) is not _BAD for pid in value):
+    if isinstance(value, list) and all(
+        jsonfields.whole(pid) is not jsonfields.BAD for pid in value
+    ):
         return tuple(value)
-    return _BAD
+    return jsonfields.BAD
 
 
 def _node(value: object) -> Any:
@@ -279,7 +256,7 @@ def _node(value: object) -> Any:
         and (value[1] is None or isinstance(value[1], str))
     ):
         return (value[0], value[1])
-    return _BAD
+    return jsonfields.BAD
 
 
 def _asked(obj: dict[str, Any], key: str) -> str:
@@ -293,7 +270,7 @@ def _asked(obj: dict[str, Any], key: str) -> str:
     The directory and the shell are not read with this: a directory whose name is
     not UTF-8 is a lone surrogate in a ``str``, and is a directory.
     """
-    text: str = _need(obj, key, _text)
+    text: str = _need(obj, key, jsonfields.text)
     if drawable.undrawable(text):
         raise ValueError(
             f"{key!r} holds a NUL or a lone surrogate, which nothing pptmstr asks or "
@@ -309,8 +286,8 @@ def _need(obj: dict[str, Any], key: str, read: Callable[[object], Any]) -> Any:
     if key not in obj:
         raise ValueError(f"no {key!r}")
     value = read(obj[key])
-    if value is _BAD:
-        raise ValueError(f"{key!r} is {_shown(obj[key])}")
+    if value is jsonfields.BAD:
+        raise ValueError(f"{key!r} is {jsonfields.shown(obj[key])}")
     return value
 
 
@@ -351,7 +328,7 @@ def _by(value: object) -> Any:
     if isinstance(value, str):
         with contextlib.suppress(ValueError):
             return CancelledBy(value)
-    return _BAD
+    return jsonfields.BAD
 
 
 def _outcome(value: object) -> Outcome:
@@ -360,57 +337,28 @@ def _outcome(value: object) -> Outcome:
     this build does not know is not read as the one it most resembles.
     """
     if not isinstance(value, dict):
-        raise ValueError(f"'outcome' is {_shown(value)}")
+        raise ValueError(f"'outcome' is {jsonfields.shown(value)}")
     kind = value.get("kind")
     if kind == "exited":
-        return Exited(code=_need(value, "code", _whole))
+        return Exited(code=_need(value, "code", jsonfields.whole))
     if kind == "timed_out":
         return TimedOut()
     if kind == "cancelled":
         return Cancelled(by=_need(value, "by", _by))
     if kind == "not_started":
-        return NotStarted(reason=_need(value, "reason", _text))
+        return NotStarted(reason=_need(value, "reason", jsonfields.text))
     if kind == "refused":
-        return Refused(reason=_need(value, "reason", _text))
+        return Refused(reason=_need(value, "reason", jsonfields.text))
     if kind == "withdrawn":
         return Withdrawn()
     if kind == "lapsed":
         return Lapsed()
     if kind == "end_unknown":
         return EndUnknown()
-    raise ValueError(f"an outcome of kind {_shown(kind)}")
+    raise ValueError(f"an outcome of kind {jsonfields.shown(kind)}")
 
 
 # -- reading ----------------------------------------------------------------------
-
-
-def _file_bytes(path: Path, limit: int) -> bytes:
-    """
-    The bytes of a regular file no longer than ``limit``. ``OSError`` otherwise.
-
-    Judged through the descriptor. ``O_NONBLOCK`` makes opening a FIFO return and
-    ``O_NOFOLLOW`` refuses a link: every file here is linked or created as a
-    regular file, so a link under the name is not something this module wrote.
-    Read to one byte past the limit and no further.
-    """
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"{path.name} is not a regular file")
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            held = handle.read(limit + 1)
-        if len(held) > limit:
-            raise OSError(f"{path.name} is over the {limit} bytes it may be")
-        return held
-    finally:
-        if fd != -1:
-            os.close(fd)
-
-
-def _not_json(constant: str) -> Any:
-    # ``json.loads`` takes NaN and Infinity, which are not JSON.
-    raise ValueError(f"{constant} is not JSON")
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,20 +378,22 @@ def _doc(directory: Path, name: str) -> _Doc | None:
     that is there and is not a JSON object with a ``format`` this build can place.
     """
     try:
-        held = _file_bytes(directory / name, MAX_JSON_BYTES)
+        held = read_regular(directory / name, MAX_JSON_BYTES)
     except FileNotFoundError:
         return None
     except OSError as exc:
         raise ValueError(f"{name}: {type(exc).__name__}: {exc}") from None
     try:
-        obj = json.loads(held.decode("utf-8"), parse_constant=_not_json)
+        obj = json.loads(held.decode("utf-8"), parse_constant=jsonfields.not_json)
     except (ValueError, RecursionError) as exc:
-        raise ValueError(f"{name}: not JSON ({type(exc).__name__}: {_shown(str(exc))})") from None
+        raise ValueError(
+            f"{name}: not JSON ({type(exc).__name__}: {jsonfields.shown(str(exc))})"
+        ) from None
     if not isinstance(obj, dict):
         raise ValueError(f"{name}: not a JSON object")
-    fmt = _whole(obj.get("format"))
-    if fmt is _BAD or fmt < 1:
-        raise ValueError(f"{name}: 'format' is {_shown(obj.get('format'))}")
+    fmt = jsonfields.whole(obj.get("format"))
+    if fmt is jsonfields.BAD or fmt < 1:
+        raise ValueError(f"{name}: 'format' is {jsonfields.shown(obj.get('format'))}")
     return _Doc(obj=obj, newer=fmt > FORMAT)
 
 
@@ -453,19 +403,19 @@ def _in_file(name: str, doc: _Doc, exc: ValueError) -> ValueError:
 
 
 def _own_id(doc: _Doc, command_id: str) -> None:
-    stated = _need(doc.obj, "id", _text)
+    stated = _need(doc.obj, "id", jsonfields.text)
     if stated != command_id:
-        raise ValueError(f"'id' is {_shown(stated)}, and the directory is {command_id}")
+        raise ValueError(f"'id' is {jsonfields.shown(stated)}, and the directory is {command_id}")
 
 
 def _run(doc: _Doc, command_id: str) -> Run:
     _own_id(doc, command_id)
     return Run(
         text=_asked(doc.obj, "text"),
-        shell=_need(doc.obj, "shell", _text),
-        cwd=_need(doc.obj, "cwd", _text),
-        timeout_s=_need(doc.obj, "timeout_s", _number),
-        started_at=_need(doc.obj, "started_at", _number),
+        shell=_need(doc.obj, "shell", jsonfields.text),
+        cwd=_need(doc.obj, "cwd", jsonfields.text),
+        timeout_s=_need(doc.obj, "timeout_s", jsonfields.number),
+        started_at=_need(doc.obj, "started_at", jsonfields.number),
     )
 
 
@@ -477,18 +427,18 @@ def _end(doc: _Doc, command_id: str) -> tuple[End, float | None]:
     _own_id(doc, command_id)
     end = End(
         outcome=_outcome(doc.obj.get("outcome")),
-        at=_need(doc.obj, "at", _number),
-        duration_s=_need(doc.obj, "duration_s", _number),
-        output_bytes=_need(doc.obj, "output_bytes", _whole),
-        tail=_need(doc.obj, "tail", _text),
+        at=_need(doc.obj, "at", jsonfields.number),
+        duration_s=_need(doc.obj, "duration_s", jsonfields.number),
+        output_bytes=_need(doc.obj, "output_bytes", jsonfields.whole),
+        tail=_need(doc.obj, "tail", jsonfields.text),
         # Absent from a record written before each was kept, and None then.
-        leftover=_optional(doc.obj, "leftover", _whole),
-        unconfirmed=_optional(doc.obj, "unconfirmed", _text),
+        leftover=_optional(doc.obj, "leftover", jsonfields.whole),
+        unconfirmed=_optional(doc.obj, "unconfirmed", jsonfields.text),
         escaped=_optional(doc.obj, "escaped", _pids),
         unreadable=_optional(doc.obj, "unreadable", _pids) or (),
     )
     stop = doc.obj.get("stop_asked_at")
-    return end, (None if stop is None else _need(doc.obj, "stop_asked_at", _number))
+    return end, (None if stop is None else _need(doc.obj, "stop_asked_at", jsonfields.number))
 
 
 def _missing_end(
@@ -513,7 +463,10 @@ def _released(directory: Path, command_id: str) -> Released | None:
         if doc is None:
             return None
         _own_id(doc, command_id)
-        return Released(at=_need(doc.obj, "at", _number), alive=_need(doc.obj, "alive", _whole))
+        return Released(
+            at=_need(doc.obj, "at", jsonfields.number),
+            alive=_need(doc.obj, "alive", jsonfields.whole),
+        )
     except (OSError, ValueError, RuntimeError):
         return None
 
@@ -527,7 +480,7 @@ def _left_unconfirmed(directory: Path, command_id: str) -> str | None:
         if doc is None:
             return None
         _own_id(doc, command_id)
-        return _need(doc.obj, "reason", _text) or None
+        return _need(doc.obj, "reason", jsonfields.text) or None
     except ValueError:
         return None
 
@@ -565,11 +518,13 @@ def _read(session_id: str, command_id: str, root: Path | None) -> tuple[Command 
             _own_id(request, command_id)
             asker = _need(request.obj, "asker", _node)
             if asker[0] != session_id:
-                raise ValueError(f"'asker' is of session {_shown(asker[0])}, not this one")
+                raise ValueError(
+                    f"'asker' is of session {jsonfields.shown(asker[0])}, not this one"
+                )
             asked = _asked(request.obj, "asked")
             reason = _asked(request.obj, "reason")
             expects = _asked(request.obj, "expects")
-            asked_at = _need(request.obj, "asked_at", _number)
+            asked_at = _need(request.obj, "asked_at", jsonfields.number)
         except ValueError as exc:
             raise _in_file(REQUEST_NAME, request, exc) from None
 
@@ -664,14 +619,14 @@ def read_started(session_id: str, command_id: str, root: Path | None = None) -> 
             return None
         _own_id(doc, command_id)
         # Each absent from the record of a command started without it.
-        tag = _optional(doc.obj, "tag", _text)
-        cgroup = _optional(doc.obj, "cgroup", _text)
+        tag = _optional(doc.obj, "tag", jsonfields.text)
+        cgroup = _optional(doc.obj, "cgroup", jsonfields.text)
         return Started(
-            pid=_need(doc.obj, "pid", _whole),
-            pgid=_need(doc.obj, "pgid", _whole),
-            at=_need(doc.obj, "at", _number),
-            start_ticks=_optional(doc.obj, "start_ticks", _whole),
-            boot_id=_optional(doc.obj, "boot_id", _text),
+            pid=_need(doc.obj, "pid", jsonfields.whole),
+            pgid=_need(doc.obj, "pgid", jsonfields.whole),
+            at=_need(doc.obj, "at", jsonfields.number),
+            start_ticks=_optional(doc.obj, "start_ticks", jsonfields.whole),
+            boot_id=_optional(doc.obj, "boot_id", jsonfields.text),
             tag=tag if is_tag_digest(tag) else None,
             cgroup=cgroup if cgroup and len(cgroup) <= MAX_CGROUP_CHARS else None,
         )
@@ -693,7 +648,7 @@ def read_gone(session_id: str, command_id: str, root: Path | None = None) -> str
         if doc is None:
             return None
         _own_id(doc, command_id)
-        return _need(doc.obj, "why", _text) or None
+        return _need(doc.obj, "why", jsonfields.text) or None
     except (OSError, ValueError, RuntimeError):
         return None
 
@@ -726,7 +681,7 @@ def restore(session_id: str, root: Path | None = None) -> Restored:
     try:
         base = commands_dir(session_id, root)
         if base is None:
-            return Restored(problem=f"{_shown(session_id)} is not a session id")
+            return Restored(problem=f"{jsonfields.shown(session_id)} is not a session id")
         ids: list[str] = []
         with os.scandir(base) as entries:
             taken = list(itertools.islice(entries, MAX_COMMANDS + 1))

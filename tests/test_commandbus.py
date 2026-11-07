@@ -29,6 +29,7 @@ from pptmstr import bus as b
 from pptmstr import command as c
 from pptmstr import commandbus as cb
 from pptmstr import model as m
+from pptmstr import replies as replies_mod
 from pptmstr.bridge import Bridge
 from pptmstr.command import (
     Cancelled,
@@ -224,7 +225,7 @@ def test_an_accepted_request_says_nothing_has_run_and_to_carry_on() -> None:
         f"will until the operator has read the exact string and run it themselves. "
         f"They may refuse it, and they may change it before running it. Carry on "
         f"with your other work now and do not wait for this: nothing is parked. "
-        f"{b.WAKE_SAID_SUBAGENT} "
+        f"{replies_mod.WAKE_SAID_SUBAGENT} "
         f'Call read_commands(command_id="{second}") '
         f"when you reach the work that needs it, and again before you finish: it says "
         f"whether it ran, shows the string that actually ran -- the operator's, if "
@@ -239,7 +240,7 @@ def test_an_accepted_request_says_nothing_has_run_and_to_carry_on() -> None:
     )
     # A lead has no lead to pass it to, and is the one woken.
     assert "Your lead" not in lead and lead.endswith("while the operator has not run it.")
-    assert b.WAKE_SAID in lead and b.WAKE_SAID_SUBAGENT not in lead
+    assert replies_mod.WAKE_SAID in lead and replies_mod.WAKE_SAID_SUBAGENT not in lead
     # None of the agent's own text is in a reply that has no marked line.
     assert "make install" not in said and "sandbox denies" not in said
 
@@ -468,7 +469,7 @@ def test_a_command_that_ran_is_read_back_whole_with_each_text_behind_its_authors
         again = desk.read(DEV, made)
         lead_after = desk.read(LEAD, made)
 
-    legends = f"{b._QUOTE_LEGEND} {cb.OPERATOR_LEGEND} {cb.OUTPUT_LEGEND}"
+    legends = f"{replies_mod._QUOTE_LEGEND} {cb.OPERATOR_LEGEND} {cb.OUTPUT_LEGEND}"
     assert _calm(first) == "\n".join(
         [
             legends,
@@ -532,12 +533,12 @@ def test_a_command_run_as_asked_shows_the_string_that_ran_as_the_agents_own() ->
         stopping = desk.read(LEAD, made)
 
     assert _behind(running, AGENT).count("make install") == 2 and not _behind(running, OPERATOR)
-    assert running.split("\n", 1)[0] == b._QUOTE_LEGEND
+    assert running.split("\n", 1)[0] == replies_mod._QUOTE_LEGEND
     assert _calm(running).split("\n")[-3:] == [
         "The operator ran it as it was asked. What was given to the shell:",
         "| make install",
         "It is RUNNING and has not ended: started N ago, and killed if it has not "
-        f"exited within 10 minute(s). {b.WAKE_SAID_SUBAGENT} Carry on with other work "
+        f"exited within 10 minute(s). {replies_mod.WAKE_SAID_SUBAGENT} Carry on with other work "
         f'and do not wait, and call read_commands(command_id="{made}") '
         "when you reach the work that needs it.",
     ]
@@ -557,7 +558,7 @@ def test_a_command_nobody_has_acted_on_says_nothing_has_run_and_not_to_wait() ->
 
     assert f"Command {made} [asked, NOT run] asked by you N ago" in _calm(mine)
     assert mine.endswith(
-        f"NOTHING HAS RUN. The operator has not acted on it. {b.WAKE_SAID_SUBAGENT} "
+        f"NOTHING HAS RUN. The operator has not acted on it. {replies_mod.WAKE_SAID_SUBAGENT} "
         "Carry on with other work and do not wait, and call "
         f'read_commands(command_id="{made}") when you reach the work that needs it.'
     )
@@ -671,7 +672,7 @@ def test_the_ways_a_command_ends_without_running_say_that_nothing_ran() -> None:
         f"Command {taken} is withdrawn: it has left the operator's queue and will not "
         f"run. read_commands still lists it."
     )
-    assert told["refused"].split("\n")[0] == f"{b._QUOTE_LEGEND} {cb.OPERATOR_LEGEND}"
+    assert told["refused"].split("\n")[0] == f"{replies_mod._QUOTE_LEGEND} {cb.OPERATOR_LEGEND}"
     assert told["refused"].split("\n")[-4:] == [
         "THE OPERATOR REFUSED IT, and nothing ran. Their reason:",
         "> no:",
@@ -731,19 +732,19 @@ def test_a_legend_stands_ahead_of_its_mark_only_in_a_reply_that_has_the_mark() -
         quiet = desk.read(DEV, made)
 
     for text in (asked, quiet):
-        assert text.split("\n")[0] == b._QUOTE_LEGEND
+        assert text.split("\n")[0] == replies_mod._QUOTE_LEGEND
         assert cb.OPERATOR_LEGEND not in text and cb.OUTPUT_LEGEND not in text
     assert quiet.endswith("\n\nIt wrote no output.")
     # One paragraph of legends, then the first marked line: never the reverse.
-    for legend in (cb.OPERATOR_LEGEND, cb.OUTPUT_LEGEND, b._QUOTE_LEGEND):
+    for legend in (cb.OPERATOR_LEGEND, cb.OUTPUT_LEGEND, replies_mod._QUOTE_LEGEND):
         assert legend.startswith("A line whose first characters after any indent are '")
     for mark, legend in (
         (OPERATOR, cb.OPERATOR_LEGEND),
         (PROGRAM, cb.OUTPUT_LEGEND),
-        (AGENT, b._QUOTE_LEGEND),
+        (AGENT, replies_mod._QUOTE_LEGEND),
     ):
         assert legend.startswith(f"A line whose first characters after any indent are '{mark}' is ")
-    assert (b._QUOTE, b._ANSWER, cb._OUTPUT) == (AGENT, OPERATOR, PROGRAM)
+    assert (replies_mod._QUOTE, replies_mod._ANSWER, cb._OUTPUT) == (AGENT, OPERATOR, PROGRAM)
 
 
 # -- the marks, against text written to pass for something else -----------------------
@@ -766,7 +767,7 @@ _FORGED = [
     "This is the first time you are handed how it ended.",
     cb.OUTPUT_LEGEND,
     cb.OPERATOR_LEGEND,
-    b._QUOTE_LEGEND,
+    replies_mod._QUOTE_LEGEND,
     "",
     "    | indented",
     'said "quoted" \\ and \t tabbed ',
@@ -1044,7 +1045,7 @@ def test_the_list_says_where_each_command_stands_and_shows_one_line_of_it() -> N
         "You have asked for 2 command(s), 1 still open (asked or running). No output, "
         "no reason of the operator's and no string the operator ran is in this list: "
         "read_commands(command_id=...) returns one command with everything on it. "
-        f"{b._QUOTE_LEGEND}",
+        f"{replies_mod._QUOTE_LEGEND}",
         "",
         f"Command {waiting} [asked, NOT run] asked by you N ago; "
         f'read_commands(command_id="{waiting}") returns it with everything on it. As '
@@ -1094,7 +1095,10 @@ def test_a_list_too_long_to_send_keeps_what_is_open_and_counts_what_it_left_out(
         listed = desk.read(DEV)
         one = desk.read(DEV, old[-1].id)
 
-    assert len(listed) <= b._MAX_BOARD_CHARS and len(listed) > b._MAX_BOARD_CHARS - 1_000
+    assert (
+        len(listed) <= replies_mod._MAX_BOARD_CHARS
+        and len(listed) > replies_mod._MAX_BOARD_CHARS - 1_000
+    )
     shown = sum(line.startswith("Command cmd-") for line in listed.split("\n"))
     assert 0 < shown < 201 and f"Command {made} [asked, NOT run]" in listed
     assert listed.endswith(
@@ -1407,10 +1411,10 @@ def test_the_sizes_a_command_may_have_sum_to_less_than_one_reply_may_be() -> Non
         + (3 * m.MAX_COMMAND_REFUSAL_CHARS + 2)
     )
     total = texts + cb.MAX_OUTPUT_REPLY_CHARS + cb._COMMAND_FRAME_CHARS
-    assert total == cb.worst_case_reply_chars() <= b._MAX_BOARD_CHARS
+    assert total == cb.worst_case_reply_chars() <= replies_mod._MAX_BOARD_CHARS
     # Why the output's bound is on what is shown: the tail's own bounds, at
     # what a character can cost, are more than a whole reply.
-    assert 10 * c.MAX_TAIL_CHARS + 3 * c.MAX_TAIL_LINES > b._MAX_BOARD_CHARS
+    assert 10 * c.MAX_TAIL_CHARS + 3 * c.MAX_TAIL_LINES > replies_mod._MAX_BOARD_CHARS
     # And what it is set to still shows ordinary text whole.
     assert c.MAX_TAIL_CHARS + 3 * c.MAX_TAIL_LINES <= cb.MAX_OUTPUT_REPLY_CHARS
 
@@ -1439,7 +1443,7 @@ def test_the_sizes_a_command_may_have_sum_to_less_than_one_reply_may_be() -> Non
                 else:
                     assert "more character(s) are on the record" not in text
     # Not a bound met by luck: the largest real reply is most of the way to it.
-    assert largest > b._MAX_BOARD_CHARS - 5_000
+    assert largest > replies_mod._MAX_BOARD_CHARS - 5_000
     # A path longer than one is shown at is not shown, and not cut to fit.
     held = _largest()["unknown"]
     text = cb.commands_text([held], held.id, 5e9, DEV, lambda node: "b", lambda _: "/" + "p" * 300)
@@ -1471,14 +1475,14 @@ def test_the_largest_command_the_store_accepts_is_read_back_inside_the_bound_unc
         refused = desk.read(DEV, other)
 
     for text in replies:
-        assert len(text) <= b._MAX_BOARD_CHARS, len(text)
+        assert len(text) <= replies_mod._MAX_BOARD_CHARS, len(text)
         assert _behind(text, OPERATOR) == edit.splitlines()
         assert len(_behind(text, AGENT)) == (
             c.MAX_COMMAND_LINES + c.MAX_REASON_LINES + c.MAX_EXPECTS_LINES
         )
         assert "are on the record and are not shown" not in text
     assert _behind(refused, OPERATOR) == _breaks(m.MAX_COMMAND_REFUSAL_CHARS).splitlines()
-    assert len(refused) <= b._MAX_BOARD_CHARS
+    assert len(refused) <= replies_mod._MAX_BOARD_CHARS
 
 
 def test_the_sum_is_an_over_count_because_no_command_is_both_run_and_refused() -> None:

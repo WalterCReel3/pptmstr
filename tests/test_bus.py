@@ -17,10 +17,10 @@ from collections.abc import Iterator
 
 import pytest
 
-from pptmstr import boardlog
-from pptmstr import bus as bus_mod
+from pptmstr import boardlog, commandbus
+from pptmstr import replies as replies_mod
 from pptmstr.bridge import Bridge
-from pptmstr.bus import _QUOTE_LEGEND, CALLED_AT_KEY, FROM_KEY, MAX_ID_CHARS, build_server
+from pptmstr.bus import CALLED_AT_KEY, FROM_KEY, build_server
 from pptmstr.effects import BoardDelivered, ClaimSettled, InboxDelivered, TaskWriteSettled
 from pptmstr.intents import (
     BoardRead,
@@ -40,6 +40,7 @@ from pptmstr.intents import (
 from pptmstr.model import (
     BEFORE_RESTART,
     MAX_CHANNEL_CHARS,
+    MAX_ID_CHARS,
     Charter,
     ClaimRefusal,
     Concern,
@@ -50,6 +51,7 @@ from pptmstr.model import (
     TaskRefusal,
     TaskState,
 )
+from pptmstr.replies import _QUOTE_LEGEND
 from pptmstr.store import Store
 from tests.mcp_wire import call_tool, list_tools
 
@@ -166,7 +168,7 @@ class _Bus:
 
     def __init__(self, bridge: Bridge, brief: str | None = None, contained: bool = False) -> None:
         self.bridge = bridge
-        self.server = build_server(_Session(bridge, brief, contained))[  # type: ignore[arg-type]
+        self.server = build_server(_Session(bridge, brief, contained), commandbus.TOOLS)[  # type: ignore[arg-type]
             "instance"
         ]
 
@@ -1313,6 +1315,19 @@ async def listed_tools(server: object) -> dict[str, dict[str, object]]:
     return {tool["name"]: tool for tool in listed["tools"]}
 
 
+class _Contained:
+    """The least of a session ``build_server`` reads: its bridge and its containment."""
+
+    def __init__(self, bridge: Bridge, contained: bool = True) -> None:
+        self.bridge = bridge
+        self.contained = contained
+
+
+def _server(session: object) -> object:
+    """The MCP server instance ``build_server`` makes for ``session``."""
+    return build_server(session, commandbus.TOOLS)["instance"]  # type: ignore[arg-type]
+
+
 def _announced_schemas(contained: bool = False) -> dict[str, dict[str, object]]:
     """
     The ``inputSchema`` for each tool as the CLI is handed it, from the real server
@@ -1328,7 +1343,7 @@ def _announced_schemas(contained: bool = False) -> dict[str, dict[str, object]]:
             self.bridge = bridge
             self.contained = contained
 
-    server = build_server(_Session(Bridge()))["instance"]  # type: ignore[arg-type]
+    server = build_server(_Session(Bridge()), commandbus.TOOLS)["instance"]  # type: ignore[arg-type]
     return asyncio.run(list_tools(server))
 
 
@@ -1342,7 +1357,7 @@ def _announced_descriptions() -> dict[str, str]:
         def __init__(self, bridge: Bridge) -> None:
             self.bridge = bridge
 
-    server = build_server(_Session(Bridge()))["instance"]  # type: ignore[arg-type]
+    server = build_server(_Session(Bridge()), commandbus.TOOLS)["instance"]  # type: ignore[arg-type]
     listed = asyncio.run(listed_tools(server))
     return {name: str(tool.get("description") or "") for name, tool in listed.items()}
 
@@ -1508,7 +1523,7 @@ def test_a_claim_with_no_task_id_asks_for_anything_claimable() -> None:
     bridge = Bridge()
     bridge.start()  # claim_task parks on a future, so this one needs the loop
     try:
-        server = build_server(_Session(bridge))["instance"]  # type: ignore[arg-type]
+        server = build_server(_Session(bridge), commandbus.TOOLS)["instance"]  # type: ignore[arg-type]
         # The stamp and nothing else: exactly what the CLI would deliver for a
         # `claim_task()` the gate has stamped.
         result = bridge.submit(call_tool(server, "claim_task", {FROM_KEY: list(DEV)}))
@@ -2298,7 +2313,7 @@ def test_the_fixture_reproduces_the_overflow() -> None:
     material has to be shown to exceed the ceiling before the bound is worth
     testing at all.
     """
-    from pptmstr.bus import _MAX_BOARD_CHARS
+    from pptmstr.replies import _MAX_BOARD_CHARS
 
     snap = _crowded_board().snapshot()
     raw = sum(len(t.detail) for t in snap.tasks.values())
@@ -2308,7 +2323,7 @@ def test_the_fixture_reproduces_the_overflow() -> None:
 
 
 def test_a_board_too_large_to_send_is_bounded() -> None:
-    from pptmstr.bus import _MAX_BOARD_CHARS
+    from pptmstr.replies import _MAX_BOARD_CHARS
 
     with _live_bus() as bus:
         text = bus.call(_crowded_board(), "read_board", {}, sender=DEV)
@@ -2332,7 +2347,8 @@ def test_the_ceiling_holds_across_board_shapes(tasks: int, notes: int) -> None:
     the notice saying the board did not fit.
     """
     from pptmstr.board import board_concerns, board_tasks
-    from pptmstr.bus import _MAX_BOARD_CHARS, _board_line
+    from pptmstr.bus import _board_line
+    from pptmstr.replies import _MAX_BOARD_CHARS
 
     snap = _crowded_board(tasks, notes).snapshot()
     rows = board_tasks(snap, LEAD[0])
@@ -2414,7 +2430,7 @@ def test_rows_survive_a_board_whose_structure_alone_exceeds_the_ceiling() -> Non
     solve, and an agent that cannot see the row it must work around has been given
     a worse answer than a long one.
     """
-    from pptmstr.bus import _MAX_BOARD_CHARS
+    from pptmstr.replies import _MAX_BOARD_CHARS
 
     store = Store()
     for i in range(400):
@@ -2636,7 +2652,8 @@ def test_the_ceiling_holds_when_rows_carry_results(tasks: int, notes: int) -> No
     exact place the ceiling was once exceeded by five characters a row.
     """
     from pptmstr.board import board_concerns, board_tasks
-    from pptmstr.bus import _MAX_BOARD_CHARS, _board_line
+    from pptmstr.bus import _board_line
+    from pptmstr.replies import _MAX_BOARD_CHARS
 
     snap = _finished_crowd(tasks, notes).snapshot()
     rows = board_tasks(snap, LEAD[0])
@@ -3231,8 +3248,9 @@ def test_a_property_is_shown_whole_on_a_board_that_cut_everything_else() -> None
     in the floor, and the ceiling still holds over it.
     """
     from pptmstr.board import board_concerns, board_tasks
-    from pptmstr.bus import _MAX_BOARD_CHARS, _board_line
+    from pptmstr.bus import _board_line
     from pptmstr.model import MAX_PROPERTY_CHARS
+    from pptmstr.replies import _MAX_BOARD_CHARS
 
     store = Store()
     held = {f"t{i}": f"{i:02d} " + "p" * (MAX_PROPERTY_CHARS - 3) for i in range(20)}
@@ -3574,8 +3592,9 @@ def test_a_digest_reply_lists_every_unverified_statement_and_incident_the_board_
     could: the counts must not move, and the reply is held to the ceiling or to
     its own structure, whichever is larger.
     """
-    from pptmstr.bus import _MAX_BOARD_CHARS, _digest_text
+    from pptmstr.bus import _digest_text
     from pptmstr.digest import digest
+    from pptmstr.replies import _MAX_BOARD_CHARS
     from tests.test_digest import (
         S1,
         broadcast_oracle,
@@ -3851,7 +3870,9 @@ def _forgery_for(field: str) -> str:
     are bounded where they are written, and every one of them still has room for
     a line break and a whole forged headline after it.
     """
-    from pptmstr.bus import MAX_ID_CHARS, MAX_LINE_CHARS, MAX_PATH_CHARS
+    from pptmstr.bus import MAX_LINE_CHARS
+    from pptmstr.model import MAX_ID_CHARS
+    from pptmstr.replies import MAX_PATH_CHARS
 
     limit = {
         "title": MAX_LINE_CHARS,
@@ -4244,14 +4265,16 @@ def test_an_id_that_is_only_a_name_is_shown_bare_and_any_other_is_delimited() ->
     paths that hold nothing the board builds a line from; and the call a cut
     notice names is written once, whichever way the id was shown.
     """
-    from pptmstr.bus import _named, _rest, _said
+    from pptmstr.bus import _rest
+    from pptmstr.effects import between_quotes
+    from pptmstr.replies import _named
 
     for bare in ("t1", "fix2-bus-subject", "pptmstr/ui/board_pane.py", "tests/*.py", "a_b.c+d@e"):
         assert _named(bare) == bare
     for odd in ("t 1", "t1·", "t[1]", "a,b", "a:b", 'a"b', "a\\b", "", "tâche"):
-        assert _named(odd) == _said(odd) and _named(odd)[0] == _named(odd)[-1] == '"'
-    assert _said('a"b\\') == '"a\\"b\\\\"'
-    assert _said("one\ntwo") == '"one two"'
+        assert _named(odd) == between_quotes(odd) and _named(odd)[0] == _named(odd)[-1] == '"'
+    assert between_quotes('a"b\\') == '"a\\"b\\\\"'
+    assert between_quotes("one\ntwo") == '"one two"'
     assert _rest(3, _named("t1")).endswith('read_task(task_id="t1") returns it whole')
     assert _rest(3, _named("t 1")).endswith('read_task(task_id="t 1") returns it whole')
 
@@ -5049,7 +5072,8 @@ def test_a_holder_is_not_recorded_as_shown_a_text_longer_than_a_reply_can_carry(
     an agent. The read still returns every character of it, and says the holder
     is not counted as having read it.
     """
-    from pptmstr.bus import _MAX_BOARD_CHARS, MAX_TEXT_CHARS
+    from pptmstr.bus import MAX_TEXT_CHARS
+    from pptmstr.replies import _MAX_BOARD_CHARS
 
     store = Store()
     with _live_bus() as bus:
@@ -5514,7 +5538,7 @@ def test_the_largest_record_any_accepted_call_can_cause_fits_the_log_with_room()
 
     name = _ASTRAL * 200
     text = _ASTRAL * bus.MAX_TEXT_CHARS
-    ident = _ASTRAL * bus.MAX_ID_CHARS
+    ident = _ASTRAL * MAX_ID_CHARS
     line = _ASTRAL * bus.MAX_LINE_CHARS
     held_to = _ASTRAL * bus.MAX_PROPERTY_CHARS
     party = (name, name)
@@ -5526,7 +5550,7 @@ def test_the_largest_record_any_accepted_call_can_cause_fits_the_log_with_room()
             declared_by=name,
             detail=text,
             depends_on=(ident,) * bus.MAX_LISTED,
-            touches=(_ASTRAL * bus.MAX_PATH_CHARS,) * bus.MAX_LISTED,
+            touches=(_ASTRAL * replies_mod.MAX_PATH_CHARS,) * bus.MAX_LISTED,
             basis="relayed",
             property=held_to,
             declared_by_id=party,
@@ -5575,7 +5599,7 @@ def test_a_specification_the_bus_accepts_is_one_a_read_can_put_in_front_of_its_r
     """
     from pptmstr import bus
 
-    assert bus.MAX_TEXT_CHARS < bus._MAX_BOARD_CHARS
+    assert bus.MAX_TEXT_CHARS < replies_mod._MAX_BOARD_CHARS
 
 
 @pytest.mark.parametrize(
@@ -5619,11 +5643,11 @@ def test_a_declaration_exactly_at_every_limit_is_accepted() -> None:
             store,
             "declare_task",
             {
-                "task_id": "i" * b.MAX_ID_CHARS,
+                "task_id": "i" * MAX_ID_CHARS,
                 "title": "t" * b.MAX_LINE_CHARS,
                 "detail": "d" * b.MAX_TEXT_CHARS,
-                "depends_on": [f"{n:0{b.MAX_ID_CHARS}d}" for n in range(b.MAX_LISTED)],
-                "touches": [f"{n:0{b.MAX_PATH_CHARS}d}" for n in range(b.MAX_LISTED)],
+                "depends_on": [f"{n:0{MAX_ID_CHARS}d}" for n in range(b.MAX_LISTED)],
+                "touches": [f"{n:0{replies_mod.MAX_PATH_CHARS}d}" for n in range(b.MAX_LISTED)],
             },
             sender=LEAD,
         )
@@ -5795,12 +5819,12 @@ def test_a_sub_agent_raises_a_decision_and_is_told_its_lead_is_woken_and_it_is_n
         f"reversible: yes; blocks t2, t1). Nothing is parked: keep working, and call "
         f'read_decisions(decision_id="{mine.id}") '
         f"when you reach what this blocks and again before you finish. It returns the "
-        f"operator's answer every time you ask. {bus_mod.WAKE_SAID_SUBAGENT} "
+        f"operator's answer every time you ask. {replies_mod.WAKE_SAID_SUBAGENT} "
         f"withdraw_decision takes the decision back if it stops mattering. It is kept in "
         f"your session's log, and is back after a restart of pptmstr once your session is "
         f"resumed."
     )
-    assert bus_mod.WAKE_SAID in lead and bus_mod.WAKE_SAID_SUBAGENT not in lead
+    assert replies_mod.WAKE_SAID in lead and replies_mod.WAKE_SAID_SUBAGENT not in lead
     assert theirs.asker == LEAD
     # Left out, it is said back as a statement and not passed over in silence.
     assert "reversible: yes; blocks nothing on the board). " in lead and theirs.blocks == ()
@@ -6166,7 +6190,8 @@ def test_the_operators_answer_has_a_mark_and_a_legend_nothing_else_uses() -> Non
     before the first line that carries it, and an agent's own text that opens
     with the mark is still behind the agent's.
     """
-    from pptmstr.bus import _ANSWER, _ANSWER_LEGEND, _QUOTE
+    from pptmstr.bus import _ANSWER_LEGEND
+    from pptmstr.replies import _ANSWER, _QUOTE
 
     assert _ANSWER == "> " and _ANSWER != _QUOTE
     assert "the operator's answer" in _ANSWER_LEGEND and "'> '" in _ANSWER_LEGEND
@@ -6341,8 +6366,12 @@ def _worst_case(store: Store) -> tuple[dict[str, object], str]:
     every text a line break, the most blocked tasks allowed, each under an id as
     long as an id may be and made only of what is escaped.
     """
-    from pptmstr.bus import MAX_ID_CHARS
-    from pptmstr.model import MAX_ANSWER_CHARS, MAX_BLOCKED_TASKS, MAX_DECISION_TEXT_CHARS
+    from pptmstr.model import (
+        MAX_ANSWER_CHARS,
+        MAX_BLOCKED_TASKS,
+        MAX_DECISION_TEXT_CHARS,
+        MAX_ID_CHARS,
+    )
 
     ids = ["\\" * (MAX_ID_CHARS - 1) + str(n) for n in range(MAX_BLOCKED_TASKS)]
     for tid in ids:
@@ -6362,7 +6391,7 @@ def test_one_decision_at_its_largest_is_read_back_inside_the_bound_with_its_answ
     the read that carries it has to fit at the largest everything in it may be
     -- for the asker and for the lead, whose reply says more around it.
     """
-    from pptmstr.bus import _MAX_BOARD_CHARS
+    from pptmstr.replies import _MAX_BOARD_CHARS
 
     store = Store()
     _team(store)
@@ -6403,8 +6432,8 @@ def test_the_sizes_a_decision_may_have_sum_to_less_than_one_reply_may_be(
 
     texts = 4 * (3 * m.MAX_DECISION_TEXT_CHARS + 2)
     answer = 3 * m.MAX_ANSWER_CHARS + 2
-    ids = m.MAX_BLOCKED_TASKS * (2 * b.MAX_ID_CHARS + 4)
-    assert texts + answer + ids + b._DECISION_FRAME_CHARS <= b._MAX_BOARD_CHARS
+    ids = m.MAX_BLOCKED_TASKS * (2 * MAX_ID_CHARS + 4)
+    assert texts + answer + ids + b._DECISION_FRAME_CHARS <= replies_mod._MAX_BOARD_CHARS
     assert m.MAX_DECISION_TEXT_CHARS < m.MAX_ANSWER_CHARS < b.MAX_TEXT_CHARS
 
     store = Store()
@@ -6417,7 +6446,10 @@ def test_the_sizes_a_decision_may_have_sum_to_less_than_one_reply_may_be(
         by_lead = bus.call(store, "read_decisions", {"decision_id": made}, sender=LEAD)
     frame = len(by_lead) - texts - answer - ids
     assert 0 < frame <= b._DECISION_FRAME_CHARS, frame
-    assert "b" * b._MAX_ROLE_CHARS in by_lead and "b" * (b._MAX_ROLE_CHARS + 1) not in by_lead
+    assert (
+        "b" * replies_mod._MAX_ROLE_CHARS in by_lead
+        and "b" * (replies_mod._MAX_ROLE_CHARS + 1) not in by_lead
+    )
 
 
 def test_a_list_of_decisions_fits_the_bound_however_many_there_are_and_says_what_it_left_out() -> (
@@ -6428,9 +6460,9 @@ def test_a_list_of_decisions_fits_the_bound_however_many_there_are_and_says_what
     without limit. It is filled against the bound, keeps the open ones and the
     unread endings ahead of the rest, and counts what did not fit.
     """
-    from pptmstr.bus import _MAX_BOARD_CHARS
     from pptmstr.intents import DecisionRaised, DecisionsRead
     from pptmstr.model import Decision, Standing
+    from pptmstr.replies import _MAX_BOARD_CHARS
 
     store = Store()
     _team(store)
@@ -6639,7 +6671,7 @@ def test_a_holder_on_its_third_long_specification_is_shown_it_in_a_reply_that_fi
     The current one is whole and ahead of everything else an agent wrote; the
     earlier two are what gave way, each behind the part that returns it.
     """
-    from pptmstr.bus import _MAX_BOARD_CHARS
+    from pptmstr.replies import _MAX_BOARD_CHARS
 
     texts = {n: f"{n}" * 20_000 for n in (1, 2, 3)}
     store = Store()
@@ -6679,7 +6711,8 @@ def test_a_maximal_task_is_read_inside_the_bound_with_its_specification_whole() 
     under the ceiling, with the specification the only one that is all there --
     and every other one whole behind the part its cut names.
     """
-    from pptmstr.bus import _MAX_BOARD_CHARS, MAX_LINE_CHARS, MAX_TEXT_CHARS
+    from pptmstr.bus import MAX_LINE_CHARS, MAX_TEXT_CHARS
+    from pptmstr.replies import _MAX_BOARD_CHARS
 
     big = {name: name.upper() * MAX_TEXT_CHARS for name in "svwrnabc"}
     store = Store()
@@ -7775,8 +7808,8 @@ def test_a_claimer_that_types_the_closing_words_is_still_an_agent_speaking() -> 
 
 
 def test_a_crowded_board_cuts_the_operators_reason_without_changing_whose_it_is() -> None:
-    from pptmstr.bus import _MAX_BOARD_CHARS
     from pptmstr.intents import TaskClosed
+    from pptmstr.replies import _MAX_BOARD_CHARS
 
     store = Store()
     _team(store)
@@ -7883,6 +7916,117 @@ _COMMAND_ASKED: dict[str, object] = {
 }
 
 
+# Every tool each kind of server announces, whole: name, description and schema, as
+# ``tools/list`` hands them to the CLI, serialised with sorted keys. A digest and not
+# a literal because the listing is some 60 KB of descriptions; what it holds is
+# that a move of the helpers they are built with changed none of it.
+_ANNOUNCED_DIGEST = {
+    False: "c154a6babd17e9ddd52f6ede0e9060fe7224baf341da6950616678ea045aaa84",
+    True: "988d508cd6399759ada064cec8e8d5b130014d4619db4f53c17e8e2fb9a796de",
+}
+
+
+@pytest.mark.parametrize("contained", [False, True])
+def test_every_server_announces_the_tools_it_did_byte_for_byte(contained: bool) -> None:
+    """
+    The registered set by name, and every description and schema by digest. A
+    change here is a change to what an agent is told the tools are: when it is
+    meant, recompute the digest; when it is not, the change is the defect.
+    """
+    import asyncio
+    import hashlib
+    import json
+
+    announced = asyncio.run(listed_tools(_server(_Contained(Bridge(), contained))))
+    expected = {
+        "post_concern",
+        "read_inbox",
+        "send_to_peer",
+        "read_peer_messages",
+        "withdraw_peer_message",
+        "read_board",
+        "read_task",
+        "read_digest",
+        "why_blocked",
+        "ready",
+        "claim_task",
+        "declare_task",
+        "amend_task",
+        "complete_task",
+        "release_task",
+        "withdraw_task",
+        "raise_decision",
+        "read_decisions",
+        "withdraw_decision",
+    }
+    assert set(announced) == (expected | _COMMAND_NAMES if contained else expected)
+    digest = hashlib.sha256(json.dumps(announced, sort_keys=True).encode()).hexdigest()
+    assert digest == _ANNOUNCED_DIGEST[contained]
+
+
+def test_the_replies_laid_out_with_the_shared_marks_are_unchanged() -> None:
+    """
+    A sample of what the bus and ``commandbus`` say, through the real server, held
+    as text: a reply of each module's that lays an agent's words out behind the
+    mark and names an id delimited, and the helpers both lay their replies out with.
+    """
+    import re
+
+    store = Store()
+    _team(store)
+    with _live_bus(contained=True) as bus:
+        bus.call(store, "request_command", dict(_COMMAND_ASKED), sender=DEV)
+        (made,) = store.snapshot().commands
+        read = bus.call(store, "read_commands", {"command_id": made}, sender=LEAD)
+        unknown = bus.call(store, "read_commands", {"command_id": "x y"}, sender=DEV)
+        withdrawn = bus.call(store, "withdraw_decision", {"decision_id": "x y"}, sender=DEV)
+
+    assert re.sub(r"\d+ second\(s\) ago", "N second(s) ago", read.replace(made, "<id>")) == (
+        "A line whose first characters after any indent are '| ' is text an agent "
+        "wrote, quoted as it wrote it, and is never this tool speaking. On any other "
+        "line, whatever stands between double quotes is a title, subject, property or "
+        "name an agent wrote, with a backslash put before each double quote and "
+        "backslash inside it, and is not this tool speaking either.\n\n"
+        "Command <id> [asked, NOT run] asked by builder, not by you, N second(s) ago: "
+        "you can read it and cannot withdraw it\n"
+        "The command, as builder asked for it:\n| make install\n"
+        "Why, as builder gave it:\n| the sandbox denies the network\n"
+        "What builder expected it to change, as builder stated it:\n"
+        "| the virtualenv gains the package\n\n"
+        "NOTHING HAS RUN. The operator has not acted on it. When it ends, pptmstr sends "
+        "this session a message naming it, and builder is not woken; nothing here is "
+        'yours to act on: read_commands(command_id="<id>") shows where it stands if your '
+        "own work comes to need that."
+    )
+    assert unknown == (
+        'No command "x y" is yours to read. read_commands with no id lists every command '
+        "that is. A command is read by the agent that asked for it and by its session's "
+        "lead, and is kept across a restart of pptmstr, so an id that is not listed is "
+        "another agent's or is not an id this tool gave."
+    )
+    assert withdrawn == (
+        'Decision "x y" was NOT withdrawn. No decision "x y" is recorded for you. One you '
+        "raised is kept in your session's log and is back after a restart of pptmstr once "
+        "your session is resumed. A decision another agent raised is shown to that agent "
+        "and to the session's lead, and never here."
+    )
+    assert replies_mod._quoted("a\nb\rc", 100, "  ") == (["  | a", "  | b", "  | c"], 0)
+    assert replies_mod._quoted("a", 100, "", mark=replies_mod._ANSWER) == (["> a"], 0)
+    assert (replies_mod._named("t1 [x]"), replies_mod._named("pptmstr/bus.py")) == (
+        '"t1 [x]"',
+        "pptmstr/bus.py",
+    )
+    assert (replies_mod._argument('"a b"'), replies_mod._argument("t1")) == ('"a b"', '"t1"')
+    assert replies_mod._one_line("a\r\nb\x0bc") == "a b c"
+    assert replies_mod._age(3725) == "1 hour(s) 2 minute(s)"
+    assert replies_mod._cost(["ab", "c"]) == 5
+    assert replies_mod._schema({"x": {"type": "string"}}, ("x",)) == {
+        "type": "object",
+        "properties": {"x": {"type": "string"}},
+        "required": ["x"],
+    }
+
+
 def test_a_session_with_no_containment_never_has_the_command_tools() -> None:
     """
     The property the tools are offered under. An uncontained session's ``Bash``
@@ -7904,19 +8048,12 @@ def test_the_command_tools_are_announced_as_their_own_module_describes_them() ->
     """
     import asyncio
 
-    from pptmstr import commandbus
     from pptmstr.bus import COMMAND_TOOLS, qualified
 
     assert {qualified(spec.name) for spec in commandbus.TOOLS} == set(COMMAND_TOOLS)
     assert {spec.name for spec in commandbus.TOOLS} == _COMMAND_NAMES
 
-    class _Contained:
-        contained = True
-
-        def __init__(self, bridge: Bridge) -> None:
-            self.bridge = bridge
-
-    server = build_server(_Contained(Bridge()))["instance"]  # type: ignore[arg-type]
+    server = _server(_Contained(Bridge()))
     announced = asyncio.run(listed_tools(server))
     for spec in commandbus.TOOLS:
         assert announced[spec.name]["description"] == spec.description
@@ -7934,7 +8071,7 @@ def test_a_session_that_cannot_say_whether_it_is_contained_is_not_given_a_server
             self.bridge = bridge
 
     with pytest.raises(AttributeError, match="contained"):
-        build_server(_Mute(Bridge()))  # type: ignore[arg-type]
+        build_server(_Mute(Bridge()), commandbus.TOOLS)  # type: ignore[arg-type]
 
 
 def test_a_request_through_the_registered_tool_reaches_the_store_and_is_answered_from_it() -> None:
@@ -9183,7 +9320,7 @@ def test_a_dry_run_and_the_real_declaration_agree_from_the_same_tool_arguments(
         for line in dry.splitlines()
         if line.startswith("- ") and (", named in" in line or ", added by" in line)
     ]
-    assert edges == [bus_mod._named(d) for d in task.depends_on]
+    assert edges == [replies_mod._named(d) for d in task.depends_on]
     # The sentences about the edges the board added are the real reply's own.
     for said in dry.splitlines():
         if said.startswith("The real reply would say: "):

@@ -49,8 +49,10 @@ honestly out of ``role_status``.
 
 **Three tools are on the server of a contained session and of no other**:
 ``request_command``, ``read_commands`` and ``withdraw_command``, whose handlers
-and words are ``commandbus``'s and which ``build_server`` registers when
-``session.contained`` says the CLI process was started with containment. They ask
+and words are ``commandbus``'s, which ``build_server`` is handed by its caller
+and registers when ``session.contained`` says the CLI process was started with
+containment. The bus imports nothing of ``commandbus``: both lay their replies
+out with ``replies``. They ask
 the operator to run a command outside the sandbox, so a session with no sandbox
 has nothing to ask for: its ``Bash`` already reaches the operator through the
 ordinary gate, under the operator's own CLI permission rules, which a command
@@ -63,12 +65,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import re
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, assert_never
+from typing import TYPE_CHECKING, Any, Protocol, assert_never
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
@@ -135,6 +136,7 @@ from .effects import (
     SessionWoken,
     TaskWriteSettled,
     WakeReason,
+    between_quotes,
     peer_identity,
     peer_text,
 )
@@ -163,6 +165,7 @@ from .model import (
     EVERY_CHANNEL,
     MAX_BLOCKED_TASKS,
     MAX_DECISION_TEXT_CHARS,
+    MAX_ID_CHARS,
     MAX_OPEN_DECISIONS_PER_ASKER,
     MAX_OPEN_SUBAGENT_DECISIONS,
     MAX_PROPERTY_CHARS,
@@ -205,10 +208,24 @@ from .model import (
     withdrawal_notice_id,
     withdrawal_reason,
 )
-
-# Re-exported: a task id is bounded wherever one is written, and ``commandbus``
-# reads the bound from here.
-from .model import MAX_ID_CHARS as MAX_ID_CHARS
+from .replies import (
+    _ANSWER,
+    _LIST_NOTICE_ROOM,
+    _MAX_BOARD_CHARS,
+    _MAX_ROLE_CHARS,
+    _QUOTE,
+    _QUOTE_LEGEND,
+    MAX_PATH_CHARS,
+    WAKE_SAID,
+    WAKE_SAID_SUBAGENT,
+    _age,
+    _argument,
+    _cost,
+    _named,
+    _one_line,
+    _quoted,
+    _schema,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to the checker
     from .driver import AgentSession
@@ -237,17 +254,8 @@ _MAX_CONCERN_CHARS = 1200
 # of it. Whether such a list exists at all is never cut -- see ``_board_line``.
 _MAX_NOT_RUN_CHARS = 1200
 
-# The whole reply. The two bounds above are per row, and twelve bounded rows still
-# came to 50.8 KB in one measured read and 62.8 KB in another -- past the tool's
-# output cap both times, so the agent that was told the board is authoritative could
-# not read it. A bound on each row is not a bound on their sum.
-#
-# The number is a judgement and the measurements are what it answers: both overflows
-# were above it, and 30,000 characters is roughly 7.5k tokens, which is a large but
-# affordable slice of a worker's context to spend on one board read. Nothing here
-# knows the tool's actual ceiling -- it is the harness's, not ours -- so this is set
-# below both observations rather than derived from it.
-_MAX_BOARD_CHARS = 30_000
+# The whole reply is bounded by ``replies._MAX_BOARD_CHARS``: the bounds above are
+# per row, and a bound on each row is not a bound on their sum.
 
 # The first line of a result, in a digest. A digest names what finished and the
 # board holds the account; a line is enough to tell which finished row to open.
@@ -298,8 +306,8 @@ MAX_LINE_CHARS = 500
 # ``model.MAX_ID_CHARS``: imported above, and defined there because a declaration's
 # provenance is bounded by it on the parked row as well as here.
 
-# One path in ``touches``.
-MAX_PATH_CHARS = 300
+# One path in ``touches`` is at most ``replies.MAX_PATH_CHARS``: imported above,
+# and defined there because ``commandbus`` lays a path out on a reply by it too.
 
 # How many entries ``depends_on`` and ``touches`` may each have.
 MAX_LISTED = 64
@@ -1010,11 +1018,6 @@ _NOT_ON_BOARD = (
 )
 
 
-def _argument(task_id: TaskId) -> str:
-    """A task id, as ``_named`` leaves it, written as a call's argument."""
-    return task_id if task_id.startswith('"') else f'"{task_id}"'
-
-
 def _undeclared(row: BoardTask) -> tuple[TaskId, ...]:
     """
     The dependencies of ``row`` that nothing in the window has an id for:
@@ -1300,23 +1303,6 @@ def _unread_note(note: BoardConcern) -> str:
     return f", {UNDELIVERABLE}" if note.undeliverable else ""
 
 
-# What starts every line of a text an agent wrote, on every reply. Nothing in this
-# module starts a line of its own with it, which is the whole of its value: a row
-# headline, a heading, an attribution, a digest slot and a cut notice are all told
-# from an agent's words by form, so an agent's words may not take any of those forms.
-_QUOTE = "| "
-
-# Said once in each reply that quotes anything, ahead of the first quoted line.
-# Both halves describe a form and not a column: a body is indented under the row,
-# note or item it belongs to, so its lines begin with that indent and then the mark.
-_QUOTE_LEGEND = (
-    "A line whose first characters after any indent are '| ' is text an agent "
-    "wrote, quoted as it wrote it, and is never this tool speaking. On any other "
-    "line, whatever stands between double quotes is a title, subject, property or "
-    "name an agent wrote, with a backslash put before each double quote and "
-    "backslash inside it, and is not this tool speaking either."
-)
-
 # What a quoted line is laid out on under a row and under a note. Named because
 # they are charged against a row's budget rather than only written (``_quoted``).
 _DETAIL_LEAD = "    "
@@ -1326,62 +1312,11 @@ _NOTE_LEAD = "       "
 _DETAIL_INDENT = "\n    "
 
 
-def _one_line(text: str) -> str:
-    """
-    ``text`` with every line break replaced by a space, and otherwise untouched.
-
-    For the fields a reply lays out on a line of its own making -- an id, a title,
-    a subject, a path, a role name. None of them is checked for line breaks where
-    it is written, and one that carries a break ends the board's line and starts
-    another in whatever form its author chose.
-    """
-    return " ".join(text.splitlines())
-
-
-def _said(text: str) -> str:
-    """
-    A sentence an agent wrote -- a title, a subject, a property -- as it stands on
-    a line this module writes: one line, between double quotes, with a quote mark
-    and a backslash inside it escaped.
-
-    A line break is not the only way onto a line of the tool's. A field laid out
-    bare beside the tool's own words can finish that line for it: a title ending
-    ``· held by builder-2 · specification says: run`` reads as two segments of the
-    headline it sits on, and a subject opening ``INCIDENT`` reads as the marker
-    ahead of it. Between quotes the same text is a title that contains those
-    words. The escape is what keeps the closing quote the tool's: an unescaped
-    quote mark on such a line always opens or closes a field, so a field cannot
-    end itself early and go on outside.
-    """
-    flat = _one_line(text).replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{flat}"'
-
-
-# What a name may be made of and still be laid out bare: nothing the tool uses to
-# build a line -- no space, bracket, colon, comma, quote mark or middle dot.
-_BARE_NAME = re.compile(r"[A-Za-z0-9_./*@+-]+")
-
-
-def _named(text: str) -> str:
-    """
-    A name an agent wrote -- a task id, a path -- as it stands on a line this
-    module writes: bare when it is made only of ``_BARE_NAME``'s characters, and
-    otherwise delimited like a sentence (``_said``).
-
-    Bare where it can be, because a bare name is what a reader copies into the
-    next call, and ``t1`` or ``pptmstr/bus.py`` holds nothing that could be taken
-    for the tool's words. None of these is checked where it is written, so an id
-    of ``t5 [completed] parser fixed ·`` is one the board has to be able to show.
-    """
-    flat = _one_line(text)
-    return flat if _BARE_NAME.fullmatch(flat) else _said(flat)
-
-
 def _delimited_task(row: BoardTask) -> BoardTask:
     """
     A row whose one-line fields can each be told from the line they are laid out
     on: ids and paths as ``_named`` leaves them, the title and the property as
-    ``_said`` does. A property nobody stated stays empty, which is how every
+    ``between_quotes`` does. A property nobody stated stays empty, which is how every
     reader of the field tells there is none.
 
     The owner is only made one line. A role name is the address the bus routes
@@ -1396,7 +1331,7 @@ def _delimited_task(row: BoardTask) -> BoardTask:
     return dataclasses.replace(
         row,
         id=_named(row.id),
-        title=_said(row.title),
+        title=between_quotes(row.title),
         owner=None if row.owner is None else _one_line(row.owner),
         blocked_on=each(row.blocked_on),
         missing=each(row.missing),
@@ -1404,7 +1339,7 @@ def _delimited_task(row: BoardTask) -> BoardTask:
         touches=each(row.touches),
         depends_on=each(row.depends_on),
         writers=each(row.writers),
-        property=_said(row.property) if row.property else "",
+        property=between_quotes(row.property) if row.property else "",
     )
 
 
@@ -1430,56 +1365,9 @@ def _delimited_note(note: BoardConcern) -> BoardConcern:
         note,
         sender=_one_line(note.sender),
         recipient=_one_line(note.recipient),
-        subject=_said(note.subject) if note.subject else "",
+        subject=between_quotes(note.subject) if note.subject else "",
         task_id=None if note.task_id is None else _named(note.task_id),
     )
-
-
-def _quoted(
-    text: str, cap: int, lead: str, spare: int | None = None, mark: str = _QUOTE
-) -> tuple[list[str], int]:
-    """
-    A text an agent wrote, as the lines it is shown on, and how many of its
-    characters were left out.
-
-    One line out for each line in, each behind ``lead`` and ``mark``: ``_QUOTE``
-    for everything an agent wrote, and ``_ANSWER`` for the one text on a board
-    that the operator typed, the reason a task was closed. Line breaks
-    are whatever ``str.splitlines`` takes for one, so a carriage return or a form
-    feed cannot stand in for the newline this removes.
-
-    ``cap`` bounds the author's characters and ``spare`` bounds what laying them
-    out costs, quote, lead and newline included (``_cost``), or None for the cap
-    alone. Both are emitted, so both are charged: measuring only the author's
-    characters is what puts a whole-board ceiling over the ceiling it claims to
-    keep, by one indent a line.
-
-    Says what it dropped for the reason every other bound in this project does: a
-    silent cap on a specification is how a worker builds confidently against half
-    of one.
-    """
-    overhead = len(lead) + len(mark) + 1
-    lines: list[str] = []
-    used = cost = 0
-    for raw in text[:cap].splitlines(keepends=True):
-        content = "".join(raw.splitlines())
-        if spare is not None:
-            room = spare - cost - overhead
-            if room < 0 or (room == 0 and content):
-                break
-            if len(content) > room:
-                lines.append(f"{lead}{mark}{content[:room]}")
-                used += room
-                break
-        lines.append(f"{lead}{mark}{content}")
-        used += len(raw)
-        cost += overhead + len(content)
-    return lines, len(text) - used
-
-
-def _cost(lines: Sequence[str]) -> int:
-    """What ``lines`` cost a budget once laid out: each one and the newline before it."""
-    return sum(len(line) + 1 for line in lines)
 
 
 def _laid(lines: Sequence[str]) -> str:
@@ -1768,7 +1656,7 @@ def _note_heading(note: BoardConcern) -> str:
 
 def _version_heading(number: int, prior: BoardVersion) -> list[str]:
     """The two lines over an earlier specification: which it was, and its property."""
-    held = property_label(_said(prior.property)) if prior.property else ""
+    held = property_label(between_quotes(prior.property)) if prior.property else ""
     return [
         f"Version {number} ({basis_label(prior.basis)}), replaced by "
         f"{_one_line(prior.replaced_by)}:",
@@ -1819,7 +1707,7 @@ def _part_text(row: BoardTask, by_id: Mapping[ConcernId, BoardConcern], part: st
     ]
     listed = ", ".join(_named(name) for name in has) if has else "none"
     return (
-        f"Task {task_id} has no part {_said(part[:MAX_ID_CHARS])}. The parts it has "
+        f"Task {task_id} has no part {between_quotes(part[:MAX_ID_CHARS])}. The parts it has "
         f"are: {listed}. Leave part out for the task itself, which always carries "
         f"its current specification whole."
     )
@@ -2039,7 +1927,7 @@ def _digest_text(digest: Digest, budget: int | None = None) -> str:
     per-piece bounds alone. ``_bounded_digest_text`` sets it.
 
     **Every label is one line, every field an agent wrote on it is delimited
-    (``_said``, ``_named``) and every piece of prose is quoted**, for the reason
+    (``between_quotes``, ``_named``) and every piece of prose is quoted**, for the reason
     ``_board_line`` gives: a slot heading is a line like any other, and a list of
     what was not run that could write one would put a forged INCIDENTS slot under
     the sentence telling the lead to report every item to the operator.
@@ -2111,7 +1999,7 @@ def _change_lines(change: TaskChange, prose: _Prose) -> list[str]:
     named = dataclasses.replace(
         change,
         task_id=_named(change.task_id),
-        title=_said(change.title),
+        title=between_quotes(change.title),
         holder=None if change.holder is None else _one_line(change.holder),
     )
     out = [f"- {change_label(named)}"]
@@ -2189,7 +2077,7 @@ def _unverified_lines(item: Unverified, prose: _Prose) -> list[str]:
     named = dataclasses.replace(
         item,
         task_id=_named(item.task_id),
-        title=_said(item.title),
+        title=between_quotes(item.title),
         owner=None if item.owner is None else _one_line(item.owner),
     )
     out = [f"- {unverified_label(named)}"]
@@ -2571,15 +2459,9 @@ def _claim_refusal_text(
 
 # -- decisions -----------------------------------------------------------------------
 
-# What starts every line the operator typed, and nothing else in any reply: an
-# answer to a decision, and the reason a task was closed. Its own mark and not
-# ``_QUOTE``: that one is announced as text an agent wrote, and these are the
-# texts here whose whole value is that no agent wrote them. A line of an agent's
-# own is always behind ``_QUOTE`` first, so no agent's text can begin a line
-# with this. Each of the two has its own legend, since no reply shows both: a
-# decision is read by its own tool.
-_ANSWER = "> "
-
+# An answer to a decision and the reason a task was closed are the operator's,
+# and are laid out behind ``replies._ANSWER``. Each of the two has its own legend,
+# since no reply shows both: a decision is read by its own tool.
 _CLOSING_LEGEND = (
     "A line whose first characters after any indent are '> ' is the reason the "
     "operator gave for closing a task, as the operator typed it, and is neither "
@@ -2614,12 +2496,6 @@ _MAX_QUESTION_LINE_CHARS = 300
 #
 # tests/test_bus.py computes the sum from the constants and builds that reply.
 _DECISION_FRAME_CHARS = 2_000
-
-# What a list of decisions keeps back for the line saying it left some out.
-_LIST_NOTICE_ROOM = 400
-
-# How much of a role name a reply about a decision shows.
-_MAX_ROLE_CHARS = 80
 
 _REVERSIBLE_SAID: dict[bool | None, str] = {True: "yes", False: "no", None: "unstated"}
 
@@ -2866,16 +2742,6 @@ def _sentence_opening(who: str | None) -> str:
     return "The" + said[3:] if said.startswith("the ") else said
 
 
-def _age(seconds: float) -> str:
-    """How long ago, in the one unit a reader needs."""
-    whole = max(0, int(seconds))
-    if whole < 60:
-        return f"{whole} second(s)"
-    if whole < 3600:
-        return f"{whole // 60} minute(s)"
-    return f"{whole // 3600} hour(s) {whole % 3600 // 60} minute(s)"
-
-
 def _answer_lines(text: str) -> list[str]:
     """
     The operator's answer, whole, as the lines it is shown on: every one behind
@@ -3045,7 +2911,7 @@ def _decision_listed(decision: Decision, now: float, asker: str | None) -> list[
     flat = _one_line(decision.question)
     lines = [
         _headline(decision, asker),
-        f"Question: {_said(flat[:_MAX_QUESTION_LINE_CHARS])}",
+        f"Question: {between_quotes(flat[:_MAX_QUESTION_LINE_CHARS])}",
     ]
     cut = len(flat) - _MAX_QUESTION_LINE_CHARS
     if cut > 0:
@@ -3524,7 +3390,10 @@ def _ready_text(ready: Sequence[Ready], rows: Sequence[BoardTask]) -> str:
     ]
     used = len(lines[0])
     for shown, r in enumerate(ready):
-        line = f"- {_named(r.task_id)} {_said(r.title)} -- {r.unblocks} pending task(s) wait on it"
+        line = (
+            f"- {_named(r.task_id)} {between_quotes(r.title)} -- "
+            f"{r.unblocks} pending task(s) wait on it"
+        )
         if used + len(line) + _CUT_NOTE_ROOM > _MAX_BOARD_CHARS:
             lines.append(
                 f"... and {len(ready) - shown} more that fewer wait on, not listed here. "
@@ -3590,17 +3459,6 @@ def _dry_run_text(
         lines.append("Its chain, nearest first:")
         lines += _chain_lines(dry.chain, snap)
     return "\n".join(lines)
-
-
-# ``commandbus`` lays its replies out with this module's marks, helpers and
-# bounds, and imports them under the names they have here: ``_ANSWER``,
-# ``_QUOTE``, ``_QUOTE_LEGEND``, ``_MAX_BOARD_CHARS``, ``_LIST_NOTICE_ROOM``,
-# ``_MAX_ROLE_CHARS``, ``_age``, ``_argument``, ``_cost``, ``_named``,
-# ``_one_line``, ``_quoted`` and ``_schema``. The underscore on each says "not
-# for a caller outside the bus", and ``commandbus`` is the bus: three more of its
-# tools, kept in a module of their own. A second spelling of a mark there would
-# be two marks the day one changed. Renaming one of these fails ``commandbus``
-# at import.
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -3788,7 +3646,7 @@ def _withdrawn_message_lines(c: Concern, peers: Mapping[str, PeerIdentity]) -> l
     return [
         "",
         f"[withdrawn by the lead of {peer_said(sender)}, at the other end of {channel}] "
-        f"{' · '.join(said)}{' ' + _said(c.subject) if c.subject else ''}",
+        f"{' · '.join(said)}{' ' + between_quotes(c.subject) if c.subject else ''}",
         *why,
     ]
 
@@ -3957,7 +3815,7 @@ def _peer_message_lines(
         "",
         f"[from the lead of {peer_said(sender)}, at the other end of "
         f"{channel}{_edited_note(c.edited)}] "
-        f"{' · '.join(said)}{' ' + _said(c.subject) if c.subject else ''}",
+        f"{' · '.join(said)}{' ' + between_quotes(c.subject) if c.subject else ''}",
         *_quoted(c.body, len(c.body), "")[0],
     ]
 
@@ -4036,35 +3894,42 @@ def _peer_messages_text(answer: PeerInboxDelivered, named: str | None, reader: s
     return "\n".join(lines)
 
 
-def _schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
+class OfferedTool(Protocol):
     """
-    An explicit JSON Schema, for the tools that have an argument a caller may omit.
+    A tool whose handler and words are another module's, as ``build_server``
+    registers it: ``commandbus.Tool`` is one.
 
-    ``@tool`` takes either spelling. Given a mapping carrying a string ``type`` and a
-    ``properties`` key it announces that mapping verbatim; given anything else it
-    reads the mapping as ``{name: python_type}`` and puts **every** declared name in
-    ``required`` (``claude_agent_sdk.__init__._build_schema``, 0.2.134). The shorthand
-    therefore cannot say "optional", and a description inviting a caller to omit an
-    argument is refused by validation before the handler's default is ever reached.
-
-    Built here rather than written out at each call site because the fallback is
-    silent: a literal dict missing either key expands as the shorthand and marks
-    everything required again, with nothing to notice.
-
-    No ``additionalProperties: false``, and it must stay that way -- the gate adds
-    ``FROM_KEY`` through ``updatedInput``, so a closed schema would reject every
-    stamped call the bus runs on.
+    Stated here by shape rather than imported, so the bus imports nothing of the
+    module whose tools it is handed; the caller that hands them over is where the
+    two are checked against each other.
     """
-    return {"type": "object", "properties": properties, "required": list(required)}
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def description(self) -> str: ...
+
+    @property
+    def schema(self) -> dict[str, Any]: ...
+
+    @property
+    def handler(
+        self,
+    ) -> Callable[[AgentSession, Bridge, NodeId, dict[str, Any]], Awaitable[str]]: ...
 
 
-def build_server(session: AgentSession) -> Any:
+def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) -> Any:
     """
     An MCP server bound to one session.
 
     Per-session rather than shared: the handlers need that session's ``Bridge`` to
     emit on and to park against, and role resolution is scoped to the agents that
     session actually spawned.
+
+    ``command_tools`` are ``commandbus.TOOLS``, handed in by the caller and
+    registered only when ``session.contained`` says so; their names are
+    ``COMMAND_TOOLS``.
     """
     bridge = session.bridge
 
@@ -4292,7 +4157,7 @@ def build_server(session: AgentSession) -> Any:
             lines += [
                 "",
                 f"[from {who}, {basis_label(c.basis)}{_edited_note(c.edited)}] "
-                f"{incident_marker(c.incident)}{_said(c.subject) if c.subject else ''}",
+                f"{incident_marker(c.incident)}{between_quotes(c.subject) if c.subject else ''}",
                 *_quoted(c.body, len(c.body), "")[0],
             ]
         return _text("\n".join(lines))
@@ -4585,11 +4450,11 @@ def build_server(session: AgentSession) -> Any:
                 "work is still blocked by unfinished dependencies."
             )
         won = answer.task
-        said = [f"You now own task {_named(won.id)}: {_said(won.title)}"]
+        said = [f"You now own task {_named(won.id)}: {between_quotes(won.title)}"]
         if won.property:
             # Ahead of the specification, where the board puts it: the claimer is
             # the reader the sentence is for.
-            said.append(property_label(_said(won.property)))
+            said.append(property_label(between_quotes(won.property)))
         # Always, the first version included: it is the number a later
         # "specification v3" on the board is read against.
         said.append(f"You were handed version {won.version} of its specification.")
@@ -4632,7 +4497,8 @@ def build_server(session: AgentSession) -> Any:
             # false hands back the whole board to a caller that asked for less,
             # and taken as true hides finished tasks from one that did not.
             return _text(
-                f"The board was NOT read: open_only is {_said(str(args.get('open_only')))}, "
+                "The board was NOT read: open_only is "
+                f"{between_quotes(str(args.get('open_only')))}, "
                 f"and it takes true or false."
             )
         request_id = f"b-{uuid.uuid4().hex[:12]}"
@@ -4924,7 +4790,7 @@ def build_server(session: AgentSession) -> Any:
             # Refused before anything else: read as false, a dry run the caller
             # meant would put a task on the board.
             return _text(
-                f"Nothing was declared: dry_run is {_said(str(args.get('dry_run')))}, and "
+                f"Nothing was declared: dry_run is {between_quotes(str(args.get('dry_run')))}, and "
                 f"it takes true or false."
             )
         task_id = str(args.get("task_id", "")).strip() or f"t-{uuid.uuid4().hex[:8]}"
@@ -5763,18 +5629,15 @@ def build_server(session: AgentSession) -> Any:
     # The session's own answer and no default: a session object that cannot say
     # whether it is contained raises here and is offered nothing.
     if session.contained:
-        # Imported here and not at the top: ``commandbus`` imports this module
-        # when it loads.
-        from . import commandbus
 
-        def offered(spec: commandbus.Tool) -> Any:
+        def offered(spec: OfferedTool) -> Any:
             @tool(spec.name, spec.description, spec.schema)
             async def call(args: dict[str, Any]) -> dict[str, Any]:
                 return _text(await spec.handler(session, bridge, _sender(args), args))
 
             return call
 
-        tools += [offered(spec) for spec in commandbus.TOOLS]
+        tools += [offered(spec) for spec in command_tools]
     return create_sdk_mcp_server(SERVER_NAME, "1.0.0", tools)
 
 
@@ -5814,8 +5677,9 @@ PEER_TOOLS = frozenset(
 
 # The three tools only a contained session's server has, which the gate stamps
 # for that session and for no other. Spelled here and not read off
-# ``commandbus.TOOLS`` because that module imports this one when it loads;
-# tests/test_bus.py holds the two spellings and the server's own list together.
+# ``commandbus.TOOLS`` because the bus imports nothing of that module (it is handed
+# the tools, ``build_server``); tests/test_bus.py holds the two spellings and the
+# server's own list together.
 COMMAND_TOOLS = frozenset(
     qualified(name) for name in ("request_command", "read_commands", "withdraw_command")
 )
@@ -5862,22 +5726,6 @@ WAKE_DECISIONS_NAMED = 3
 # counted. The same bound for the same reason: the ids past it are in the
 # reply ``read_peer_messages`` gives on that channel, each with its text.
 WAKE_QUESTIONS_NAMED = WAKE_DECISIONS_NAMED
-
-# What a tool reply says about being woken, to the session's lead and to a
-# sub-agent. Concerns between workers wake nobody, and neither does anything
-# for a session that is closed or has failed.
-WAKE_SAID = (
-    "Nothing interrupts a turn in progress. When the operator acts on it, pptmstr "
-    "sends this session a message of its own naming it (never the operator's "
-    "words), read as a turn of its own once any turn in progress ends: if you end "
-    "your turn to wait, that message wakes you. A closed or failed session is sent "
-    "nothing."
-)
-WAKE_SAID_SUBAGENT = (
-    "Nothing interrupts you, and you are not woken: when the operator acts on it, "
-    "pptmstr sends your lead a message of its own naming it, so your lead learns "
-    "of it even if you do not pass it on."
-)
 
 
 def _peer_wake_said(quiet: bool) -> str:

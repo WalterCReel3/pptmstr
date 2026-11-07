@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 
+from pptmstr.ui import panes
+
 BODY_PX = 16.0
 """
 The pixel height of running text until a frame says otherwise: ``theme._FONT_SIZE``.
@@ -208,13 +210,20 @@ class Pane(enum.Enum):
     BRIEF = "brief"
 
 
-PANE_LABELS: dict[Pane, str] = {
-    Pane.DETAIL: "DETAIL",
-    Pane.INBOX: "NEEDS YOU",
-    Pane.CONTEXT: "CONTEXT",
-    Pane.BOARD: "BOARD",
-    Pane.BRIEF: "BRIEF",
+PANE_DOCKS: dict[Pane, panes.Dock] = {
+    Pane.DETAIL: panes.DETAIL,
+    Pane.INBOX: panes.NEEDS_YOU,
+    Pane.CONTEXT: panes.CONTEXT,
+    Pane.BOARD: panes.BOARD,
+    Pane.BRIEF: panes.BRIEF,
 }
+"""
+The dock each switch is named for. A switch is not a dock: only five docks have
+one, and its value is the key ``settings.typeset_panes`` persists, which does
+not follow the dock's title.
+"""
+
+PANE_LABELS: dict[Pane, str] = {pane: dock.title for pane, dock in PANE_DOCKS.items()}
 """
 What the settings dialog calls each pane: the titles the panes carry.
 """

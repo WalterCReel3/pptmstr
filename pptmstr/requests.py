@@ -96,7 +96,6 @@ import itertools
 import json
 import os
 import re
-import stat
 import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -104,6 +103,7 @@ from pathlib import Path
 from typing import Any, TypeVar, assert_never, cast
 
 from .model import Basis
+from .ondisk import read_regular
 
 # Two series per directory, numbered apart. Requests have their own so that an
 # asker's numbers run 1, 2, 3 whatever else it wrote in between: a gap in a request
@@ -1292,41 +1292,6 @@ def _written(directory: Path, series: str, make: Callable[[int], _R]) -> _R | Re
         return exc.refusal
 
 
-# What one ``os.read`` asks for. The call allocates what it asks for before it knows
-# how much is there, and nearly every record is a few hundred bytes.
-_CHUNK = 1 << 16
-
-
-def _contents(path: Path) -> bytes | str:
-    """
-    The bytes of a regular file no larger than a record may be, or why it was not
-    read. Raises ``OSError`` as ``open`` does.
-
-    The file is judged through the descriptor and not by a ``stat`` of the name
-    beforehand: the name belongs to another party, which can swap what it points at
-    between a check and an open. ``O_NONBLOCK`` is what makes opening a FIFO return,
-    and ``O_NOFOLLOW`` refuses a link outright -- a record is never one, since the
-    writer links a regular file into place. The read stops one byte past the limit,
-    so a file that grows under it costs no more than one that was already too big.
-    """
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-    try:
-        status = os.fstat(fd)
-        if not stat.S_ISREG(status.st_mode):
-            return "not a regular file"
-        chunks: list[bytes] = []
-        held = 0
-        while held <= MAX_RECORD_BYTES and status.st_size <= MAX_RECORD_BYTES:
-            chunk = os.read(fd, min(_CHUNK, MAX_RECORD_BYTES + 1 - held))
-            if not chunk:
-                return b"".join(chunks)
-            chunks.append(chunk)
-            held += len(chunk)
-        return f"larger than the {MAX_RECORD_BYTES} bytes a record may be"
-    finally:
-        os.close(fd)
-
-
 def _read_one(root: Path, party: str, name: str) -> Record | Problem:
     source = f"{party}/{name}"
     match = _NAME.fullmatch(name)
@@ -1337,11 +1302,9 @@ def _read_one(root: Path, party: str, name: str) -> Record | Problem:
         # `request-7.json` and `request-0000007.json` would both read as number 7.
         return Problem(source, ProblemKind.FOREIGN, "not a record name")
     try:
-        raw = _contents(root / party / name)
+        raw = read_regular(root / party / name, MAX_RECORD_BYTES)
     except OSError as exc:
         return Problem(source, ProblemKind.UNREADABLE, str(exc))
-    if isinstance(raw, str):
-        return Problem(source, ProblemKind.UNREADABLE, raw)
     try:
         record = _decode(json.loads(raw.decode("utf-8")))
     except (ValueError, RecursionError) as exc:
