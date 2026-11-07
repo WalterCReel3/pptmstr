@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar
 
-from . import drawable
+from . import drawable, ids
 from .approval import DiffText, Policy, peer_channel
 from .command import (
     TIMEOUT_CHOICES_S,
@@ -2417,10 +2417,6 @@ _CHARTER_ECHOED = 32
 # (``MAX_CHANNEL_CHARS``) and a message id its fixed shape.
 MAX_ID_CHARS = 200
 
-# What the bus mints a concern's id as: ``c-`` and twelve hex digits
-# (``bus.post_concern``). A peer message is a concern, so ``re`` names one this way.
-_CONCERN_ID_HEX = 12
-_HEX_DIGITS = frozenset("0123456789abcdef")
 # What a channel may be called (``_channel_refusal``), and the longest it may be.
 MAX_CHANNEL_CHARS = 64
 _CHANNEL_NAME = re.compile(rf"[a-z0-9][a-z0-9._-]{{0,{MAX_CHANNEL_CHARS - 1}}}")
@@ -2992,15 +2988,6 @@ def peer_addressed(sender: NodeId, recipient: NodeId) -> bool:
     return sender[1] is None and recipient[1] is None and sender[0] != recipient[0]
 
 
-def is_concern_id(text: str) -> bool:
-    """Whether ``text`` has the shape of an id the bus gives a concern."""
-    return (
-        len(text) == 2 + _CONCERN_ID_HEX
-        and text.startswith("c-")
-        and all(c in _HEX_DIGITS for c in text[2:])
-    )
-
-
 def stated_provenance(channel: object, re: object, inside_charter: object) -> Provenance | None:
     """
     The provenance a declaration's arguments give, None when they give none, and
@@ -3010,7 +2997,7 @@ def stated_provenance(channel: object, re: object, inside_charter: object) -> Pr
     Absent and blank are both "not given", as for every optional argument. What
     is refused is a name that is not text, a channel that is not a plain name
     (``_channel_refusal``), an ``re`` that is not a concern id
-    (``is_concern_id``), a charter mark that is not yes, no or unstated
+    (``ids.is_concern_id``), a charter mark that is not yes, no or unstated
     (``Charter.stated``), and ``re`` or a stated mark with no channel, which
     would say a request arrived on nothing. Here for the reason
     ``Charter.stated`` is: the parked row and the handler read one rule, the
@@ -3038,10 +3025,10 @@ def stated_provenance(channel: object, re: object, inside_charter: object) -> Pr
     refused = _channel_refusal(on)
     if refused is not None:
         raise ValueError(refused)
-    if answers is not None and not is_concern_id(answers):
+    if answers is not None and not ids.is_concern_id(answers):
         raise ValueError(
             "re is not a message id. A peer message's id is the one the bus gave it: "
-            f"c- and {_CONCERN_ID_HEX} hex digits."
+            f"{ids.CONCERN.prefix} and {ids.CONCERN.hex_chars} hex digits."
         )
     return Provenance(on, answers, inside)
 

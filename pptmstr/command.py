@@ -18,7 +18,6 @@ The decisions this builds are in
 from __future__ import annotations
 
 import enum
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, assert_never
@@ -88,30 +87,6 @@ MAX_OPEN_SUBAGENTS = 8
 # What the operator may pick at the row, in seconds: 2m, 10m, 30m, 2h.
 TIMEOUT_CHOICES_S = (120, 600, 1_800, 7_200)
 DEFAULT_TIMEOUT_S = 600
-
-# -- ids --------------------------------------------------------------------------
-
-# ``cmd-<utc compact>-<hex>``. The handler mints the id; the two constants are
-# here so that it and ``is_valid_id`` cannot disagree about the form.
-ID_TIME_FORMAT = "%Y%m%dT%H%M%SZ"
-ID_HEX_CHARS = 12
-
-# ``[0-9]`` and not ``\d``, which in a ``str`` pattern matches every Unicode
-# decimal digit.
-_ID = re.compile(rf"cmd-[0-9]{{8}}T[0-9]{{6}}Z-[0-9a-f]{{{ID_HEX_CHARS}}}")
-
-
-def is_valid_id(s: object) -> bool:
-    """
-    Whether ``s`` has the form of a command id.
-
-    An id names a directory, so this is what stands between a string from a file
-    or an agent and a path: the form admits no separator, no dot, and no
-    character outside ASCII digits, lower-case hex and the fixed letters. The
-    whole string must match -- a trailing newline does not.
-    """
-    return isinstance(s, str) and _ID.fullmatch(s) is not None
-
 
 # -- what may be asked ------------------------------------------------------------
 

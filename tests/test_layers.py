@@ -3,7 +3,7 @@ The layer rules the tree states in prose, checked against its imports.
 
 Each rule below was a sentence in a docstring, in ``STYLE.md`` or in a planning
 record, and nothing held the code to it (``planning/2026-11-06-modules-are-named-
-for-what-they-require.md``, T3, T7 and A7). Seven are checked here:
+for-what-they-require.md``, T3, T7 and A7). Eight are checked here:
 
 1. A module whose docstring says it imports no ImGui imports no ``imgui_bundle``,
    directly in any form, and does not reach it through the imports that run when
@@ -17,6 +17,8 @@ for-what-they-require.md``, T3, T7 and A7). Seven are checked here:
 6. ``naming`` imports nothing from pptmstr, so it reaches neither ``board`` nor
    ``ui`` (A1).
 7. ``serialworker`` imports nothing from pptmstr (B3).
+8. ``ids`` imports nothing from pptmstr and calls no clock, and it is the one
+   module that imports ``uuid`` or ``secrets`` (B6).
 
 **Read from the source, never imported.** Every import is collected with ``ast``,
 including those inside a function (``lazy``) and those under ``if TYPE_CHECKING:``
@@ -24,7 +26,7 @@ including those inside a function (``lazy``) and those under ``if TYPE_CHECKING:
 covers. Importing the modules would see only the eager edges, and would need a
 working ImGui to see those.
 
-**Every exception is exact, and a stale one fails.** The tree breaks two of these
+**Every exception is exact, and a stale one fails.** The tree breaks three of these
 rules today, and each break is named below with its reason. An exception that no
 longer matches -- the edge gone, or changed kind -- fails with a request to delete
 it, so the lists shrink as the breaks are fixed (A6) rather than outliving them.
@@ -895,3 +897,55 @@ def test_serialworker_imports_nothing_from_pptmstr() -> None:
         edge for edge in imports_of("pptmstr.serialworker") if edge.target.startswith("pptmstr")
     ]
     assert not found, ", ".join(f"{edge.target} ({edge.kind}, line {edge.line})" for edge in found)
+
+
+# -- 8. ids owns minting, and imports nothing of pptmstr ---------------------------
+
+IDS = "pptmstr.ids"
+_ENTROPY = frozenset({"uuid", "secrets"})
+
+# Every module but ``ids`` that imports an entropy source, with why. Each line
+# goes when its mints move (planning/2026-11-07-channels-and-ids-have-one-owner-
+# each.md, steps 1 and 8).
+MINTS_ELSEWHERE: dict[tuple[str, str], str] = {
+    # ``link_leads`` mints a channel's id; it moves with the channel steps.
+    ("pptmstr.app", "uuid"): "a channel id, not yet moved",
+    # The session id, a parked call's pending id and an anonymous call key: step 8.
+    ("pptmstr.driver", "uuid"): "driver's mints, step 8",
+    # ``mint_tag`` is a capability secret for the runner protocol, not an id.
+    ("pptmstr.commandrun", "secrets"): "a secret, not an id",
+}
+
+
+def test_ids_imports_nothing_from_pptmstr() -> None:
+    """
+    ``model`` reads id shapes from ``ids``, so an edge back of any kind is a cycle.
+    """
+    found = [edge for edge in imports_of(IDS) if edge.target.startswith("pptmstr")]
+    assert not found, ", ".join(f"{edge.target} ({edge.kind}, line {edge.line})" for edge in found)
+
+
+def test_ids_reads_no_clock() -> None:
+    """
+    A command's stamp is the caller's wall-clock reading, handed in: the same one
+    the command's files are stamped with.
+    """
+    found = [call for call in calls_of(IDS) if call.dotted in _CLOCKS]
+    assert not found, ", ".join(f"{call.dotted} in {call.function}" for call in found)
+
+
+def test_only_ids_imports_an_entropy_source() -> None:
+    seen = {
+        (edge.source, edge.target.split(".")[0])
+        for edge in imports()
+        if edge.target.split(".")[0] in _ENTROPY and edge.source != IDS
+    }
+    new = seen - MINTS_ELSEWHERE.keys()
+    stale = MINTS_ELSEWHERE.keys() - seen
+    assert not new, "mint through pptmstr.ids instead: " + ", ".join(
+        f"{source} imports {target}" for source, target in sorted(new)
+    )
+    assert not stale, "no longer imported, delete from MINTS_ELSEWHERE: " + ", ".join(
+        f"{source} -> {target}" for source, target in sorted(stale)
+    )
+    assert any(edge.target == "uuid" for edge in imports_of(IDS)), "ids no longer mints"

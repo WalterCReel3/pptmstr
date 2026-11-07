@@ -351,7 +351,7 @@ class PeerSent:
 
     ``node_id`` is the gate's, as on ``ConcernPosted``, and is the sender:
     nothing the sender wrote names who is speaking. ``concern_id`` is minted by
-    the bus in the shape ``model.is_concern_id`` reads, so a declaration's
+    the bus in the shape ``ids.is_concern_id`` reads, so a declaration's
     ``re`` can name it. ``edited`` is the gate's stamp.
 
     **It reaches only the link it was written for.** ``called_at`` is the

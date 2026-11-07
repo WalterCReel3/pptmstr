@@ -33,6 +33,7 @@ from pptmstr.effects import (
     WakeReason,
     peer_identity,
 )
+from pptmstr.ids import is_concern_id
 from pptmstr.intents import (
     AgentFinished,
     AgentResumed,
@@ -58,7 +59,6 @@ from pptmstr.model import (
     PeerWithdrawRefusal,
     Snapshot,
     Unplaced,
-    is_concern_id,
 )
 from pptmstr.store import Store, _apply, _concern_wake
 from tests.test_bus import _live_bus

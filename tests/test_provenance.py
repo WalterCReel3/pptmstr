@@ -19,6 +19,7 @@ import pytest
 from pptmstr import boardlog, drawable
 from pptmstr.boardfacts import Fact, outcomes
 from pptmstr.boardlog import Clock, RestoredTask
+from pptmstr.ids import is_concern_id
 from pptmstr.intents import AgentSpawned, BoardRestored, Intent, TaskAmended, TaskDeclared
 from pptmstr.journal import codec
 from pptmstr.journal import files as journal_files
@@ -31,7 +32,6 @@ from pptmstr.model import (
     Snapshot,
     Task,
     Unplaced,
-    is_concern_id,
     stated_provenance,
 )
 from pptmstr.store import _apply

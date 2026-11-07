@@ -44,11 +44,11 @@ from pptmstr.command import (
     TimedOut,
     Withdrawn,
     command_refusal,
-    is_valid_id,
     precludes_run,
     ran,
     request_refusal,
 )
+from pptmstr.ids import ID_HEX_CHARS, ID_TIME_FORMAT, is_command_id
 from pptmstr.ui import command_view
 
 ASKED = "make install"
@@ -449,11 +449,11 @@ def test_bash_reads_a_leading_dash_or_plus_as_options_and_nothing_else_so() -> N
 
 
 def test_an_id_minted_from_the_two_constants_is_valid() -> None:
-    stamp = datetime(2026, 10, 13, 10, 15, 0, tzinfo=UTC).strftime(c.ID_TIME_FORMAT)
+    stamp = datetime(2026, 10, 13, 10, 15, 0, tzinfo=UTC).strftime(ID_TIME_FORMAT)
     assert stamp == "20261013T101500Z"
-    assert is_valid_id(f"cmd-{stamp}-{'0123456789abcdef'[: c.ID_HEX_CHARS]}")
-    assert is_valid_id("cmd-20261013T101500Z-0123456789ab")
-    assert c.ID_HEX_CHARS == 12
+    assert is_command_id(f"cmd-{stamp}-{'0123456789abcdef'[: ID_HEX_CHARS]}")
+    assert is_command_id("cmd-20261013T101500Z-0123456789ab")
+    assert ID_HEX_CHARS == 12
 
 
 @pytest.mark.parametrize(
@@ -486,7 +486,7 @@ def test_an_id_minted_from_the_two_constants_is_valid() -> None:
     ],
 )
 def test_nothing_else_is_an_id_and_so_nothing_else_names_a_directory(bad: Any) -> None:
-    assert is_valid_id(bad) is False
+    assert is_command_id(bad) is False
 
 
 # -- bounds ------------------------------------------------------------------------

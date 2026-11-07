@@ -74,7 +74,6 @@ from .. import commandfile, commandtext
 from ..command import (
     COMMAND_TAG,
     DEFAULT_TIMEOUT_S,
-    ID_HEX_CHARS,
     MAX_REASON_CHARS,
     MAX_TAIL_CHARS,
     TIMEOUT_CHOICES_S,
@@ -97,6 +96,7 @@ from ..command import (
     ran,
 )
 from ..commandrun import PROFILE_WARNING
+from ..ids import ID_HEX_CHARS
 from ..theme import Color, P, hint_colour
 from . import board_pane, decision_view, widgets
 from .clip import clip

@@ -107,8 +107,8 @@ from .command import (
     TimedOut,
     Withdrawn,
     is_tag_digest,
-    is_valid_id,
 )
+from .ids import is_command_id
 from .ondisk import create_once, read_regular, sync_directory
 
 # The format this build writes, and the newest whose directory it adds to.
@@ -207,11 +207,11 @@ def command_dir(session_id: str, command_id: str, root: Path | None = None) -> P
     """
     One command's directory, or None when either id is not one.
 
-    ``command.is_valid_id`` is what stands between ``command_id`` and a path, and
+    ``ids.is_command_id`` is what stands between ``command_id`` and a path, and
     it is asked here so that no function of this module can join anything else.
     """
     base = commands_dir(session_id, root)
-    if base is None or not is_valid_id(command_id):
+    if base is None or not is_command_id(command_id):
         return None
     return base / command_id
 
@@ -686,7 +686,7 @@ def restore(session_id: str, root: Path | None = None) -> Restored:
             taken = list(itertools.islice(entries, MAX_COMMANDS + 1))
         for entry in taken[:MAX_COMMANDS]:
             with contextlib.suppress(OSError):
-                if is_valid_id(entry.name) and entry.is_dir(follow_symlinks=False):
+                if is_command_id(entry.name) and entry.is_dir(follow_symlinks=False):
                     ids.append(entry.name)
     except FileNotFoundError:
         return Restored()

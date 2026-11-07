@@ -38,16 +38,13 @@ The decisions this builds are in
 from __future__ import annotations
 
 import time
-import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, assert_never
 
-from . import commandfile, drawable
+from . import commandfile, drawable, ids
 from .bridge import Bridge
 from .command import (
-    ID_HEX_CHARS,
-    ID_TIME_FORMAT,
     MAX_COMMAND_CHARS,
     MAX_COMMAND_LINES,
     MAX_COMMAND_SEGMENTS,
@@ -892,9 +889,8 @@ async def request_command(
     # The wall clock: a command's stamps are written to files beside the
     # runner's own, and the frame's clock is monotonic.
     at = time.time()
-    stamp = time.strftime(ID_TIME_FORMAT, time.gmtime(at))
-    command_id = f"cmd-{stamp}-{uuid.uuid4().hex[:ID_HEX_CHARS]}"
-    request_id = f"k-{uuid.uuid4().hex[:12]}"
+    command_id = ids.command(at)
+    request_id = ids.request()
     future = bridge.ask(
         request_id,
         CommandSettled(
@@ -963,7 +959,7 @@ async def read_commands(
     """
     wanted = str(args.get("command_id") or "").strip() or None
     now = time.time()
-    request_id = f"j-{uuid.uuid4().hex[:12]}"
+    request_id = ids.request()
     # The fallback is no answer at all: an empty tuple would say this agent may
     # read none, which nobody established.
     future = bridge.ask(request_id, CommandsDelivered(request_id=request_id, commands=None))
@@ -992,7 +988,7 @@ async def withdraw_command(
     """
     command_id = str(args.get("command_id") or "").strip()
     named = _named(command_id[:MAX_ID_CHARS])
-    request_id = f"x-{uuid.uuid4().hex[:12]}"
+    request_id = ids.request()
     future = bridge.ask(
         request_id,
         CommandSettled(

@@ -66,14 +66,13 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
-import uuid
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, assert_never
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from . import boardgraph, brief, drawable
+from . import boardgraph, brief, drawable, ids
 from .board import (
     UNDELIVERABLE,
     BoardConcern,
@@ -195,7 +194,6 @@ from .model import (
     channel_refusal,
     closing_result,
     is_closing_notice,
-    is_concern_id,
     is_operator,
     is_withdrawal_notice,
     kept_provenance,
@@ -3513,7 +3511,7 @@ def _stated_peer_message(args: Mapping[str, Any]) -> _PeerMessage | str:
     if re_raw is not None and not isinstance(re_raw, str):
         return "re is not text. It is a message id: give it as a string, or omit it."
     answers = (re_raw or "").strip() or None
-    if answers is not None and not is_concern_id(answers):
+    if answers is not None and not ids.is_concern_id(answers):
         return (
             "re is not a message id. A peer message's id is the one the bus gave it: "
             "c- and 12 hex digits, as read_peer_messages shows it."
@@ -3939,7 +3937,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         the store never answered. A read of its own, for a handler that has to know
         something about a task before or after it writes.
         """
-        request_id = f"v-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = bridge.ask(request_id, BoardDelivered(request_id=request_id, tasks=()))
         bridge.emit(BoardRead(node_id=me, request_id=request_id))
         answer = await future
@@ -3955,7 +3953,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         filed to the agent that held it (``model.withdrawal_notice_id``), or None
         for either that is not there or when the store never answered.
         """
-        request_id = f"v-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = bridge.ask(request_id, BoardDelivered(request_id=request_id, tasks=()))
         bridge.emit(BoardRead(node_id=me, request_id=request_id))
         answer = await future
@@ -3987,7 +3985,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         The id of every task on ``me``'s board now, or None when the store never
         answered -- which is not an empty board.
         """
-        request_id = f"v-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         unanswered = BoardDelivered(request_id=request_id, tasks=())
         future = bridge.ask(request_id, unanswered)
         bridge.emit(BoardRead(node_id=me, request_id=request_id))
@@ -4011,7 +4009,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         asked of this one snapshot, so a reply never mixes two moments of the
         board.
         """
-        request_id = f"q-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = _park(bridge, request_id)
         bridge.emit(BoardRead(node_id=me, request_id=request_id))
         answer = await future
@@ -4093,8 +4091,8 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
             )
 
         concern = Concern(
-            # The shape ``model.is_concern_id`` reads a declaration's ``re`` by.
-            id=f"c-{uuid.uuid4().hex[:12]}",
+            # The shape ``ids.is_concern_id`` reads a declaration's ``re`` by.
+            id=ids.concern(),
             sender=sender,
             recipient=recipient,
             subject=subject,
@@ -4134,7 +4132,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
     )
     async def read_inbox(args: dict[str, Any]) -> dict[str, Any]:
         me = _sender(args)
-        request_id = f"r-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         # Registered before the intent is emitted. Reversed, the UI thread could
         # apply and answer before the future exists, and this agent would wait
         # forever on a reply that had nowhere to land.
@@ -4219,10 +4217,10 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
             return _text(f"{refused} {stated}")
         if sender[1] is not None:
             return _text(f"{refused} {_peer_refusal_text(PeerRefusal.NOT_A_LEAD, stated.channel)}")
-        # Minted here in the shape ``model.is_concern_id`` reads, so a peer's
+        # Minted here in the shape ``ids.is_concern_id`` reads, so a peer's
         # declaration can name this message in its ``re``.
-        concern_id = f"c-{uuid.uuid4().hex[:12]}"
-        request_id = f"p-{uuid.uuid4().hex[:12]}"
+        concern_id = ids.concern()
+        request_id = ids.request()
         future = bridge.ask(
             request_id, PeerSettled(request_id=request_id, refusal=PeerRefusal.NOT_APPLIED)
         )
@@ -4305,7 +4303,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
                 "to no other agent, so a sub-agent has none. Your lead reads them, "
                 "and passes on what is yours as a task or a concern."
             )
-        request_id = f"m-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = bridge.ask(request_id, PeerInboxDelivered(request_id=request_id, concerns=None))
         bridge.emit(
             PeerInboxRead(
@@ -4370,7 +4368,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         too_long = _length_refusal("reason", reason, MAX_WITHDRAWAL_REASON_CHARS)
         if too_long is not None:
             return _text(f"{refused} {too_long}")
-        request_id = f"x-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = bridge.ask(
             request_id,
             PeerWithdrawSettled(request_id=request_id, refusal=PeerWithdrawRefusal.NOT_APPLIED),
@@ -4419,7 +4417,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
     async def claim_task(args: dict[str, Any]) -> dict[str, Any]:
         me = _sender(args)
         wanted = str(args.get("task_id", "")).strip() or None
-        request_id = f"k-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = bridge.ask(request_id, ClaimSettled(request_id=request_id, task=None))
         bridge.emit(TaskClaimRequested(node_id=me, request_id=request_id, task_id=wanted))
         answer = await future
@@ -4501,7 +4499,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
                 f"{between_quotes(str(args.get('open_only')))}, "
                 f"and it takes true or false."
             )
-        request_id = f"b-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = bridge.ask(request_id, BoardDelivered(request_id=request_id, tasks=()))
         bridge.emit(BoardRead(node_id=me, request_id=request_id))
         answer = await future
@@ -4559,7 +4557,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
     async def read_task(args: dict[str, Any]) -> dict[str, Any]:
         me = _sender(args)
         task_id = str(args.get("task_id", "")).strip()
-        request_id = f"o-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         # The same question ``read_board`` asks, and the same answer: one task is
         # found in the board the store projects for this sender rather than by a
         # lookup of its own, so there is no second scoping rule to keep in step
@@ -4635,7 +4633,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
     )
     async def read_digest(args: dict[str, Any]) -> dict[str, Any]:
         me = _sender(args)
-        request_id = f"g-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         # The fallback is no digest at all. An empty one would be read as "nothing
         # changed and nothing is unverified", which at shutdown nobody established.
         future = bridge.ask(request_id, DigestDelivered(request_id=request_id, digest=None))
@@ -4793,7 +4791,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
                 f"Nothing was declared: dry_run is {between_quotes(str(args.get('dry_run')))}, and "
                 f"it takes true or false."
             )
-        task_id = str(args.get("task_id", "")).strip() or f"t-{uuid.uuid4().hex[:8]}"
+        task_id = str(args.get("task_id", "")).strip() or ids.task()
         raw_deps = args.get("depends_on") or []
         deps = tuple(str(d).strip() for d in raw_deps if str(d).strip())
         raw_touches = args.get("touches") or []
@@ -4891,7 +4889,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
             if unkept:
                 rehearsal += f"\nThe real reply would say:{unkept}"
             return _text(rehearsal)
-        request_id = f"d-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = _park(bridge, request_id)
         bridge.emit(TaskDeclared(task=task, node_id=me, request_id=request_id))
 
@@ -5022,7 +5020,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
             else ""
         )
         at = time.monotonic()
-        request_id = f"a-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = _park(bridge, request_id)
         bridge.emit(
             TaskAmended(
@@ -5114,7 +5112,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         listed_cut = ""
         if not_run:
             not_run, listed_cut = _kept("list of what was not run", not_run)
-        request_id = f"f-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = _park(bridge, request_id)
         bridge.emit(
             TaskCompleted(
@@ -5189,7 +5187,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
     async def release_task(args: dict[str, Any]) -> dict[str, Any]:
         me = _sender(args)
         task_id = str(args.get("task_id", "")).strip()
-        request_id = f"x-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = _park(bridge, request_id)
         bridge.emit(
             TaskReleased(node_id=me, task_id=task_id, request_id=request_id, at=time.monotonic())
@@ -5257,7 +5255,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         if too_long is not None:
             return _text(f"{refused} {too_long}")
         edited = bool(args.get(EDITED_KEY))
-        request_id = f"w-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = _park(bridge, request_id)
         bridge.emit(
             TaskWithdrawn(
@@ -5452,9 +5450,9 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         # Minted here and never read from the arguments: the store refuses an id
         # it already holds and cannot tell a minted one from one an agent chose,
         # so an id taken from a caller would let it aim at another decision.
-        decision_id = f"dq-{uuid.uuid4().hex[:12]}"
+        decision_id = ids.decision()
         at = time.monotonic()
-        request_id = f"q-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = bridge.ask(
             request_id, DecisionSettled(request_id=request_id, refusal=DecisionRefusal.NOT_APPLIED)
         )
@@ -5550,7 +5548,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         me = _sender(args)
         wanted = str(args.get("decision_id") or "").strip() or None
         now = time.monotonic()
-        request_id = f"u-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         # The fallback is no answer at all, for ``read_digest``'s reason: an
         # empty list says this agent raised nothing, which nobody established.
         future = bridge.ask(request_id, DecisionsDelivered(request_id=request_id, decisions=None))
@@ -5582,7 +5580,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         root = me[1] is None
         decision_id = str(args.get("decision_id") or "").strip()
         named = _named(decision_id[:MAX_ID_CHARS])
-        request_id = f"w-{uuid.uuid4().hex[:12]}"
+        request_id = ids.request()
         future = bridge.ask(
             request_id, DecisionSettled(request_id=request_id, refusal=DecisionRefusal.NOT_APPLIED)
         )

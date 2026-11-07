@@ -50,6 +50,7 @@ from pptmstr.command import (
     Withdrawn,
 )
 from pptmstr.commandtext import visible
+from pptmstr.ids import is_command_id
 from pptmstr.intents import (
     AgentSpawned,
     CommandApproved,
@@ -219,7 +220,7 @@ def test_an_accepted_request_says_nothing_has_run_and_to_carry_on() -> None:
         lead = desk.call(cb.request_command, _ASKED, LEAD)
 
     second = said.split()[1]
-    assert second != mine and c.is_valid_id(second)
+    assert second != mine and is_command_id(second)
     assert said == (
         f"Command {second} is in front of the operator. NOTHING HAS RUN, and nothing "
         f"will until the operator has read the exact string and run it themselves. "
@@ -268,7 +269,7 @@ def test_a_request_is_recorded_as_sent_under_the_senders_name_and_the_wall_clock
     after = time.time()
 
     assert (held.asked, held.reason, held.asker) == (sent, " why \n", DEV)
-    assert c.is_valid_id(made) and made != "cmd-20200101T000000Z-aaaaaaaaaaaa"
+    assert is_command_id(made) and made != "cmd-20200101T000000Z-aaaaaaaaaaaa"
     assert made.startswith(time.strftime("cmd-%Y%m%dT%H", time.gmtime(held.asked_at)))
     assert before <= held.asked_at <= after
     assert held.is_open and held.run is None and held.first_delivered_at is None

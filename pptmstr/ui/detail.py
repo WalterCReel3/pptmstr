@@ -93,6 +93,7 @@ from ..approval import (
 from ..bridge import Bridge
 from ..command import CommandId
 from ..effects import peer_identity, peer_text
+from ..ids import is_concern_id
 from ..model import (
     WITHDRAW_PEER_TOOL,
     Answered,
@@ -119,7 +120,6 @@ from ..model import (
     ThreadWakeHeld,
     WakeChainHeld,
     Withdrawn,
-    is_concern_id,
     stated_flag,
 )
 from ..theme import OBLIGATION_GLYPH, Color, P

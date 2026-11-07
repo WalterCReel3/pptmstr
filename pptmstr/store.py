@@ -46,7 +46,6 @@ from .command import (
     Refused,
     RequestRefusal,
     Run,
-    is_valid_id,
     request_refusal,
 )
 from .command import Withdrawn as CommandTakenBack
@@ -74,6 +73,7 @@ from .effects import (
     peer_forms,
     peer_identity,
 )
+from .ids import is_command_id, is_concern_id
 from .intents import (
     AgentFinished,
     AgentRemoved,
@@ -200,7 +200,6 @@ from .model import (
     closing_notice,
     closing_result,
     is_channel_name,
-    is_concern_id,
     is_operator,
     normalised_property,
     normalised_touches,
@@ -3653,7 +3652,7 @@ def _request_refusal(
     """
     asker = intent.node_id
     handed = intent.command
-    if not is_valid_id(handed.id):
+    if not is_command_id(handed.id):
         return CommandRefusal.BAD_ID
     if handed.id in snap.commands:
         return CommandRefusal.ALREADY_ASKED
@@ -3746,7 +3745,7 @@ def _with_restored(
     if intent.node_id is not None:
         return None
     if any(
-        c.is_open or c.session_id != intent.session_id or not is_valid_id(c.id)
+        c.is_open or c.session_id != intent.session_id or not is_command_id(c.id)
         for c in intent.commands
     ):
         return None

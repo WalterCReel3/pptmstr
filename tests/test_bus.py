@@ -8422,7 +8422,7 @@ def test_a_message_the_bus_gives_an_id_is_one_a_declaration_can_answer() -> None
     pinned together here: a minted id that stopped being read as one would
     refuse every declaration that answers a real message.
     """
-    from pptmstr.model import is_concern_id
+    from pptmstr.ids import is_concern_id
 
     store = Store()
     _team(store)
