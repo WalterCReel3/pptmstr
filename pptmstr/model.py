@@ -3303,7 +3303,7 @@ MAX_CLOSE_REASON_CHARS = MAX_ANSWER_CHARS
 # counted, and listed by the reads after it. Bounded because the "told" mark is
 # this run's: after a restart every one in the logs read is listed again, and an
 # old link's would otherwise flood the first read. Three, as many as a wake names
-# by id (``bus.WAKE_DECISIONS_NAMED``).
+# by id (``waketext.WAKE_DECISIONS_NAMED``).
 MAX_WITHDRAWALS_LISTED = 3
 
 # A declarer's reason for withdrawing a task. The same kind of text as the

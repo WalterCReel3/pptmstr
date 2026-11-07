@@ -147,7 +147,7 @@ MAX_OUTPUT_REPLY_CHARS = 4_600
 #
 # The last term of the sum that makes that reply fit ``replies._MAX_BOARD_CHARS``
 # by construction. Laid out behind a mark, a text of n characters costs at most
-# 3n + 2, as in ``bus._DECISION_FRAME_CHARS``. Each text is cut to its bound
+# 3n + 2, as in ``decisiontext._DECISION_FRAME_CHARS``. Each text is cut to its bound
 # where it is laid out (``_block``), so the sum holds for a record that came
 # out of a file as well as for one the store accepted:
 #

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 
-from pptmstr import bus
+from pptmstr.board import digesttext
 from pptmstr.board.digest import digest, digest_mark
 from pptmstr.bridge import Bridge
 from pptmstr.intents import (
@@ -108,7 +108,7 @@ def board_scenario() -> tuple[Snapshot, NodeId]:
 
 def _read(snap: Snapshot, root: NodeId) -> str:
     """What the lead's next ``read_digest`` returns, from its mark on."""
-    return bus._bounded_digest_text(digest(snap, root[0], digest_mark(snap, root[0])))
+    return digesttext._bounded_digest_text(digest(snap, root[0], digest_mark(snap, root[0])))
 
 
 def test_the_board_scenario_reaches_what_the_pane_now_leads_with() -> None:

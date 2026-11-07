@@ -2258,7 +2258,7 @@ def test_the_panes_one_line_rule_is_the_one_the_board_tool_uses() -> None:
     ``one_line`` is spelled twice, here and in the bus, so the UI does not import
     the SDK. The two must call the same things a line break.
     """
-    from pptmstr import bus
+    from pptmstr import replies
 
     for text in (
         "plain",
@@ -2272,7 +2272,7 @@ def test_the_panes_one_line_rule_is_the_one_the_board_tool_uses() -> None:
         "\n\nleading",
         "",
     ):
-        assert board_pane.one_line(text) == bus._one_line(text), repr(text)
+        assert board_pane.one_line(text) == replies._one_line(text), repr(text)
 
 
 def test_amending_a_second_row_abandons_the_draft_left_on_the_first(monkeypatch) -> None:

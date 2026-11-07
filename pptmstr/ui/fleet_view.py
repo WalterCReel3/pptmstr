@@ -52,7 +52,7 @@ which is the surface a sub-agent with no card has.
 
 **A withdrawn decision is not an unread answer.** The asker withdrew it itself and
 nothing stamps ``first_delivered_at`` on one, so counting it would keep every sub-agent
-that ever took a question back on the card for good. This is the reading ``bus._unread``
+that ever took a question back on the card for good. This is the reading ``decisiontext._unread``
 and ``decision_view.unread`` already give. A withdrawn command is the same, and is the
 reading ``command_view.delivery_line`` gives.
 

@@ -3155,7 +3155,7 @@ class AgentSession:
 
     async def wake(self, text: str) -> bool:
         """
-        Send the session a message of pptmstr's own (``bus.wake_message``): that
+        Send the session a message of pptmstr's own (``waketext.wake_message``): that
         something it was waiting for has arrived. True when a connected client
         took it, False when there was none, and then nothing is written.
 

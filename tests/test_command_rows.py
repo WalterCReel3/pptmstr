@@ -26,7 +26,7 @@ import pytest
 from imgui_bundle import imgui as real_imgui
 
 from pptmstr import approval as policy
-from pptmstr import bus, commandbus, commandfile, commandrun, commandtext, theme
+from pptmstr import commandbus, commandfile, commandrun, commandtext, replies, theme
 from pptmstr.board import digest
 from pptmstr.bridge import Bridge
 from pptmstr.command import (
@@ -1114,8 +1114,8 @@ def test_only_a_command_that_started_a_process_has_a_log_to_point_at(
 
 
 def test_the_clipboards_three_marks_are_the_buss() -> None:
-    assert command_view.ASKER_MARK == bus._QUOTE
-    assert command_view.OPERATOR_MARK == bus._ANSWER
+    assert command_view.ASKER_MARK == replies._QUOTE
+    assert command_view.OPERATOR_MARK == replies._ANSWER
     assert command_view.OUTPUT_MARK == commandbus._OUTPUT
     assert len({command_view.ASKER_MARK, command_view.OPERATOR_MARK, command_view.OUTPUT_MARK}) == 3
 

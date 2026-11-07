@@ -316,7 +316,7 @@ class PeerRefusal(enum.Enum):
     typo -- or a link this run did not restore. ``NOT_A_MEMBER`` is a live link
     between two other sessions, which this sender cannot see into. Those three
     are apart for the store's tests and the operator's reading, and the sender
-    is told one sentence for all of them (``bus._peer_refusal_text``): which it
+    is told one sentence for all of them (``channels.text._peer_refusal_text``): which it
     is would tell a lead probing names whether a link it is not on exists.
     ``ID_HELD`` is a message id the store already holds, which a minted id
     never is.

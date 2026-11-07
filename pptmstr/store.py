@@ -350,7 +350,7 @@ def _clock(now: float | None) -> float:
 # drawable with ``drawable.text`` on the way there, from the verbatim field, each
 # time: a root's task and its directories (``session_base``, else ``cwd``) as its
 # card title and project, in ``effects.peer_identity``; and a channel's charter,
-# in ``bus._links_lines``.
+# in ``channels.text._links_lines``.
 #
 # - The arguments a parked call's editor opens on, which approve sends back to
 #   the tool (with the drawable twin ``PendingApproval.args`` beside them).
@@ -2927,11 +2927,11 @@ def _peer_waking(
       after a restart every ended decision on a live link is named again at
       the lead's first resume: repetition bounded by resumes, taken over
       growing the log with a read receipt. How many one wake names is bounded
-      where its text is written (``bus.WAKE_DECISIONS_NAMED``).
+      where its text is written (``waketext.WAKE_DECISIONS_NAMED``).
     - **Coalesced per link, between the order and the send.** A session
       pending on a link -- woken, and the shell not yet done with that wake --
       is not woken again on it: the wake line counts what is waiting when the
-      shell sends it (``bus.wake_line``). The shell's ``PeerWakeSent`` ends
+      shell sends it (``waketext.wake_line``). The shell's ``PeerWakeSent`` ends
       it, and so does a ``PeerInboxRead`` by its lead for the links the read
       covered and that owe it no decision, or the link having nothing left
       for it to read (a withdrawal).
@@ -3208,11 +3208,11 @@ def _unheard(
     Naming one does not mark it told: the shell does, once it sends the wake
     (``intents.DecisionWakeSent``, ``_heard``). A second settle or restore
     before then names it again, and the shell sends a session's held wakes
-    as one message that names each decision once (``bus.wake_message``).
+    as one message that names each decision once (``waketext.wake_message``).
 
     A withdrawn decision is not named: its asker took it back, and nothing
     was decided for the other lead to act on. How many one wake names is
-    ``bus.wake_message``'s to bound.
+    ``waketext.wake_message``'s to bound.
     """
     if not _wakeable(world, session_id):
         return []

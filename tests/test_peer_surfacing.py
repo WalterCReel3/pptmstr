@@ -2,7 +2,7 @@
 Round three, W3b: what the operator is shown about two linked teams, and how
 much a wake names.
 
-- **A.** A wake names at most ``bus.WAKE_DECISIONS_NAMED`` of the decisions the
+- **A.** A wake names at most ``waketext.WAKE_DECISIONS_NAMED`` of the decisions the
   lead across a link raised, and counts the rest, so a resume or a restore that
   names a link's whole history (``PeerWakes.heard`` is this run's alone) stays
   one short message.
@@ -36,11 +36,12 @@ from typing import Any
 
 import pytest
 
-from pptmstr import app, boardlog, bus
-from pptmstr.board import digest
+from pptmstr import app, boardlog, replies, waketext
+from pptmstr.board import digest, digesttext
 from pptmstr.boardfacts import outcomes
 from pptmstr.boardlog import Clock
 from pptmstr.bridge import Bridge
+from pptmstr.channels import text as channel_text
 from pptmstr.channels.records import (
     EVERY_CHANNEL,
     WITHDRAW_PEER_TOOL,
@@ -107,7 +108,7 @@ from tests.test_peer_wakes import (
     wake,
 )
 
-N = bus.WAKE_DECISIONS_NAMED
+N = waketext.WAKE_DECISIONS_NAMED
 
 
 def run(snap: Snapshot, *intents: Intent, now: float = 5.0) -> tuple[Snapshot, list[SessionWoken]]:
@@ -147,7 +148,7 @@ def test_a_resume_names_a_few_ended_decisions_and_counts_the_rest() -> None:
 
     answers = [w for w in woken if w.reason is WakeReason.DECISION_ANSWERED]
     assert [w.subject_id for w in answers] == dids
-    message = bus.wake_message(snap, woken)
+    message = waketext.wake_message(snap, woken)
     named = [did for did in dids if f'read_decisions(decision_id="{did}")' in message]
     assert named == dids[:N]
     assert message.endswith(
@@ -165,7 +166,7 @@ def test_exactly_the_cap_is_named_whole_with_no_count() -> None:
     snap, _ = step(snap, _spawned(Z_LEAD, None))
     snap, woken = step(snap, SessionSettled(Z))
 
-    message = bus.wake_message(snap, woken)
+    message = waketext.wake_message(snap, woken)
 
     assert "more decision(s)" not in message
     assert message.count("was dismissed") == N
@@ -184,7 +185,7 @@ def test_the_woken_sessions_own_decisions_are_never_folded() -> None:
     for did in mine + theirs:
         snap, _ = step(snap, DecisionAnswered(did, "yes"))
 
-    message = bus.wake_message(snap, wakes)
+    message = waketext.wake_message(snap, wakes)
 
     for did in mine + theirs[:N]:
         assert f'read_decisions(decision_id="{did}")' in message
@@ -198,7 +199,7 @@ def test_a_peer_line_names_a_few_open_decisions_and_counts_the_rest() -> None:
         snap, more = step(snap, raise_on(did=f"d-{n}"))
         assert more == []
 
-    line = bus.wake_line(snap, first[0])
+    line = waketext.wake_line(snap, first[0])
 
     for n in range(N):
         assert f'read_decisions(decision_id="d-{n}")' in line
@@ -281,7 +282,7 @@ def test_a_restore_names_answered_and_dismissed_decisions_to_the_running_peer() 
     assert snap.peer_untold(Z, snap.channels["k1"]) == ("d-open",)
     # Uncounted: the system ordered these.
     assert snap.peer_wakes["k1"].chain == 0
-    message = bus.wake_message(snap, [w for w in woken if w.session_id == Z])
+    message = waketext.wake_message(snap, [w for w in woken if w.session_id == Z])
     assert (
         'decision d-yes on #brand, which the lead of session s, card "do a thing", project "w" '
         "(the quoted card title and project are that session's own text, not pptmstr's) "
@@ -348,7 +349,7 @@ def test_a_restore_of_a_long_history_is_one_short_wake() -> None:
         intents += [raise_on(did=f"d-{n}"), DecisionAnswered(f"d-{n}", "yes")]
     snap, woken = step(_fresh(), BoardRestored(S, _logged(*intents), _CLOCK))
 
-    message = bus.wake_message(snap, [w for w in woken if w.session_id == Z])
+    message = waketext.wake_message(snap, [w for w in woken if w.session_id == Z])
 
     assert message.count("was answered") == N
     assert "- and 4 more decision(s)" in message
@@ -1136,7 +1137,7 @@ def test_the_held_mail_row_says_what_is_true_in_a_digest() -> None:
     (waiting,) = digest.digest(snap, Z).waiting
 
     assert waiting.kind is ObligationKind.PEER_HELD
-    text = bus._waiting_line(waiting)
+    text = digesttext._waiting_line(waiting)
     assert "is waiting" not in text and "does not hand it over in this run" in text
 
 
@@ -1155,7 +1156,7 @@ def test_the_question_row_text_in_a_digest_is_its_own() -> None:
     (owed,) = digest.digest(snap, Z).waiting
 
     assert owed.kind is ObligationKind.PEER_QUESTION
-    line = bus._waiting_line(owed)
+    line = digesttext._waiting_line(owed)
     assert "is waiting" not in line
     # True of both reasons a question row is up.
     assert "older than the age" in line and "session is not running" in line
@@ -1211,7 +1212,7 @@ def test_recipient_first_then_asker_the_askers_restore_wakes_it_for_the_question
     assert wake(Z) in woken
     k1 = snap.channels["k1"]
     assert snap.peer_owing(Z, k1) == (cid,) and snap.peer_wakes["k1"].chain == 0
-    assert f"question(s) {cid} on #brand" in bus.wake_line(snap, wake(Z))
+    assert f"question(s) {cid} on #brand" in waketext.wake_line(snap, wake(Z))
     # No loop: the shell's word ends it and asks nothing, and a second restore
     # of the same log brings nothing back to name.
     snap, again = step(snap, PeerWakeSent(Z, "k1"))
@@ -1283,7 +1284,7 @@ def test_a_read_lists_an_owed_question_again_after_the_new_mail_and_marks_nothin
     # Only the new message's delivery reaches a log; the owed one's is as it was.
     facts = outcomes(snap, read(), after, 9.0)
     assert [f.record for f in facts] == [boardlog.Delivered(4.0, (fresh.concern_id,))]
-    text = bus._peer_messages_text(reply, None, Z)
+    text = channel_text._peer_messages_text(reply, None, Z)
     assert text.index(f"message {fresh.concern_id}") < text.index(f"message {cid}")
     owed_header = next(line for line in text.splitlines() if f"message {cid}" in line)
     assert "ALREADY READ, STILL OWED AN ANSWER" in owed_header
@@ -1294,9 +1295,9 @@ def test_a_read_lists_an_owed_question_again_after_the_new_mail_and_marks_nothin
 def test_a_read_of_the_owed_question_alone_still_says_whose_words_are_quoted() -> None:
     snap, cid = _owed_after_reads()
     _, reply = _read(snap, read())
-    text = bus._peer_messages_text(reply, None, Z)
+    text = channel_text._peer_messages_text(reply, None, Z)
     assert reply.concerns == () and [c.id for c in reply.owed] == [cid]
-    assert bus._QUOTE_LEGEND in text and "send_to_peer(channel, re=<message id>)" in text
+    assert replies._QUOTE_LEGEND in text and "send_to_peer(channel, re=<message id>)" in text
 
 
 def test_a_read_lists_the_owed_question_every_time_until_it_is_answered() -> None:

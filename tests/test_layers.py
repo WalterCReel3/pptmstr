@@ -794,6 +794,22 @@ PURE: dict[str, Claim] = {
     "pptmstr.sandbox": Claim("pptmstr/sandbox.py", "no IO, no clock, no launch"),
     # replies.py:11
     "pptmstr.replies": Claim("pptmstr/replies.py", "Pure: no SDK, no clock, no IO"),
+    # board/text.py
+    "pptmstr.board.text": Claim("pptmstr/board/text.py", "Pure: no SDK, no clock, no IO"),
+    # board/graphtext.py
+    "pptmstr.board.graphtext": Claim("pptmstr/board/graphtext.py", "Pure: no SDK, no clock, no IO"),
+    # board/digesttext.py
+    "pptmstr.board.digesttext": Claim(
+        "pptmstr/board/digesttext.py", "Pure: no SDK, no clock, no IO"
+    ),
+    # channels/text.py
+    "pptmstr.channels.text": Claim("pptmstr/channels/text.py", "Pure: no SDK, no clock, no IO"),
+    # decisiontext.py
+    "pptmstr.decisiontext": Claim("pptmstr/decisiontext.py", "Pure: no SDK, no clock, no IO"),
+    # waketext.py
+    "pptmstr.waketext": Claim("pptmstr/waketext.py", "Pure: no SDK, no clock, no IO"),
+    # concerntext.py
+    "pptmstr.concerntext": Claim("pptmstr/concerntext.py", "Pure: no SDK, no clock, no IO"),
     # naming.py:5
     "pptmstr.naming": Claim(
         "pptmstr/naming.py", "Pure: no clock, no IO, and no import from pptmstr"

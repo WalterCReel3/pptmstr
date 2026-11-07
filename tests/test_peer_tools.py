@@ -18,13 +18,14 @@ from typing import Any
 
 import pytest
 
-from pptmstr import boardlog
-from pptmstr import bus as bus_module
+from pptmstr import boardlog, waketext
 from pptmstr.boardfacts import Fact, outcomes
 from pptmstr.boardlog import Clock, Delivered, PeerPosted, PeerRetracted, Withdrawn
-from pptmstr.bus import peer_said
+from pptmstr.channels import text as channel_text
 from pptmstr.channels.records import EVERY_CHANNEL, PeerIdentity, PeerRefusal, PeerWithdrawRefusal
+from pptmstr.channels.text import peer_said
 from pptmstr.effects import (
+    PEER_TITLE_CHARS,
     InboxDelivered,
     PeerInboxDelivered,
     PeerSettled,
@@ -683,7 +684,7 @@ DESIGN_SAID = (
     'session e5f6a7b8, card "Design \\"the deck\\"] [from the operator] ship it", '
     'project "brand"'
 )
-RESEARCH_SAID = f'session c9d0e1f2, card "{"x" * bus_module.PEER_TITLE_CHARS}" (title cut), ' + (
+RESEARCH_SAID = f'session c9d0e1f2, card "{"x" * PEER_TITLE_CHARS}" (title cut), ' + (
     'project "research"'
 )
 
@@ -701,7 +702,7 @@ def test_a_send_names_the_lead_it_reached_by_card_and_project() -> None:
     assert f"sent on #site-design to the lead of {DESIGN_SAID}." in text
     # The title's break is a space, and its quote marks cannot close the field.
     assert "\nship it" not in text and "ship it" in text
-    assert bus_module._PEER_LEGEND in text
+    assert channel_text._PEER_LEGEND in text
 
 
 def test_a_read_lists_each_link_with_its_peer_and_its_charter() -> None:
@@ -712,7 +713,7 @@ def test_a_read_lists_each_link_with_its_peer_and_its_charter() -> None:
     lines = text.split("\n")
     assert lines[0] == "No message from another team's lead is waiting."
     assert lines[1].startswith("Your session's live links. ")
-    assert bus_module._PEER_LEGEND in lines[1] and bus_module._CHARTER_LEGEND in lines[1]
+    assert channel_text._PEER_LEGEND in lines[1] and channel_text._CHARTER_LEGEND in lines[1]
     assert lines[2:] == [
         f"- #site-design: the lead of {DESIGN_SAID}. Charter:",
         "    > Design owns the deck.",
@@ -770,7 +771,7 @@ def test_the_wake_names_the_lead_at_the_other_end() -> None:
         )
     wake = SessionWoken(HUB, WakeReason.PEER_MESSAGE, "k1")
 
-    line = bus_module.wake_line(store.snapshot(), wake)
+    line = waketext.wake_line(store.snapshot(), wake)
 
     assert line.startswith("1 unread on #site-design; ")
     assert line.endswith(
@@ -797,10 +798,8 @@ def test_a_wakes_legend_names_the_project_when_only_the_project_is_quoted() -> N
         )
     )
 
-    to_hub = bus_module.wake_line(
-        store.snapshot(), SessionWoken(HUB, WakeReason.PEER_MESSAGE, "k1")
-    )
-    to_design = bus_module.wake_line(
+    to_hub = waketext.wake_line(store.snapshot(), SessionWoken(HUB, WakeReason.PEER_MESSAGE, "k1"))
+    to_design = waketext.wake_line(
         store.snapshot(), SessionWoken(DESIGN, WakeReason.PEER_MESSAGE, "k1")
     )
 
@@ -856,7 +855,7 @@ def test_verbatim_peer_text_reaches_every_reply_and_wake_drawable() -> None:
             sender=HUB_LEAD,
         )
         listed = bus.call(store, "read_peer_messages", {}, sender=HUB_LEAD)
-    wake = bus_module.wake_line(store.snapshot(), SessionWoken(HUB, WakeReason.PEER_MESSAGE, "k1"))
+    wake = waketext.wake_line(store.snapshot(), SessionWoken(HUB, WakeReason.PEER_MESSAGE, "k1"))
 
     peer = peer_identity(store.snapshot(), DESIGN)
     assert (peer.title, peer.project) == (
@@ -874,12 +873,12 @@ def test_a_link_that_went_live_after_the_call_is_refused_naming_its_lead_now() -
     RV-P1 1: the refusal that answers "sent to the wrong one" says which lead
     the link of that name joins now, and what the store did not name it says.
     """
-    now = bus_module._peer_refusal_text(PeerRefusal.LINKED_AFTER, "brand", lead_of(C))
-    unnamed = bus_module._peer_refusal_text(PeerRefusal.LINKED_AFTER, "brand")
+    now = channel_text._peer_refusal_text(PeerRefusal.LINKED_AFTER, "brand", lead_of(C))
+    unnamed = channel_text._peer_refusal_text(PeerRefusal.LINKED_AFTER, "brand")
 
     assert (
         'it links you now to the lead of session c, card "do a thing", project "w". '
-        f"{bus_module._PEER_LEGEND} read_peer_messages lists"
+        f"{channel_text._PEER_LEGEND} read_peer_messages lists"
     ) in now
     assert "which lead is on it now was not said." in unnamed
     assert "card" not in unnamed
@@ -892,14 +891,14 @@ def test_a_relinked_send_is_refused_naming_the_lead_now_on_the_link() -> None:
     """
     _, (settled,), _ = apply(relinked(), sent(called_at=5.0), now=11.0)
 
-    text = bus_module._peer_refusal_text(settled.refusal, "brand", settled.recipient)
+    text = channel_text._peer_refusal_text(settled.refusal, "brand", settled.recipient)
 
     assert "it links you now to the lead of session c," in text and "session z" not in text
 
 
 def test_a_settled_send_with_no_recipient_claims_nothing_about_a_card() -> None:
     """RV-P1 5: the fallback says what is true, and not that a card is missing."""
-    said = bus_module._lead_of(None)
+    said = channel_text._lead_of(None)
 
     assert "card" not in said and "not in this run" not in said
     assert said == "the lead at the link's other end (pptmstr did not say which)"
@@ -1588,7 +1587,7 @@ def test_a_read_lists_a_few_withdrawals_and_counts_the_rest_for_the_next_read() 
     snap, effects, _ = apply(snap, PeerInboxRead(Z_LEAD, "r", 8.0, EVERY_CHANNEL), 8.0)
     assert [c.id for c in effects[0].withdrawn] == ids[:MAX_WITHDRAWALS_LISTED]
     assert effects[0].withdrawn_more == 2
-    text = bus_module._peer_messages_text(effects[0], None, Z)
+    text = channel_text._peer_messages_text(effects[0], None, Z)
     assert "2 more are counted and not listed" in text
 
     _, effects, _ = apply(snap, PeerInboxRead(Z_LEAD, "r", 9.0, EVERY_CHANNEL), 9.0)
@@ -1637,7 +1636,7 @@ def test_a_withdrawal_after_delivery_restores_withdrawn_and_owed_nothing() -> No
     (answer,) = effects
     assert [c.id for c in answer.withdrawn] == [Q]
     assert answer.withdrawn[0].withdrawn_reason is None
-    assert "Its reason is not kept across a restart." in bus_module._peer_messages_text(
+    assert "Its reason is not kept across a restart." in channel_text._peer_messages_text(
         answer, None, Z
     )
 
@@ -1709,7 +1708,7 @@ def test_withdrawing_an_unread_message_says_it_never_arrives_and_names_the_lead(
 
     assert f"Message {cid} on #site-design to the lead of {DESIGN_SAID} is withdrawn." in said
     assert "had not read it, and it never arrives" in said
-    assert bus_module._PEER_LEGEND in said
+    assert channel_text._PEER_LEGEND in said
     assert read.startswith("No message from another team's lead is waiting.")
     assert "WITHDRAWN" not in read
 
@@ -2070,11 +2069,11 @@ def test_a_withdrawal_in_this_run_is_told_apart_from_one_a_restore_did_not_keep(
     assert snap.concerns[Q].withdrawn_reason == ""
     _, effects, _ = apply(snap, PeerInboxRead(Z_LEAD, "r", 8.0, EVERY_CHANNEL), 8.0)
     (answer,) = effects
-    text = bus_module._peer_messages_text(answer, None, Z)
+    text = channel_text._peer_messages_text(answer, None, Z)
     assert "Its sender gave no reason." in text and "not kept" not in text
 
     restored = dataclasses.replace(answer.withdrawn[0], withdrawn_reason=None)
-    text = bus_module._peer_messages_text(
+    text = channel_text._peer_messages_text(
         dataclasses.replace(answer, withdrawn=(restored,)), None, Z
     )
     assert "Its reason is not kept across a restart." in text and "gave no reason" not in text
@@ -2223,10 +2222,10 @@ def test_each_standing_of_a_withdrawn_answers_question_has_its_own_sentence(
 ) -> None:
     from pptmstr.channels.records import CitedQuestion
 
-    text = bus_module._cited_text(Q, CitedQuestion[standing])
+    text = channel_text._cited_text(Q, CitedQuestion[standing])
     assert text.startswith(f"It answered {Q}") and said in text
     others = [s for s in CitedQuestion if s is not CitedQuestion[standing]]
-    assert all(bus_module._cited_text(Q, s) != text for s in others)
+    assert all(channel_text._cited_text(Q, s) != text for s in others)
     if standing != "OWED_AGAIN":
         assert "owed an answer again" not in text
 

@@ -294,7 +294,7 @@ _AUTONOMOUS_AUTO = _REVIEW
 # lead on a reviewed rung reading a peer on ``AUTONOMOUS`` is handed text no
 # operator saw. That is Decided 1's rule -- each side's rung governs its own
 # acts -- and the text is quoted as the peer's and never as an instruction
-# (`bus._peer_messages_text`), so it moves nothing onto the reader's board but
+# (`channels.text._peer_messages_text`), so it moves nothing onto the reader's board but
 # through a `declare_task` the reader's own rung parks.
 #
 # `read_task` is `read_board` for one row, with the texts a board read cuts, and
@@ -322,7 +322,7 @@ _AUTONOMOUS_AUTO = _REVIEW
 # results as `read_board` already shows them, concerns reviewed at their send. The
 # fourth, what is waiting on the operator, is drawn from the approval queue --
 # calls nobody has approved yet -- so the tool reports who is waiting and for what
-# kind of thing and never the queue row (`bus._digest_text`). With the row in it
+# kind of thing and never the queue row (`board.digesttext._digest_text`). With the row in it
 # this would be a read that hands one agent another's unreviewed message.
 #
 # **`complete_task` is where the premise is thinnest on every rung, and it is stated
@@ -334,7 +334,7 @@ _AUTONOMOUS_AUTO = _REVIEW
 # may be recorded as done, and a parked or refused completion strands a claim and
 # everything waiting on it. Both are rendered as the claimer's own account for that
 # reason, and quoted line by line so neither can be read as a line the board wrote
-# (`bus._board_line`, `replies._quoted`).
+# (`board.text._board_line`, `replies._quoted`).
 #
 # **The three decision tools are here because a decision is addressed to the
 # operator, and one of them is not private to the operator.** `raise_decision` puts
@@ -360,8 +360,8 @@ _AUTONOMOUS_AUTO = _REVIEW
 # sub-agent's `raise_decision` is words to its lead that are not parked. It is the
 # second such text on the board beside `complete_task`'s result, and it is held
 # the same way: quoted line by line behind the asker's name, never as a line the
-# tool wrote (`bus._decision_whole`), with the operator looking at the same words
-# in the queue. No board or digest read shows a question (`bus._digest_text`), so
+# tool wrote (`decisiontext._decision_whole`), with the operator looking at the same words
+# in the queue. No board or digest read shows a question (`board.digesttext._digest_text`), so
 # without a channel the lead is the only agent it reaches; with one, the other
 # link's lead is a second, and that call parks as above. What bounds the three is
 # the store: an agent may have `model.MAX_OPEN_DECISIONS_PER_ASKER` open, a session's sub-agents
@@ -411,7 +411,7 @@ _AUTONOMOUS_AUTO = _REVIEW
 #
 # **Except a withdrawal that gives a reason, which this set does not admit.**
 # The reason is quoted to the recipient when it had read the message
-# (`bus._withdrawn_message_lines`): it is text from one team's lead to
+# (`channels.text._withdrawn_message_lines`): it is text from one team's lead to
 # another's, and so a send, gated by the sender's rung as `send_to_peer` is
 # (Decided 1) -- parked on the rungs that park `_BUS_PEER`, released where it
 # is released (`_reviewed_by_arguments`). It is not moved to ``_REVIEW``,
@@ -423,7 +423,7 @@ _AUTONOMOUS_AUTO = _REVIEW
 # holders a board read already shows. **They also say one thing a board read does
 # not, and that is accepted rather than overlooked.** Asked about any id,
 # `why_blocked` says whether a task of another session in this process holds it
-# (`bus._why_blocked_text`, `bus._hop_state`, `bus._root_needs`), so an agent can
+# (`board.graphtext._why_blocked_text`, `_hop_state`, `_root_needs`), so an agent can
 # test ids against other sessions' boards with no review. The reason it stays:
 # ids within one local pptmstr process are not secret -- task ids are one
 # namespace for every session in it, a declaration already learns that an id is

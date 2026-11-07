@@ -178,7 +178,7 @@ class Owed:
     ``summary`` is the operator's own queue row, and for a parked approval that is
     the text of a tool call nobody has approved yet -- a concern still in review,
     a command not yet run. The pane shows it. A surface an agent reads must not:
-    see ``bus._digest_text``.
+    see ``board.digesttext._digest_text``.
     """
 
     kind: ObligationKind
@@ -677,7 +677,7 @@ def incident_attribution(reported: Reported) -> str:
     concern's subject only when a board read does (``Reported.on_board``), and
     still has to list the incident. The task id is here as the sender gave it,
     and one that is on no board is the sender's typing like the subject is:
-    ``bus._incident_headline`` drops it before asking.
+    ``board.digesttext._incident_headline`` drops it before asking.
     """
     c = reported.concern
     notes = [basis_label(c.basis)]

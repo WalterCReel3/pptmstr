@@ -13,9 +13,10 @@ import dataclasses
 
 import pytest
 
-from pptmstr import boardlog, bus
+from pptmstr import boardlog
 from pptmstr.addresses import FOREIGN, UNKNOWN, role_name
 from pptmstr.board.rows import UNDELIVERABLE, board_concerns, board_tasks, has_board
+from pptmstr.board.text import _board_text
 from pptmstr.channels.records import Charter
 from pptmstr.effects import ClaimSettled
 from pptmstr.intents import (
@@ -1123,7 +1124,7 @@ def test_no_live_agent_is_given_the_name_a_restored_board_has_for_another(
     assert (live.id, live.owner, live.holder) == ("t2", "builder-3", NEW_BUILDER_2)
     assert old.holder != live.holder and old.owner_gone and not live.owner_gone
 
-    text = bus._board_text((old, live), {})
+    text = _board_text((old, live), {})
     held = [line.split("held by ")[1] for line in text.splitlines() if "held by " in line]
     assert [name.split(" · ")[0].split(" but ")[0] for name in held] == [
         "builder-2, from an earlier run",

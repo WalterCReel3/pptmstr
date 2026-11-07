@@ -667,7 +667,8 @@ def test_a_record_holding_many_times_what_a_board_read_shows_is_not_too_long_to_
     "ordinary" the tree has, and this is that figure twenty-five times over in
     the characters that escape longest.
     """
-    from pptmstr import bus, model
+    from pptmstr import model
+    from pptmstr.board import text as board_text
 
     def worst(chars: int) -> str:
         return "\U0001f600" * (chars * 25)
@@ -678,15 +679,15 @@ def test_a_record_holding_many_times_what_a_board_read_shows_is_not_too_long_to_
             task_id="t-1",
             title="T",
             declared_by="lead",
-            detail=worst(bus._MAX_DETAIL_CHARS),
+            detail=worst(board_text._MAX_DETAIL_CHARS),
             property=worst(model.MAX_PROPERTY_CHARS),
         ),
         Completed(
             at=1.0,
             task_id="t-1",
             by="builder",
-            result=worst(bus._MAX_RESULT_CHARS),
-            not_run=worst(bus._MAX_NOT_RUN_CHARS),
+            result=worst(board_text._MAX_RESULT_CHARS),
+            not_run=worst(board_text._MAX_NOT_RUN_CHARS),
         ),
         Posted(
             at=1.0,
@@ -694,7 +695,7 @@ def test_a_record_holding_many_times_what_a_board_read_shows_is_not_too_long_to_
             sender="builder",
             recipient="lead",
             subject="s",
-            body=worst(bus._MAX_CONCERN_CHARS),
+            body=worst(board_text._MAX_CONCERN_CHARS),
         ),
     )
 

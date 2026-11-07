@@ -17,9 +17,10 @@ from typing import Any
 
 import pytest
 
-from pptmstr import app, boardlog, bus
+from pptmstr import app, boardlog, waketext
 from pptmstr.boardlog import Clock, PeerPosted
 from pptmstr.bridge import Bridge
+from pptmstr.channels import text as channel_text
 from pptmstr.channels.records import EVERY_CHANNEL, PeerIdentity
 from pptmstr.effects import PeerInboxDelivered, SessionWoken, WakeReason
 from pptmstr.intents import (
@@ -136,15 +137,15 @@ def test_a_message_wakes_the_lead_it_reaches_and_only_that_lead() -> None:
 def test_the_wake_line_counts_what_waits_and_carries_no_text_of_it() -> None:
     snap, (woken,) = step(linked(), sent(needs_answer=True))
 
-    line = bus.wake_line(snap, woken)
+    line = waketext.wake_line(snap, woken)
 
     assert line == (
         '1 unread on #brand; call read_peer_messages(channel="brand"), which returns it. '
         '#brand links you to the lead of session s, card "do a thing", project "w" '
         "(the quoted card title and project are that session's own text, not pptmstr's)."
     )
-    message = bus.wake_message(snap, [woken])
-    assert message.startswith(bus.WAKE_HEADING)
+    message = waketext.wake_message(snap, [woken])
+    assert message.startswith(waketext.WAKE_HEADING)
     assert "the subject" not in message and "the body text" not in message
 
 
@@ -163,7 +164,7 @@ def test_a_burst_on_one_link_is_one_wake_and_its_line_counts_the_burst() -> None
 
     assert (first, second, third) == ([wake(Z)], [], [])
     assert snap.peer_wakes["k1"].chain == 1
-    assert bus.wake_line(snap, first[0]).startswith("3 unread on #brand")
+    assert waketext.wake_line(snap, first[0]).startswith("3 unread on #brand")
 
 
 def test_a_read_clears_the_pending_wake_and_the_next_message_wakes_again() -> None:
@@ -204,7 +205,7 @@ def test_a_quiet_message_wakes_nobody_and_is_counted_with_the_next_wake() -> Non
     assert quiet == [] and "k1" not in snap.peer_wakes
 
     snap, (woken,) = step(snap, sent())
-    assert bus.wake_line(snap, woken).startswith("2 unread on #brand")
+    assert waketext.wake_line(snap, woken).startswith("2 unread on #brand")
 
 
 def test_a_quiet_message_orders_no_wake_even_with_louder_mail_waiting() -> None:
@@ -680,7 +681,7 @@ def test_the_shell_waits_for_a_starting_session_and_then_sends_one_line(shell: A
 
     root, text = sent_to
     assert root == Z_LEAD
-    assert text.startswith(bus.WAKE_HEADING)
+    assert text.startswith(waketext.WAKE_HEADING)
     assert '2 unread on #brand; call read_peer_messages(channel="brand")' in text
 
 
@@ -942,10 +943,10 @@ def test_a_settle_wakes_a_lead_even_with_the_chain_at_its_bound() -> None:
 
 
 def test_the_senders_reply_does_not_promise_a_wake() -> None:
-    said = bus._peer_wake_said(quiet=False)
+    said = channel_text._peer_wake_said(quiet=False)
     assert said.startswith("If their session is running")
     assert "next resumed" in said
-    assert "wakes nobody" in bus._peer_wake_said(quiet=True)
+    assert "wakes nobody" in channel_text._peer_wake_said(quiet=True)
 
 
 # -- W2: a channel decision raised wakes the other lead, through the link's wake -----
@@ -983,7 +984,7 @@ def test_a_raise_on_a_channel_wakes_the_other_lead_and_not_the_asker() -> None:
 def test_the_line_names_the_decision_by_id_and_carries_none_of_its_text() -> None:
     snap, (woken,) = step(linked(), raise_on(did="d-1"))
 
-    line = bus.wake_line(snap, woken)
+    line = waketext.wake_line(snap, woken)
 
     assert line == (
         '#brand links you to the lead of session s, card "do a thing", project "w" '
@@ -991,7 +992,7 @@ def test_the_line_names_the_decision_by_id_and_carries_none_of_its_text() -> Non
         "decision d-1 was raised on #brand by the lead linked to you. "
         'read_decisions(decision_id="d-1") returns it.'
     )
-    message = bus.wake_message(snap, [woken])
+    message = waketext.wake_message(snap, [woken])
     for text in ("ship the hero image?", "I ship it", "the evidence text"):
         assert text not in message
 
@@ -1012,7 +1013,7 @@ def test_a_raise_while_a_message_wake_is_pending_is_coalesced_into_it() -> None:
 
     assert (first, second) == ([wake(Z)], [])
     assert snap.peer_wakes["k1"].chain == 1
-    line = bus.wake_line(snap, first[0])
+    line = waketext.wake_line(snap, first[0])
     assert line.startswith('1 unread on #brand; call read_peer_messages(channel="brand")')
     assert line.endswith('read_decisions(decision_id="d-1") returns it.')
 
@@ -1023,7 +1024,7 @@ def test_a_message_while_a_decision_wake_is_pending_is_coalesced_into_it() -> No
 
     assert (first, second) == ([wake(Z)], [])
     assert snap.peer_wakes["k1"].chain == 1
-    assert bus.wake_line(snap, first[0]).startswith("1 unread on #brand")
+    assert waketext.wake_line(snap, first[0]).startswith("1 unread on #brand")
 
 
 def _told(snap: Snapshot, session: str = Z, link: str = "k1") -> PeerWakeSent:
@@ -1141,7 +1142,7 @@ def test_two_leads_raising_decisions_at_each_other_reach_k_and_are_held() -> Non
     (owed,) = snap.peer_untold(holder, snap.channels["k1"])
     snap, released = step(snap, WakeChainReleased("k1"))
     assert released == [wake(holder)] and held(snap) == []
-    assert f'read_decisions(decision_id="{owed}")' in bus.wake_line(snap, released[0])
+    assert f'read_decisions(decision_id="{owed}")' in waketext.wake_line(snap, released[0])
 
 
 def test_messages_and_raises_count_toward_one_chain() -> None:
@@ -1197,16 +1198,16 @@ def test_the_other_leads_line_says_whose_decision_was_answered() -> None:
     snap, _ = step(linked(), raise_on(did="d-1"))
     snap, (to_s, to_z) = step(snap, DecisionAnswered("d-1", "yes"))
 
-    assert bus.wake_line(snap, to_s) == (
+    assert waketext.wake_line(snap, to_s) == (
         'decision d-1 was answered. read_decisions(decision_id="d-1") returns it.'
     )
-    assert bus.wake_line(snap, to_z) == (
+    assert waketext.wake_line(snap, to_z) == (
         'decision d-1 on #brand, which the lead of session s, card "do a thing", '
         'project "w" (the quoted card title and project are that session\'s own text, not '
         "pptmstr's) raised, was answered. "
         'read_decisions(decision_id="d-1") returns it.'
     )
-    assert "yes" not in bus.wake_message(snap, [to_z])
+    assert "yes" not in waketext.wake_message(snap, [to_z])
 
 
 def test_an_answer_once_the_link_closed_wakes_the_asker_alone() -> None:
@@ -1277,7 +1278,7 @@ def test_a_decision_raised_and_ended_while_the_other_lead_was_down_is_named_at_i
     assert SessionWoken(Z, reason, "d-1") in settled
     # Uncounted: the operator's act, read at a resume.
     assert snap.peer_wakes.get("k1", PeerWakes()).chain == 0
-    assert bus.wake_line(snap, SessionWoken(Z, reason, "d-1")).startswith(
+    assert waketext.wake_line(snap, SessionWoken(Z, reason, "d-1")).startswith(
         'decision d-1 on #brand, which the lead of session s, card "do a thing", '
     )
 
@@ -1622,7 +1623,7 @@ def test_a_settle_wakes_a_lead_for_a_question_it_read_and_never_answered() -> No
     owed = snap.peer_wakes["k1"]
     # Uncounted: the system ordered it.
     assert (owed.pending, owed.owing, owed.chain) == (frozenset({Z}), frozenset({Z}), chain)
-    line = bus.wake_line(snap, wake(Z))
+    line = waketext.wake_line(snap, wake(Z))
     assert "unread" not in line
     assert f"You were handed question(s) {cid} on #brand and have not answered" in line
     assert 'read_peer_messages(channel="brand") lists them again' in line
@@ -1645,12 +1646,12 @@ def test_a_question_answered_before_the_restart_is_not_owed() -> None:
 
 
 def test_the_settles_wake_names_a_few_questions_and_counts_the_rest() -> None:
-    cap = bus.WAKE_QUESTIONS_NAMED
+    cap = waketext.WAKE_QUESTIONS_NAMED
     snap, cids = _owes(*(sent(needs_answer=True) for _ in range(cap + 2)))
 
     snap, _ = _restarted(snap)
 
-    line = bus.wake_line(snap, wake(Z))
+    line = waketext.wake_line(snap, wake(Z))
     assert f"question(s) {', '.join(cids[:cap])} and 2 more on #brand" in line
     assert not any(cid in line for cid in cids[cap:])
 
@@ -1662,7 +1663,7 @@ def test_the_owed_wake_sits_beside_unread_mail_and_names_both() -> None:
 
     snap, woken = _resumed(snap)
 
-    line = bus.wake_line(snap, wake(Z))
+    line = waketext.wake_line(snap, wake(Z))
     assert woken == [wake(Z)]
     assert line.startswith("1 unread on #brand") and f"question(s) {cid} on" in line
 
@@ -1683,7 +1684,7 @@ def test_a_lead_that_ends_its_turn_without_answering_is_not_woken_again_until_it
     # A message wakes the lead for itself, and its line names no owed question.
     snap, woken = step(snap, sent())
     assert woken == [wake(Z)]
-    assert cid not in bus.wake_line(snap, wake(Z))
+    assert cid not in waketext.wake_line(snap, wake(Z))
     snap, again = step(snap, _spent(snap))
     assert again == []
 
@@ -1741,7 +1742,7 @@ def test_a_read_with_a_decision_still_owed_keeps_the_wake_but_not_the_questions(
 
     owed = snap.peer_wakes["k1"]
     assert Z in owed.pending and Z not in owed.owing
-    assert cid not in bus.wake_line(snap, wake(Z))
+    assert cid not in waketext.wake_line(snap, wake(Z))
 
 
 def test_through_the_shell_the_settles_wake_is_sent_once(shell: Any) -> None:
@@ -1805,7 +1806,7 @@ def test_the_operators_release_names_the_questions_the_held_lead_owes() -> None:
     owed = snap.peer_wakes["k1"]
     assert Z in owed.owing and Z in owed.pending
     assert f"You were handed question(s) {cid} on #brand and have not answered" in (
-        bus.wake_line(snap, wake(Z))
+        waketext.wake_line(snap, wake(Z))
     )
     # Counted, from a chain started again: it is not held a second time.
     assert held(snap) == [] and owed.chain == 1
@@ -1817,7 +1818,7 @@ def test_the_operators_release_names_the_questions_the_held_lead_owes() -> None:
 def test_a_release_with_nothing_owed_names_no_question() -> None:
     snap, woken = step(_chained(), WakeChainReleased("k1"))
     assert woken == [wake(Z)] and snap.peer_wakes["k1"].owing == frozenset()
-    assert "You were handed question(s)" not in bus.wake_line(snap, wake(Z))
+    assert "You were handed question(s)" not in waketext.wake_line(snap, wake(Z))
 
 
 # -- P2-fix: one test of "this read covers it" --------------------------------------
@@ -1891,14 +1892,14 @@ def test_the_wakes_legend_names_what_the_peer_description_quotes(
 ) -> None:
     from pptmstr.effects import peer_text
 
-    assert bus._titled([peer]) == clause
+    assert waketext._titled([peer]) == clause
     # It stands beside a quote and nowhere else.
     assert ('"' in peer_text(peer)) == bool(clause)
 
 
 def test_the_legend_names_each_kind_of_text_any_peer_quotes() -> None:
     peers = [PeerIdentity("s", title="t", held=True), PeerIdentity("c", project="w", held=True)]
-    assert bus._titled(peers) == (
+    assert waketext._titled(peers) == (
         " (the quoted card title and project are that session's own text, not pptmstr's)"
     )
 
@@ -1913,7 +1914,7 @@ def test_a_wake_to_a_peer_with_only_a_project_says_the_project_is_quoted() -> No
     snap, woken = step(snap, sent())
 
     assert woken == [wake(Z)]
-    assert bus.wake_line(snap, wake(Z)).endswith(
+    assert waketext.wake_line(snap, wake(Z)).endswith(
         '#brand links you to the lead of session s, project "w" '
         "(the quoted project is that session's own text, not pptmstr's)."
     )

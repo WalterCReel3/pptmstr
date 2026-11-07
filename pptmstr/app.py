@@ -35,7 +35,6 @@ from . import (
     boardfacts,
     boardlog,
     boardsync,
-    bus,
     cli_version,
     commandfile,
     commandrun,
@@ -50,6 +49,7 @@ from . import (
     templates,
     theme,
     tree,
+    waketext,
 )
 from . import brief as brief_mod
 from . import settings as settings_mod
@@ -1161,7 +1161,7 @@ def _hold_wake(state: AppState, wake: effects.SessionWoken) -> None:
 def _send_wakes(state: AppState) -> None:
     """
     Send each session whose wakes are due one message of pptmstr's naming all
-    of them (``bus.wake_message``), through the pool to its live client
+    of them (``waketext.wake_message``), through the pool to its live client
     (``SessionPool.wake``).
 
     **Only a session that is there to read it.** One whose root is gone,
@@ -1215,7 +1215,7 @@ def _send_wakes(state: AppState) -> None:
             _say_peer_wakes_spent(state, snap, held, [])
             continue
         try:
-            state.bridge.submit(_wake(pool, root=root, text=bus.wake_message(snap, owed)))
+            state.bridge.submit(_wake(pool, root=root, text=waketext.wake_message(snap, owed)))
         except RuntimeError as exc:
             # The bridge's loop is not running, so nothing was handed over: the
             # wakes are kept for a later frame, as a starting session's are, and
@@ -1280,7 +1280,7 @@ def _say_decisions_named(
     """
     Tell the store which decisions raised on a channel the message ``sent``
     to ``session_id`` names as answered or dismissed, those folded past
-    ``bus.WAKE_DECISIONS_NAMED`` included, as the folded ids of a peer line
+    ``waketext.WAKE_DECISIONS_NAMED`` included, as the folded ids of a peer line
     count as told: the store marks them told to its lead
     (``PeerWakes.heard``). Called only once the send is handed to the pool
     (``_send_wakes``), so a session whose client is gone by then is taken as

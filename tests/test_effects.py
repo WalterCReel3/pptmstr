@@ -6,7 +6,8 @@ The bus and ``peer_text`` each had a copy; they were shown equal for every input
 (the bus's was the effects' with ``" ".join(text.splitlines())`` named
 ``_one_line``) and merged. These tests pin the outputs the copies produced, the
 rule against an oracle that does not call ``splitlines``, the spelling of
-``bus._one_line``'s rule inside it, and that the bus calls this one.
+``replies._one_line``'s rule inside it, and that the bus and its text modules
+call this one.
 """
 
 from __future__ import annotations
@@ -15,7 +16,10 @@ import random
 
 import pytest
 
-from pptmstr import bus, effects
+from pptmstr import bus, decisiontext, effects, replies
+from pptmstr.board import digesttext, graphtext
+from pptmstr.board import text as board_text
+from pptmstr.channels import text as channel_text
 from pptmstr.channels.records import PeerIdentity
 from pptmstr.effects import between_quotes, peer_text
 
@@ -123,16 +127,17 @@ def test_the_oracle_fails_a_rule_that_splits_on_newline_alone() -> None:
 
 def test_the_one_line_rule_inside_it_is_the_bus_one() -> None:
     """
-    ``between_quotes`` spells ``bus._one_line``'s rule because the bus imports this
+    ``between_quotes`` spells ``replies._one_line``'s rule because the bus imports this
     module; this holds the two spellings together.
     """
     for text in _generated(7, 5_000):
-        flat = bus._one_line(text).replace("\\", "\\\\").replace('"', '\\"')
+        flat = replies._one_line(text).replace("\\", "\\\\").replace('"', '\\"')
         assert between_quotes(text) == f'"{flat}"', repr(text)
 
 
 def test_the_bus_and_a_peers_description_quote_through_this_one_function() -> None:
-    assert bus.between_quotes is effects.between_quotes
+    for module in (bus, board_text, graphtext, digesttext, channel_text, decisiontext):
+        assert module.between_quotes is effects.between_quotes, module.__name__
     assert not hasattr(bus, "_said")
     peer = PeerIdentity(session="s1", title='say "hi"\\', project="p q", held=True)
     assert peer_text(peer) == 'session s1, card "say \\"hi\\"\\\\", project "p q"'

@@ -164,7 +164,7 @@ def peer_text(
     """
     A lead on another team, named alike to the operator and to every lead:
     ``session <id head>, card "<title>", project "<project>"``. The one
-    renderer of a ``PeerIdentity`` (``bus.peer_said`` is this), so a session
+    renderer of a ``PeerIdentity`` (``channels.text.peer_said`` is this), so a session
     reads the same in a lead's reply, in a wake, on the operator's queue row
     and on the card, and alike after a resume that restores its record.
 
@@ -587,7 +587,7 @@ class SessionWoken:
     """
     An order to the shell: something the session ``session_id`` asked for, or a
     worker's message to it, has arrived, and the session is to be told so with
-    a message of pptmstr's own (``bus.wake_lines``).
+    a message of pptmstr's own (``waketext.wake_message``).
 
     ``subject_id`` is what to read: the decision, command or concern id, or
     for ``PEER_MESSAGE`` the id of the link the mail waits on.

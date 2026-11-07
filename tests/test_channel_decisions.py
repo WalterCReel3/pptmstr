@@ -225,7 +225,8 @@ def test_a_read_describes_the_lead_that_raised_another_sessions_decision() -> No
 
 
 def test_a_decision_refused_for_its_links_age_names_the_lead_on_it_now() -> None:
-    from pptmstr.bus import _PEER_LEGEND, _decision_refusal_text
+    from pptmstr.channels.text import _PEER_LEGEND
+    from pptmstr.decisiontext import _decision_refusal_text
 
     text = _decision_refusal_text(DecisionRefusal.LINKED_AFTER, "d-1", True, now_on=lead_of(C))
 
@@ -402,7 +403,7 @@ def test_a_channel_decision_refused_for_its_links_age_says_that_and_no_more() ->
     RV5b 2: the link may be the first of its name, so the text says the link
     went live after the call and asserts no earlier link was closed.
     """
-    from pptmstr.bus import _decision_refusal_text
+    from pptmstr.decisiontext import _decision_refusal_text
 
     text = _decision_refusal_text(DecisionRefusal.LINKED_AFTER, "d-1", True)
 
@@ -415,7 +416,7 @@ def test_the_peer_lead_lists_its_own_sessions_work_before_the_other_leads() -> N
     RV6 5: in the peer lead's list, its own unread answer is kept ahead of the
     other lead's open decisions, so a list cut to fit drops the other lead's.
     """
-    from pptmstr import bus as bus_mod
+    from pptmstr import decisiontext
     from pptmstr.model import Answered
 
     theirs = [
@@ -430,7 +431,7 @@ def test_the_peer_lead_lists_its_own_sessions_work_before_the_other_leads() -> N
         raised_at=999.0,
     )
 
-    listed = bus_mod._decisions_text([*theirs, mine], None, 1_000.0, Z_LEAD, lambda n: "lead")
+    listed = decisiontext._decisions_text([*theirs, mine], None, 1_000.0, Z_LEAD, lambda n: "lead")
 
     assert "did not fit" in listed
     assert "MINE ANSWERED" in listed
