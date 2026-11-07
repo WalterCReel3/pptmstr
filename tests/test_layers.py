@@ -8,7 +8,8 @@ for-what-they-require.md``, T3, T7 and A7). Six are checked here:
 1. A module whose docstring says it imports no ImGui imports no ``imgui_bundle``,
    directly in any form, and does not reach it through the imports that run when
    it is imported.
-2. ``store`` imports no module that reads the disk.
+2. ``store`` imports no module that reads the disk, directly or through the imports
+   that run when it is imported, from whichever of its modules.
 3. No module outside ``pptmstr/ui`` imports ``pptmstr.ui``, the two composition
    roots aside.
 4. A module the docstrings or ``STYLE.md`` call pure calls no clock.
@@ -481,15 +482,84 @@ def disk_readers() -> frozenset[str]:
     )
 
 
-# What store imports that reads the disk. The rule is stated in
+STORE = "pptmstr.store"
+
+
+def in_store(module: str) -> bool:
+    """
+    ``store`` and, once it is a package, every module in it: the rule is the store's,
+    whichever of its modules holds the import.
+    """
+    return module == STORE or module.startswith(STORE + ".")
+
+
+def store_disk_edges(
+    edges: tuple[Import, ...], readers: frozenset[str], known: frozenset[str]
+) -> dict[tuple[str, str], list[str]]:
+    """
+    Every import of a disk reader that importing the store runs, as ``(reader,
+    importer)``, with a path from the store to that import.
+
+    A store module's own imports count whatever their kind, as rule 2 always has:
+    the store importing a reader inside a function or under ``TYPE_CHECKING`` is
+    still the store importing it. Beyond the store only eager edges are followed,
+    since a lazy or typing import elsewhere does not run when the store is imported.
+    The walk goes on through a reader, so a second reader behind the first is named
+    too. An importer inside the store is named ``STORE``, so moving an import
+    between store modules changes no key.
+    """
+    out: dict[str, list[Import]] = {}
+    for edge in edges:
+        if edge.target in known and (in_store(edge.source) or edge.kind == "eager"):
+            out.setdefault(edge.source, []).append(edge)
+    roots = sorted(module for module in known if in_store(module))
+    path: dict[str, list[str]] = {module: [module] for module in roots}
+    todo = list(roots)
+    found: dict[tuple[str, str], list[str]] = {}
+    while todo:
+        current = todo.pop(0)
+        for edge in sorted(out.get(current, ()), key=lambda e: (e.target, e.line)):
+            step = f"{edge.target} ({edge.source}:{edge.line}, {edge.kind})"
+            if edge.target in readers:
+                importer = STORE if in_store(current) else current
+                found.setdefault((edge.target, importer), [*path[current], step])
+            if edge.target not in path:
+                path[edge.target] = [*path[current], step]
+                todo.append(edge.target)
+    return found
+
+
+# Every import of a disk reader that importing the store runs, keyed by the reader and
+# the module that imports it (``store_disk_edges``), with why it is there and the
+# design that removes it. The rule is stated in
 # planning/2026-09-01-the-gates-measurement-outlives-the-approval.md:55-57 ("store.py
 # imports board, effects, intents and model and does not import the shell module that
-# reads disk"), and it does not hold: both edges below are eager and predate this test.
-STORE_DISK_EXCEPTIONS: dict[str, str] = {
-    "pptmstr.approval": "for Policy, Summary, peer_channel and summary_of; its"
-    " render_diff reads the file a write targets (``_read``)",
-    "pptmstr.boardlog": "for the restored-board records (Board, RestoredTask, ...); the"
-    " same module reads and appends the board log",
+# reads disk"), and it does not hold: every edge below is eager and predates this test.
+# B1 is planning/2026-11-07-the-board-log-is-one-journal-of-two.md, which takes the disk
+# out of boardlog; B5 is planning/2026-11-07-board-and-gate-packages.md, which deletes
+# approval for gate/ and leaves the store importing only its pure modules.
+STORE_DISK_EXCEPTIONS: dict[tuple[str, str], str] = {
+    # store.py:35, for Policy, Summary, peer_channel and summary_of.
+    ("pptmstr.approval", STORE): "approval's render_diff reads the file a write targets"
+    " (``_read``); B5 removes it",
+    # intents.py:32, for Policy.
+    ("pptmstr.approval", "pptmstr.intents"): "intents carries a Policy; B5 removes it",
+    # model.py:28, for DiffText, Policy and peer_channel.
+    ("pptmstr.approval", "pptmstr.model"): "model's records carry a Policy and a DiffText;"
+    " B5 removes it",
+    # templates.py:34, for Policy.
+    ("pptmstr.approval", "pptmstr.templates"): "a template names its Policy; B5 removes it",
+    # approval.py:29, for config_dir, which approval's records reach resolves.
+    ("pptmstr.settings", "pptmstr.approval"): "settings reads and saves settings.json;"
+    " B5 removes it with approval",
+    # store.py:37, for Board, Party, RestoredConcern, RestoredDecision, RestoredTask.
+    ("pptmstr.boardlog", STORE): "the restored-board records sit beside the board log's"
+    " reads and appends; B1 removes it",
+    # intents.py:33, for Board and Clock.
+    ("pptmstr.boardlog", "pptmstr.intents"): "BoardRestored carries a Board; B1 removes it",
+    # boardlog.py:131, for read_regular.
+    ("pptmstr.ondisk", "pptmstr.boardlog"): "the board log reads its files through ondisk;"
+    " B1 removes it",
 }
 
 
@@ -497,16 +567,55 @@ def test_the_disk_scan_sees_a_reader_and_a_pure_module() -> None:
     readers = disk_readers()
     assert "pptmstr.sessionfile" in readers
     assert "pptmstr.model" not in readers
+    # ondisk's only read is ``os.open``; boardlog reaches it only by a relative
+    # ``from .ondisk import read_regular``, which the import scan resolves.
+    assert "pptmstr.ondisk" in readers
+    assert any(
+        edge.source == "pptmstr.boardlog" and edge.target == "pptmstr.ondisk" for edge in imports()
+    )
 
 
-def test_store_imports_no_module_that_reads_the_disk() -> None:
-    found = {edge.target for edge in imports_of("pptmstr.store") if edge.target in disk_readers()}
-    new = found - set(STORE_DISK_EXCEPTIONS)
-    stale = set(STORE_DISK_EXCEPTIONS) - found
-    assert not new, f"store imports {sorted(new)}, which read the disk"
-    assert not stale, (
-        f"store no longer imports a disk reader through {sorted(stale)}: delete the "
-        f"STORE_DISK_EXCEPTIONS entry"
+def test_the_store_walk_follows_what_importing_the_store_runs() -> None:
+    def edge(source: str, target: str, kind: Kind = "eager") -> Import:
+        return Import(source, target, kind, 1)
+
+    known = frozenset(
+        {STORE, "pptmstr.store.arms", "pptmstr.a", "pptmstr.b", "pptmstr.r", "pptmstr.s"}
+    )
+    found = store_disk_edges(
+        (
+            edge(STORE, "pptmstr.store.arms"),
+            edge("pptmstr.store.arms", "pptmstr.a", "lazy"),
+            edge("pptmstr.a", "pptmstr.r"),
+            edge("pptmstr.r", "pptmstr.s"),
+            edge(STORE, "pptmstr.b"),
+            edge("pptmstr.b", "pptmstr.s", "lazy"),
+            edge("pptmstr.store.arms", "pptmstr.s", "typing"),
+        ),
+        readers=frozenset({"pptmstr.r", "pptmstr.s"}),
+        known=known,
+    )
+    assert set(found) == {
+        ("pptmstr.r", "pptmstr.a"),
+        ("pptmstr.s", "pptmstr.r"),
+        ("pptmstr.s", STORE),
+    }
+    assert found[("pptmstr.r", "pptmstr.a")][0] == "pptmstr.store.arms"
+
+
+def test_store_reaches_no_module_that_reads_the_disk() -> None:
+    readers = disk_readers()
+    reading = sorted(module for module in modules() if in_store(module) and module in readers)
+    assert not reading, f"{reading} read the disk themselves"
+    found = store_disk_edges(imports(), readers, frozenset(modules()))
+    new = set(found) - set(STORE_DISK_EXCEPTIONS)
+    stale = set(STORE_DISK_EXCEPTIONS) - set(found)
+    assert not new, "importing the store reaches a disk reader: " + "; ".join(
+        f"{reader} imported by {importer}, by " + " -> ".join(found[(reader, importer)])
+        for reader, importer in sorted(new)
+    )
+    assert not stale, "no longer reached, delete from STORE_DISK_EXCEPTIONS: " + ", ".join(
+        f"{reader} imported by {importer}" for reader, importer in sorted(stale)
     )
 
 
