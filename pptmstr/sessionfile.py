@@ -61,7 +61,6 @@ import contextlib
 import itertools
 import json
 import os
-import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,7 +68,7 @@ from typing import Any
 
 from . import boardlog, jsonfields, settings
 from .approval import Policy
-from .ondisk import read_regular
+from .ondisk import create_once, read_regular, replace
 
 # The format this build writes, and the newest it will write over.
 FORMAT = 1
@@ -562,24 +561,15 @@ def _update(
         if len(data) > MAX_FILE_BYTES:
             return Unwritten(f"{len(data)} bytes, over the {MAX_FILE_BYTES} a session file may be")
         directory.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=".session-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if isinstance(found, Absent):
-                # Linked, not renamed: the name was free when it was read, and a
-                # rename would replace whatever has been put there since without
-                # reading it.
-                try:
-                    os.link(tmp, path)
-                except FileExistsError:
-                    continue
-            else:
-                os.replace(tmp, path)
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
+        if isinstance(found, Absent):
+            # Linked, not renamed: the name was free when it was read, and a
+            # rename would replace whatever has been put there since without
+            # reading it.
+            try:
+                create_once(directory, (FILE_NAME,), data)
+            except FileExistsError:
+                continue
+        else:
+            replace(path, data, durable=True)
         return Written(path=path, record=after, skipped=tuple(skipped))
     return Unwritten(f"{FILE_NAME} kept being created by another writer; not written")

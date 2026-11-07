@@ -16,6 +16,7 @@ import itertools
 import json
 import os
 import random
+import stat
 import threading
 from pathlib import Path
 from typing import Any
@@ -279,6 +280,81 @@ def test_a_write_leaves_no_temp_file_whether_it_won_or_lost(tmp_path: Path) -> N
     for write in (cf.write_request, cf.write_run, cf.write_end):
         assert isinstance(write(ENDED[0], tmp_path), Unwritten)
     assert sorted(os.listdir(_dir(tmp_path))) == ["end.json", "request.json", "run.json"]
+
+
+# -- what reaches the device, and in which order ----------------------------------
+
+
+def _traced(monkeypatch: pytest.MonkeyPatch, *, refuse_dirs: bool = False) -> list[tuple[str, Any]]:
+    """
+    Every ``os.fsync`` and ``os.link`` as it happens: a flush as ``("dir", ino)``
+    or ``("file", ino)`` by what the descriptor holds, a link as ``("link", name)``.
+    """
+    steps: list[tuple[str, Any]] = []
+    real_fsync, real_link = os.fsync, os.link
+
+    def fsync(fd: int) -> None:
+        status = os.fstat(fd)
+        is_dir = stat.S_ISDIR(status.st_mode)
+        steps.append(("dir" if is_dir else "file", status.st_ino))
+        if is_dir and refuse_dirs:
+            raise OSError(5, "Input/output error")
+        real_fsync(fd)
+
+    def link(src: Any, dst: Any) -> None:
+        steps.append(("link", Path(dst).name))
+        real_link(src, dst)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "link", link)
+    return steps
+
+
+def test_a_request_is_flushed_then_named_then_its_directory_and_the_parent_flushed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steps = _traced(monkeypatch)
+    _written(cf.write_request(ASKED, tmp_path))
+    directory = _dir(tmp_path)
+
+    assert steps == [
+        ("file", (directory / cf.REQUEST_NAME).stat().st_ino),
+        ("link", cf.REQUEST_NAME),
+        ("dir", directory.stat().st_ino),
+        ("dir", directory.parent.stat().st_ino),
+    ]
+
+
+@pytest.mark.parametrize("name", [cf.RUN_NAME, cf.STARTED_NAME, cf.END_NAME])
+def test_every_file_is_flushed_before_its_name_and_its_directory_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    running = dataclasses.replace(ASKED, run=RUN)
+    _record_all(ASKED if name == cf.RUN_NAME else running, tmp_path)
+    steps = _traced(monkeypatch)
+    if name == cf.RUN_NAME:
+        _written(cf.write_run(running, tmp_path))
+    elif name == cf.STARTED_NAME:
+        _written(cf.write_started(SID, CID, STARTED, tmp_path))
+    else:
+        _written(cf.write_end(ENDED[0], tmp_path))
+    directory = _dir(tmp_path)
+
+    assert steps == [
+        ("file", (directory / name).stat().st_ino),
+        ("link", name),
+        ("dir", directory.stat().st_ino),
+    ]
+
+
+def test_a_directory_that_cannot_be_flushed_does_not_unwrite_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steps = _traced(monkeypatch, refuse_dirs=True)
+
+    assert cf.write_request(ASKED, tmp_path) == Written(_dir(tmp_path) / cf.REQUEST_NAME)
+    assert [kind for kind, _ in steps].count("dir") == 2
+    assert _command(cf.read_command(SID, CID, tmp_path)).asked == ASKED.asked
 
 
 # -- what follows what ------------------------------------------------------------

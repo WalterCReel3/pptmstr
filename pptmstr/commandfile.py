@@ -83,7 +83,6 @@ import itertools
 import json
 import os
 import stat
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -110,7 +109,7 @@ from .command import (
     is_tag_digest,
     is_valid_id,
 )
-from .ondisk import read_regular
+from .ondisk import create_once, read_regular, sync_directory
 
 # The format this build writes, and the newest whose directory it adds to.
 FORMAT = 1
@@ -774,43 +773,20 @@ def _encoded(obj: dict[str, Any]) -> bytes:
     return data
 
 
-def _sync_dir(directory: Path) -> None:
-    """
-    Flush a directory's entries to the device, so a name just linked survives the
-    machine and not only this process. Best effort: the name is already there
-    and cannot be taken back, so a failure here is not a failure to write.
-    """
-    with contextlib.suppress(OSError):
-        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-
-
 def _create(directory: Path, name: str, data: bytes) -> Written | Unwritten:
     """
-    Put ``data`` under ``name``, whole, if and only if the name is free.
+    Put ``data`` under ``name``, whole, if and only if the name is free, and
+    flush the directory so the name survives the machine as well as the file.
 
-    ``os.link`` fails on a name that exists, atomically, whatever is under it --
-    a file, a link, a FIFO. The bytes are on the device before the name is.
+    ``create_once`` with one name: it refuses a name that exists, whatever is
+    under it, and the bytes are on the device before the name is.
     """
-    target = directory / name
-    fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=f".{name}-", suffix=".tmp")
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.link(tmp, target)
-        except FileExistsError:
-            return Unwritten(ALREADY_RECORDED)
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-    _sync_dir(directory)
-    return Written(target)
+        linked = create_once(directory, (name,), data)
+    except FileExistsError:
+        return Unwritten(ALREADY_RECORDED)
+    sync_directory(directory)
+    return Written(linked.path)
 
 
 def _refusal_to_add(directory: Path, predecessor: str) -> str | None:
@@ -865,7 +841,7 @@ def write_request(command: Command, root: Path | None = None) -> Written | Unwri
         if not _is_real_dir(directory):
             return Unwritten(f"{directory.name} is there and is not a directory")
         result = _create(directory, REQUEST_NAME, data)
-        _sync_dir(directory.parent)
+        sync_directory(directory.parent)
         return result
     except _WRITE_ERRORS as exc:
         return _failed(exc)

@@ -41,10 +41,7 @@ than a re-merge and, unlike one, it leaves the order the operator is reading alo
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
-import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -52,7 +49,7 @@ from typing import Any, Protocol
 
 from claude_agent_sdk import SDKSessionInfo, list_sessions
 
-from pptmstr import drawable, settings
+from pptmstr import drawable, ondisk, settings
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,9 +177,11 @@ def save_overlay(overlay: Overlay, path: Path | None = None) -> None:
     """
     Write the overlay atomically.
 
-    Temporary file in the same directory, renamed over the target, so an interrupted
-    write leaves the previous overlay intact rather than a truncated one. rename(2)
-    is atomic only within a filesystem, which is why the temp file cannot go in /tmp.
+    Renamed over the target by ``ondisk.replace``, so an interrupted write leaves the
+    previous overlay intact rather than a truncated one, and the file keeps its
+    permission bits. Not flushed to the device first: this runs on the UI thread, and
+    after a power loss the old overlay is whole only if the filesystem orders the
+    rename after the data.
 
     Failures are swallowed: this is called when the operator clicks a bookmark, and a
     read-only config directory must not take down a frame.
@@ -196,16 +195,8 @@ def save_overlay(overlay: Overlay, path: Path | None = None) -> None:
     payload: dict[str, Any] = {"sessions": entries}
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".sessions-", suffix=".json")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True)
-                handle.write("\n")
-            os.replace(tmp, target)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+        data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        ondisk.replace(target, data, durable=False)
     except OSError:
         return
 

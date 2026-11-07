@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from pptmstr import boardlog, sessionfile, settings
+from pptmstr import boardlog, ondisk, sessionfile, settings
 from pptmstr.approval import Policy
 from pptmstr.sessionfile import (
     FORMAT,
@@ -739,7 +739,7 @@ def test_a_listing_is_the_session_directories_and_nothing_else(tmp_path: Path) -
     (good.parent / "board").mkdir()
     (good.parent / "board" / "00000000.json").write_text("{}")
     (good.parent / "lock").write_text("4242 1.5")
-    (good.parent / ".session-left.tmp").write_text("{")
+    (good.parent / f"{ondisk.TEMP_PREFIX}left.tmp").write_text("{")
     _put(tmp_path, "c-corrupt", b"{")
     (tmp_path / "a-board-only" / "board").mkdir(parents=True)
     _put(tmp_path, "d-detached", {"in_fleet": False})

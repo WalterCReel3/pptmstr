@@ -93,16 +93,23 @@ def _targets(module: str, is_package: bool, node: ast.Import | ast.ImportFrom) -
     """
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
-    if node.level:
-        package = module.split(".") if is_package else module.split(".")[:-1]
-        base = ".".join(package[: len(package) - (node.level - 1)])
-        full = f"{base}.{node.module}" if node.module else base
-    else:
-        full = node.module or ""
+    full = _from(module, is_package, node)
     known = modules()
     return [
         f"{full}.{alias.name}" if f"{full}.{alias.name}" in known else full for alias in node.names
     ]
+
+
+def _from(module: str, is_package: bool, node: ast.ImportFrom) -> str:
+    """
+    The absolute name of what ``node`` imports from: ``pptmstr.ondisk`` for ``from
+    .ondisk import x`` in ``pptmstr.brief``, ``pptmstr`` for ``from . import x``.
+    """
+    if not node.level:
+        return node.module or ""
+    package = module.split(".") if is_package else module.split(".")[:-1]
+    base = ".".join(package[: len(package) - (node.level - 1)])
+    return f"{base}.{node.module}" if node.module else base
 
 
 def _is_type_checking(test: ast.expr) -> bool:
@@ -181,7 +188,11 @@ def _dotted(func: ast.expr, aliases: dict[str, str]) -> str | None:
     return ".".join([aliases.get(parts[0], parts[0]), *parts[1:]])
 
 
-def _aliases(tree: ast.Module) -> dict[str, str]:
+def _aliases(tree: ast.Module, module: str | None, is_package: bool) -> dict[str, str]:
+    """
+    What each imported name stands for. A relative import resolves only when the
+    module it is in is given; without one it binds nothing.
+    """
     bound: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -189,9 +200,10 @@ def _aliases(tree: ast.Module) -> dict[str, str]:
                 bound[alias.asname or alias.name.split(".")[0]] = (
                     alias.name if alias.asname else alias.name.split(".")[0]
                 )
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+        elif isinstance(node, ast.ImportFrom) and (module is not None or not node.level):
+            source = _from(module or "", is_package, node)
             for alias in node.names:
-                bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+                bound[alias.asname or alias.name] = f"{source}.{alias.name}"
     return bound
 
 
@@ -202,12 +214,13 @@ class Call:
     line: int
 
 
-def calls(tree: ast.Module) -> Iterator[Call]:
+def calls(tree: ast.Module, module: str | None = None, is_package: bool = False) -> Iterator[Call]:
     """
     Every call whose callee is a dotted name, with the innermost enclosing function
-    (``<module>`` at the top level).
+    (``<module>`` at the top level). Given the ``module`` the tree is, a name bound
+    by a relative import is called by its absolute name.
     """
-    aliases = _aliases(tree)
+    aliases = _aliases(tree, module, is_package)
 
     def visit(node: ast.AST, function: str) -> Iterator[Call]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -222,6 +235,13 @@ def calls(tree: ast.Module) -> Iterator[Call]:
             yield from visit(child, function)
 
     yield from visit(tree, "<module>")
+
+
+def calls_of(module: str) -> Iterator[Call]:
+    """
+    ``calls`` over a module of the tree, with its relative imports resolved.
+    """
+    return calls(tree_of(module), module, modules()[module].name == "__init__.py")
 
 
 # -- the scan, checked ----------------------------------------------------------
@@ -453,6 +473,21 @@ def test_no_module_says_it_imports_no_imgui_unchecked() -> None:
 # writer here also reads or opens through one of these, so a writer is caught too.
 # ``?.read_text`` and ``?.read_bytes`` are ``Path``'s; an attribute call on anything
 # else named so is counted as well, which errs toward calling a module a reader.
+#
+# ``ondisk``'s functions are the disk calls a module makes without naming ``os``, so
+# each is here by its absolute name: a module whose only disk call is one of them is
+# a reader all the same. Only by that name, because ``?.replace`` would be every
+# ``str.replace``. ``test_every_function_ondisk_offers_is_a_disk_call`` holds the
+# list to ``ondisk`` itself.
+_ONDISK = "pptmstr.ondisk"
+_ONDISK_CALLS = frozenset(
+    {
+        f"{_ONDISK}.read_regular",
+        f"{_ONDISK}.create_once",
+        f"{_ONDISK}.replace",
+        f"{_ONDISK}.sync_directory",
+    }
+)
 _DISK_READS = frozenset(
     {
         "open",
@@ -465,6 +500,7 @@ _DISK_READS = frozenset(
         "?.read_text",
         "?.read_bytes",
         "?.iterdir",
+        *_ONDISK_CALLS,
     }
 )
 
@@ -478,7 +514,7 @@ def _reads_disk(call: Call) -> bool:
 @cache
 def disk_readers() -> frozenset[str]:
     return frozenset(
-        module for module in modules() if any(_reads_disk(call) for call in calls(tree_of(module)))
+        module for module in modules() if any(_reads_disk(call) for call in calls_of(module))
     )
 
 
@@ -573,6 +609,48 @@ def test_the_disk_scan_sees_a_reader_and_a_pure_module() -> None:
     assert any(
         edge.source == "pptmstr.boardlog" and edge.target == "pptmstr.ondisk" for edge in imports()
     )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from .ondisk import create_once\ndef w(): create_once(d, ('a',), b'')\n",
+        "from . import ondisk\ndef w(): ondisk.replace(p, b'', durable=False)\n",
+        "from .ondisk import sync_directory as flush\ndef w(): flush(d)\n",
+        "from pptmstr.ondisk import read_regular\ndef w(): read_regular(p, 1)\n",
+    ],
+)
+def test_a_write_through_ondisk_is_a_disk_call_however_it_is_imported(source: str) -> None:
+    assert any(_reads_disk(call) for call in calls(ast.parse(source), "pptmstr.x"))
+
+
+def test_a_method_named_like_an_ondisk_function_is_not_a_disk_call() -> None:
+    source = "def w(s): return s.replace('a', 'b'), replace(s), create_once(s)\n"
+    assert not any(_reads_disk(call) for call in calls(ast.parse(source), "pptmstr.x"))
+
+
+def test_every_function_ondisk_offers_is_a_disk_call() -> None:
+    offered = {
+        f"{_ONDISK}.{node.name}"
+        for node in tree_of(_ONDISK).body
+        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
+    }
+    assert offered == _ONDISK_CALLS
+
+
+def test_every_module_that_imports_ondisk_is_seen_calling_it() -> None:
+    """
+    By its ``ondisk`` call alone, not by the other reads it also makes: a writer
+    whose last ``open`` moves into ``ondisk`` must stay a reader.
+    """
+    importers = {edge.source for edge in imports() if edge.target == _ONDISK} - {_ONDISK}
+    assert importers
+    unseen = sorted(
+        module
+        for module in importers
+        if not any(call.dotted in _ONDISK_CALLS for call in calls_of(module))
+    )
+    assert not unseen, f"{unseen} import ondisk and the scan sees none of its calls"
 
 
 def test_the_store_walk_follows_what_importing_the_store_runs() -> None:
@@ -729,14 +807,14 @@ def test_a_module_called_pure_is_still_called_pure(module: str) -> None:
 
 @pytest.mark.parametrize("module", sorted(PURE))
 def test_a_pure_module_reads_no_clock(module: str) -> None:
-    found = [call for call in calls(tree_of(module)) if call.dotted in _CLOCKS]
+    found = [call for call in calls_of(module) if call.dotted in _CLOCKS]
     assert not found, f"{module} is pure ({PURE[module].file}) and reads a clock: " + ", ".join(
         f"{call.dotted} in {call.function} (line {call.line})" for call in found
     )
 
 
 def test_store_reads_a_clock_only_at_its_entry_point() -> None:
-    sites = {call.function for call in calls(tree_of("pptmstr.store")) if call.dotted in _CLOCKS}
+    sites = {call.function for call in calls_of("pptmstr.store") if call.dotted in _CLOCKS}
     new = sites - STORE_CLOCK_SITES
     stale = STORE_CLOCK_SITES - sites
     assert not new, f"store reads a clock in {sorted(new)}; take ``now`` as a parameter"

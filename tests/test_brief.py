@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from pptmstr import brief
+from pptmstr import brief, ondisk
 
 
 def entries(directory: Path) -> tuple[brief.BriefEntry, ...]:
@@ -258,7 +258,7 @@ def test_a_temp_file_mid_write_is_not_something_a_reader_trips_over(tmp_path: Pa
     in flight, so a reader that failed on the temp file would fail then.
     """
     brief.write_entry(tmp_path, "real")
-    (tmp_path / ".entry-abc123.md").write_text("half a rec", encoding="utf-8")
+    (tmp_path / f"{ondisk.TEMP_PREFIX}abc123.tmp").write_text("half a rec", encoding="utf-8")
 
     assert [e.ordinal for e in entries(tmp_path)] == [0]
 
@@ -558,7 +558,7 @@ def test_counting_an_empty_or_missing_directory_is_zero(tmp_path: Path) -> None:
 
 def test_counting_ignores_files_that_are_not_entries(tmp_path: Path) -> None:
     brief.write_entry(tmp_path, "real")
-    (tmp_path / ".entry-abc.md").write_text("mid-write", encoding="utf-8")
+    (tmp_path / f"{ondisk.TEMP_PREFIX}abc.tmp").write_text("mid-write", encoding="utf-8")
     (tmp_path / "notes.md").write_text("not an entry", encoding="utf-8")
 
     assert brief.count_entries(tmp_path) == 1

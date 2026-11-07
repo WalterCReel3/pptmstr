@@ -1,23 +1,33 @@
 """
-``ondisk.read_regular``: the one bounded read every on-disk record goes through.
+``ondisk``: the one bounded read and the two atomic writes every on-disk record
+goes through.
 
-Each test is one kind of thing that can sit under a record's name. The callers'
-own suites check what each of them makes of a refusal; these check the refusal
-itself, and that the bounds hold in the read and not only in the answer.
+For ``read_regular``, each test is one kind of thing that can sit under a
+record's name. The callers' own suites check what each of them makes of a
+refusal; these check the refusal itself, and that the bounds hold in the read and
+not only in the answer.
+
+For ``create_once``, ``replace`` and ``sync_directory``, the tests patch ``os``
+itself, as the callers' suites do, so each one also holds that the write reaches
+``os.link``, ``os.fsync`` and ``os.replace`` through the module.
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
+import stat
 import threading
 import tracemalloc
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from pptmstr import ondisk
-from pptmstr.ondisk import read_regular
+from pptmstr.ondisk import Linked, create_once, read_regular, replace, sync_directory
 
 LIMIT = 1 << 12
 
@@ -219,3 +229,239 @@ def test_no_descriptor_is_left_open(tmp_path: Path) -> None:
             read_regular(refused, LIMIT)
 
     assert set(os.listdir("/proc/self/fd")) == before
+
+
+# -- writing ------------------------------------------------------------------------
+
+
+def _names(directory: Path) -> list[str]:
+    return sorted(os.listdir(directory))
+
+
+def _traced(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, ...]]:
+    """
+    Every ``os.fsync``, ``os.link`` and ``os.replace``, in order: a flush as
+    ``("fsync", ino, is_dir)``, a placement as ``(name, source name, target)``.
+    """
+    steps: list[tuple[Any, ...]] = []
+    real_fsync, real_link, real_replace = os.fsync, os.link, os.replace
+
+    def fsync(fd: int) -> None:
+        status = os.fstat(fd)
+        steps.append(("fsync", status.st_ino, stat.S_ISDIR(status.st_mode)))
+        real_fsync(fd)
+
+    def link(src: Any, dst: Any) -> None:
+        steps.append(("link", Path(src).name, Path(dst)))
+        real_link(src, dst)
+
+    def rename(src: Any, dst: Any) -> None:
+        steps.append(("replace", Path(src).name, Path(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "link", link)
+    monkeypatch.setattr(os, "replace", rename)
+    return steps
+
+
+def _no_space(*args: object) -> None:
+    raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def test_create_once_puts_the_bytes_under_the_first_name_and_leaves_nothing_else(
+    tmp_path: Path,
+) -> None:
+    assert create_once(tmp_path, ("a.json",), b"{}\n") == Linked(tmp_path / "a.json", 0)
+    assert (tmp_path / "a.json").read_bytes() == b"{}\n"
+    assert _names(tmp_path) == ["a.json"]
+
+
+@pytest.mark.parametrize("squatter", ["file", "dangling", "fifo", "dir"])
+def test_create_once_passes_a_name_taken_by_anything_and_leaves_it_as_it_was(
+    tmp_path: Path, squatter: str
+) -> None:
+    taken = tmp_path / "0.json"
+    if squatter == "file":
+        taken.write_bytes(b"theirs")
+    elif squatter == "dangling":
+        taken.symlink_to(tmp_path / "nowhere")
+    elif squatter == "fifo":
+        os.mkfifo(taken)
+    else:
+        taken.mkdir()
+
+    linked = create_once(tmp_path, ("0.json", "1.json"), b"mine")
+
+    assert linked == Linked(tmp_path / "1.json", 1)
+    assert linked.path.read_bytes() == b"mine"
+    assert os.path.lexists(taken)
+    if squatter == "file":
+        assert taken.read_bytes() == b"theirs"
+    assert _names(tmp_path) == ["0.json", "1.json"]
+
+
+def test_create_once_takes_from_the_names_only_as_far_as_the_first_free_one(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "0").write_bytes(b"")
+    (tmp_path / "1").write_bytes(b"")
+    offered: list[int] = []
+
+    def counter() -> Iterator[str]:
+        n = 0
+        while True:
+            offered.append(n)
+            yield str(n)
+            n += 1
+
+    assert create_once(tmp_path, counter(), b"x").passed == 2
+    assert offered == [0, 1, 2]
+
+
+@pytest.mark.parametrize("names", [(), ("only",)])
+def test_create_once_raises_file_exists_when_every_name_is_taken(
+    tmp_path: Path, names: tuple[str, ...]
+) -> None:
+    (tmp_path / "only").write_bytes(b"theirs")
+
+    with pytest.raises(FileExistsError):
+        create_once(tmp_path, names, b"mine")
+
+    assert (tmp_path / "only").read_bytes() == b"theirs"
+    assert _names(tmp_path) == ["only"]
+
+
+def test_create_once_flushes_the_staged_file_before_it_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steps = _traced(monkeypatch)
+
+    linked = create_once(tmp_path, ("a",), b"x")
+
+    (_, ino, is_dir), (call, source, target) = steps
+    assert (ino, is_dir) == (linked.path.stat().st_ino, False)
+    assert (call, target) == ("link", tmp_path / "a")
+    assert source.startswith(ondisk.TEMP_PREFIX)
+
+
+def test_create_once_that_cannot_link_raises_and_leaves_no_staged_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(os, "link", _no_space)
+
+    with pytest.raises(OSError) as raised:
+        create_once(tmp_path, ("a", "b"), b"x")
+
+    assert raised.value.errno == errno.ENOSPC
+    assert _names(tmp_path) == []
+
+
+def test_create_once_that_cannot_flush_names_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(os, "fsync", _no_space)
+
+    with pytest.raises(OSError):
+        create_once(tmp_path, ("a",), b"x")
+
+    assert _names(tmp_path) == []
+
+
+def test_replace_puts_the_bytes_over_the_old_file_and_leaves_nothing_else(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "settings.json"
+    target.write_bytes(b"old")
+
+    replace(target, b"new", durable=False)
+
+    assert target.read_bytes() == b"new"
+    assert _names(tmp_path) == ["settings.json"]
+
+
+def test_replace_makes_an_absent_file_owner_only(tmp_path: Path) -> None:
+    target = tmp_path / "settings.json"
+
+    replace(target, b"new", durable=False)
+
+    assert target.read_bytes() == b"new"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o600, 0o444])
+def test_replace_keeps_the_permission_bits_of_the_file_it_replaces(
+    tmp_path: Path, mode: int
+) -> None:
+    target = tmp_path / "settings.json"
+    target.write_bytes(b"old")
+    target.chmod(mode)
+
+    replace(target, b"new", durable=False)
+
+    assert stat.S_IMODE(target.stat().st_mode) == mode
+    assert target.read_bytes() == b"new"
+
+
+def test_replace_over_a_link_replaces_the_link_and_not_what_it_points_at(
+    tmp_path: Path,
+) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_bytes(b"theirs")
+    elsewhere.chmod(0o644)
+    target = tmp_path / "settings.json"
+    target.symlink_to(elsewhere)
+
+    replace(target, b"new", durable=False)
+
+    assert not target.is_symlink() and target.read_bytes() == b"new"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert elsewhere.read_bytes() == b"theirs"
+
+
+@pytest.mark.parametrize("durable", [True, False])
+def test_replace_flushes_before_the_rename_only_when_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, durable: bool
+) -> None:
+    target = tmp_path / "settings.json"
+    steps = _traced(monkeypatch)
+
+    replace(target, b"new", durable=durable)
+
+    placed = ("replace", steps[-1][1], target)
+    assert placed[1].startswith(ondisk.TEMP_PREFIX)
+    if durable:
+        assert steps == [("fsync", target.stat().st_ino, False), placed]
+    else:
+        assert steps == [placed]
+
+
+@pytest.mark.parametrize("failing", ["replace", "fsync"])
+def test_replace_that_fails_leaves_the_old_file_whole_and_no_staged_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    target = tmp_path / "settings.json"
+    target.write_bytes(b"old")
+    monkeypatch.setattr(os, failing, _no_space)
+
+    with pytest.raises(OSError):
+        replace(target, b"new", durable=True)
+
+    assert target.read_bytes() == b"old"
+    assert _names(tmp_path) == ["settings.json"]
+
+
+def test_sync_directory_flushes_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steps = _traced(monkeypatch)
+
+    sync_directory(tmp_path)
+
+    assert steps == [("fsync", tmp_path.stat().st_ino, True)]
+
+
+def test_sync_directory_never_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sync_directory(tmp_path / "absent")
+    monkeypatch.setattr(os, "fsync", _no_space)
+    sync_directory(tmp_path)

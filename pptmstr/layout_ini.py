@@ -33,10 +33,10 @@ described above -- the behaviour without this module.
 
 from __future__ import annotations
 
-import os
 import re
-import tempfile
 from pathlib import Path
+
+from .ondisk import replace
 
 # One layout's Dear ImGui settings start at this marker and run to the next marker
 # of any kind.
@@ -119,8 +119,11 @@ def keep_layout_for(path: Path, new: str, beside: str) -> str | None:
     ``UnicodeDecodeError`` when the file could not be read or replaced; the caller
     decides that the app starts anyway.
 
-    Replaced by rename, so a crash part-way leaves the old file whole and not a
-    truncated one hello_imgui would read as no layout at all.
+    Replaced by rename (``ondisk.replace``), so a process crash part-way leaves the
+    old file whole and not a truncated one hello_imgui would read as no layout at
+    all. Not flushed to the device first, so after a power loss that holds only if
+    the filesystem orders the rename after the data. The file keeps its permission
+    bits.
     """
     try:
         # newline="" so the file's own line endings are what is written back.
@@ -131,16 +134,6 @@ def keep_layout_for(path: Path, new: str, beside: str) -> str | None:
     patched = with_window_beside(text, new, beside)
     if patched == text:
         return None
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(patched)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    replace(path, patched.encode("utf-8"), durable=False)
     added = patched.count(f"[Window][{new}]") - text.count(f"[Window][{new}]")
     return f"{new} added beside {beside} in {added} saved layout(s) of {path}"

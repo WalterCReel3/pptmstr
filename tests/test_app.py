@@ -4226,7 +4226,7 @@ def test_a_layout_saved_before_digest_existed_gets_it_in_boards_node(tmp_path: P
 def test_a_saved_layout_that_cannot_be_rewritten_is_said_and_the_app_still_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from pptmstr import app, layout_ini
+    from pptmstr import app
     from tests.test_layout_ini import SAVED
 
     ini = tmp_path / "pptmstr.ini"
@@ -4235,7 +4235,7 @@ def test_a_saved_layout_that_cannot_be_rewritten_is_said_and_the_app_still_start
     def refuse(*args: object) -> None:
         raise PermissionError("read-only")
 
-    monkeypatch.setattr(layout_ini.os, "replace", refuse)
+    monkeypatch.setattr(os, "replace", refuse)
     mark = LOG.snapshot()[1]
     app._keep_saved_layouts(ini)
 

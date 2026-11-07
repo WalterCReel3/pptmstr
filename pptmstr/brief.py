@@ -17,8 +17,8 @@ reason: a reader renders a consistent prefix while the writer keeps appending.
 atomic, so appending to a single document lets a reader catch a partial record, and
 rewriting a whole document per turn is what the 08-14 record calls *"not a slow path,
 it is a corruption path"*. Each entry is written to a temp file in the same directory
-and linked to a name that does not yet exist -- ``boardlog.append``'s primitive -- so
-an entry appears whole or not at all and is never written over. Its number comes from
+and linked to a name that does not yet exist -- ``ondisk.create_once`` -- so an
+entry appears whole or not at all and is never written over. Its number comes from
 the names in a listing, not from the entries read. No locking, no partial reads, no
 O(n^2). Directory listing gives the consistent-prefix property ``Transcript`` gets
 from ``published_length``.
@@ -39,13 +39,14 @@ whole record is organised around, one layer up.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import os
 import re
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import boardlog, settings
+from .ondisk import create_once
 
 # The first entry, and the only one that is not an amendment. Named rather than
 # numbered at the call site so "is this the premises" is one comparison.
@@ -202,12 +203,11 @@ def write_entry(
     Append one entry. Never overwrites one, whoever else is writing. Returns the
     path written.
 
-    The text goes to a temp file in the same directory, is flushed to the device,
-    and is then *linked* to its name -- ``boardlog.append``'s primitive. A name
-    therefore appears complete or not at all, and ``os.link`` fails on a name that
-    exists, atomically, in the kernel, which is the guarantee a check before a
-    rename cannot give. The writer that lost the name takes the next ordinal, so
-    two writers racing produce two entries.
+    The text is staged in the same directory, flushed to the device, and then
+    *linked* to its name by ``ondisk.create_once``, so a name appears complete or
+    not at all and a name that exists is refused atomically, in the kernel. The
+    writer that lost the name takes the next ordinal, so two writers racing
+    produce two entries.
 
     The first ordinal tried is one past the highest in a listing taken here, and a
     collision only moves up, so an entry never lands below one that was there when
@@ -222,39 +222,25 @@ def write_entry(
     two that name different kinds can land on the same ordinal.
 
     The directory entry is not flushed: losing the newest names to a power loss
-    leaves a consistent prefix. A process killed inside this leaves its
-    ``.entry-*`` temp file, which no reader takes for an entry; it is not removed
-    from here, because another writer's write in flight is a file of that shape.
+    leaves a consistent prefix. A process killed inside this leaves its staged
+    ``ondisk.TEMP_PREFIX`` file, which no reader takes for an entry; it is not
+    removed from here, because another writer's write in flight is a file of that
+    shape.
 
     Raises ``OSError`` rather than swallowing it, unlike ``settings.save``. A theme
     that fails to persist costs a preference; premises that fail to persist are
     invisible until a worker acts on their absence, and the operator has to be told.
     """
     directory.mkdir(parents=True, exist_ok=True)
-    ordinal = _next_ordinal(directory)
-
-    fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=".entry-", suffix=".md")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            if supersedes:
-                handle.write(
-                    f"supersedes: {', '.join(f'{o:0{_ORDINAL_WIDTH}d}' for o in supersedes)}\n\n"
-                )
-            handle.write(body.rstrip("\n") + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        while True:
-            name = kind or (PREMISES if ordinal == 0 else AMENDMENT)
-            target = directory / f"{ordinal:0{_ORDINAL_WIDTH}d}-{name}.md"
-            try:
-                os.link(tmp, target)
-                break
-            except FileExistsError:
-                ordinal += 1
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-    return target
+    names = (
+        f"{ordinal:0{_ORDINAL_WIDTH}d}-{kind or (PREMISES if ordinal == 0 else AMENDMENT)}.md"
+        for ordinal in itertools.count(_next_ordinal(directory))
+    )
+    header = ""
+    if supersedes:
+        header = f"supersedes: {', '.join(f'{o:0{_ORDINAL_WIDTH}d}' for o in supersedes)}\n\n"
+    data = (header + body.rstrip("\n") + "\n").encode("utf-8")
+    return create_once(directory, names, data).path
 
 
 def _next_ordinal(directory: Path) -> int:
@@ -300,9 +286,9 @@ def read_entries(directory: Path) -> tuple[BriefEntry, ...]:
     directory yet" would be distinguishing two spellings of the same fact.
 
     Files that do not match the naming are skipped rather than reported. The
-    directory holds temp files mid-write (``.entry-*``), and a reader that tripped
-    over one would fail exactly while a write was in flight -- which is the moment
-    the consistent-prefix property exists to protect.
+    directory holds staged files mid-write (``ondisk.TEMP_PREFIX``), and a reader
+    that tripped over one would fail exactly while a write was in flight -- which
+    is the moment the consistent-prefix property exists to protect.
     """
     try:
         names = sorted(p.name for p in directory.iterdir())
