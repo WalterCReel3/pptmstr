@@ -21,8 +21,13 @@ not re-implemented: ``append`` and ``encode`` move without a change to their
 bodies, so the writer here is HEAD's, and part 1 checks that the two functions that
 do change differ from HEAD's only as the design says.
 
-Exits non-zero if any check that is expected to hold does not. The one difference
-the design predicts (part 6) is reported, not failed.
+Exits non-zero if any check that is expected to hold does not. The differences
+between the two paths are pinned as checks that the difference is there: part 6's
+``Unrecognised.text``, and part 6b's, where a board record that does not decode
+under the board's table, in a channel's directory, is damage to HEAD and a newer
+kind to the proposed path, so the proposed sweep appends a close HEAD does not.
+Part 6b's table lists every variant; its pin fails if the proposed path stops
+writing that close.
 """
 
 from __future__ import annotations
@@ -456,6 +461,144 @@ def part5_6() -> None:
             )
 
 
+# -- 6b. a malformed board record in a channel's directory, through the sweep ---------
+
+
+class ProposedChannels(channels.FileChannels):
+    """HEAD's ``FileChannels`` but for ``read``, which is the proposed path."""
+
+    def read(self, link: channels.LinkKey) -> channels.Read:
+        return proposed_channel_read(self.root, link)
+
+
+def _bare(cls: type[Any]) -> bytes:
+    return json.dumps({"kind": cls.KIND, "at": 1}).encode() + b"\n"
+
+
+def _wrong_shape(cls: type[Any]) -> bytes | None:
+    """``cls``'s record with its first required field given the wrong JSON type."""
+    hints = get_type_hints(cls)
+    payload: dict[str, Any] = {"kind": cls.KIND, "at": 1}
+    target = None
+    for f in dataclasses.fields(cls):
+        if f.name == "at":
+            continue
+        if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING:
+            hint = hints[f.name]
+            if target is None:
+                target = f.name
+                payload[f.name] = {"not": "this"}
+            else:
+                payload[f.name] = value(hint, 1)
+                if isinstance(payload[f.name], tuple):
+                    payload[f.name] = list(payload[f.name])
+    if target is None:
+        return None
+    return json.dumps(payload).encode() + b"\n"
+
+
+def _whole(cls: type[Any]) -> bytes:
+    hints = get_type_hints(cls)
+    record = cls(**{f.name: value(hints[f.name], 1) for f in dataclasses.fields(cls)})
+    return boardlog.encode(record).encode()
+
+
+def part6b() -> None:
+    print("6b. a malformed board record in a channel's directory: read, judge, owes_close, sweep")
+    name = "sweep"
+    link_id = "earlier"
+    k = channels.LinkKey(name, link_id)
+
+    def fact(f: Fact) -> bytes:
+        return boardlog.encode(channels.encode(f)).encode()
+
+    created = fact(channels.LinkCreated(at=1.0, channel_id=link_id, members=("a", "b"), charter=""))
+    closed = fact(channels.LinkClosed(at=2.0, channel_id=link_id))
+    unpaired = fact(channels.LinkCreated(at=1.0, channel_id=link_id, members=("a",), charter=""))
+    stopped = boardlog.encode(boardlog.RecordingStopped(at=3.0, reason="r")).encode()
+    skeptic = b'{"kind":"task-claimed","at":1}\n'
+
+    cases: dict[str, list[bytes]] = {
+        "skeptic's record alone": [skeptic],
+        "created, then the skeptic's record": [created, skeptic],
+        "the skeptic's record, then created": [skeptic, created],
+        "created, skeptic's record, closed": [created, skeptic, closed],
+        "unpaired creation, then the skeptic's record": [unpaired, skeptic],
+        "created, skeptic's record, stop marker": [created, skeptic, stopped],
+        "created, a well-formed task-claimed": [created, _whole(boardlog.Claimed)],
+        "created, a malformed recording-stopped (reason 5)": [
+            created,
+            b'{"kind": "recording-stopped", "at": 1, "reason": 5}\n',
+        ],
+        "created, a malformed board record with no at": [created, b'{"kind": "task-claimed"}\n'],
+        "created, an unknown kind": [created, b'{"kind": "a-later-kind", "at": 1}\n'],
+    }
+    for cls in get_args(boardlog.Known):
+        cases[f"created, bare {cls.KIND}"] = [created, _bare(cls)]
+        wrong = _wrong_shape(cls)
+        if wrong is not None:
+            cases[f"created, {cls.KIND} with a field of the wrong shape"] = [created, wrong]
+        cases[f"created, well-formed {cls.KIND}"] = [created, _whole(cls)]
+
+    differ: list[str] = []
+    wrote: list[str] = []
+    for label, files in cases.items():
+        result = {}
+        for side, store_cls in (("head", channels.FileChannels), ("ours", ProposedChannels)):
+            base = SCRATCH / "sweep" / side / label.replace(" ", "_").replace("'", "")
+            d = base / k.name / k.link_id
+            d.mkdir(parents=True)
+            for i, data in enumerate(files):
+                (d / boardlog._name(i)).write_bytes(data)
+            store = store_cls(base)
+            read = store.read(k)
+            judged = channels.judge(k, read)
+            owed = channels.owes_close(k, read)
+            before = files_of(d)
+            writer = channels.ChannelWriter(store)
+            writer.submit(
+                channels.LinkKey(name, "later"),
+                channels.LinkCreated(at=10.0, channel_id="later", members=("a", "b"), charter=""),
+            )
+            reports = writer.close(timeout=10.0)
+            after = files_of(d)
+            # The sweep stamps its close with the clock, so a close is compared by
+            # what it is and whom it names, not by its time.
+            added = [
+                f"{p['kind']}({p.get('channel_id')})"
+                for p in (json.loads(after[n]) for n in after if n not in before)
+            ]
+            result[side] = (read, judged, owed, added, reports)
+            assert all(before[n] == after[n] for n in before), "a record file was rewritten"
+        h, o = result["head"], result["ours"]
+        same_owed = h[2] == o[2]
+        same_writes = h[3] == o[3]
+        same_state = type(h[1]) is type(o[1])
+        same_damage = (h[0].broken is None) == (o[0].broken is None) and h[0].damaged == o[0].damaged
+        mark = "WRITE" if not same_writes else "owed " if not same_owed else "read " if not (same_state and same_damage) else "same "
+        print(f"  {mark} {label}")
+        if mark != "same ":
+            for side, (read, judged, owed, added, _) in (("HEAD", h), ("proposed", o)):
+                print(
+                    f"        {side:>8}: damaged={read.damaged!s:<5} owes_close={owed!s:<5}"
+                    f" sweep appended={added}  judge={type(judged).__name__}"
+                )
+        if not same_owed or not same_writes:
+            differ.append(label)
+        if h[3] != o[3]:
+            wrote.append(label)
+
+    print(f"  {len(differ)} of {len(cases)} variants differ in owes_close or in what the sweep writes")
+    print(f"  {len(wrote)} of {len(cases)} variants: the sweep appends a file under one path only")
+    for label in wrote:
+        print(f"    - {label}")
+    check(
+        "the skeptic's case: created, then {kind: task-claimed, at: 1} -- the proposed sweep"
+        " appends a LinkClosed where HEAD's appends nothing (CONFIRMED when ok)",
+        "created, then the skeptic's record" in wrote,
+    )
+
+
 # -- --existing: every log under a directory, read only --------------------------------
 
 
@@ -491,6 +634,7 @@ def main() -> int:
     part2_3()
     part4()
     part5_6()
+    part6b()
     if args.existing is not None:
         existing(args.existing.resolve())
     print(f"\n{len(FAILURES)} failed" + (": " + "; ".join(FAILURES) if FAILURES else ""))

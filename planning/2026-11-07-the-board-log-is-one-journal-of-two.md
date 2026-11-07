@@ -264,3 +264,71 @@ is the condition's "existing logs", and it was **not run**.
   edit, which changes only stdlib imports (`git diff`, run), so the closure is HEAD's. Every
   store.py line cited above was checked against `git show HEAD:pptmstr/store.py`.
 - The premises brief was not read (see the header). The authorisation is relayed from the lead.
+
+## Addendum, 2026-11-07: a board record that does not decode, in a channel's directory (board task `r4-b1-readback-check`)
+
+**Verdict: CONFIRMED. As written, B1 changes a file write.** The skeptic's case holds. Part (4)
+point 6 above says "only the in-memory `Unrecognised.text` changes, never a file", and that is
+wrong for any board-kind record that does not decode under the board's table.
+
+**Mechanism (read, then run).** HEAD's `FileChannels.read` (channels.py:608) reads under
+the board's table. A board-kind record that does not decode, such as `{"kind":"task-claimed","at":1}`,
+is `Damage`, so the `Read` is `damaged=True` and `owes_close` returns False on its first line
+(channels.py:923-924). Under the proposed link-only table, the same record is `Unrecognised`,
+and `channels.decode` carries it (:271-273). `restore` puts it in `folded.unrecognised`, which no
+early return in `owes_close` looks at. So a log that also holds a live or unpaired creation of its
+link reaches `return True` (:930-931), and `ChannelWriter._sweep` appends a `LinkClosed` (:1127).
+That is the "short for what a newer build may place" bullet of `ChannelWriter`'s docstring, now
+applied to a record HEAD calls damage.
+
+**Measured (run).** This was run at bc6b0c1, where `boardlog.py` and `channels.py` are unchanged
+since 66af79e (`git log`, run), on Python 3.11.2. `readback.py` part 6b builds each variant twice
+in `$TMPDIR`. One copy is read by HEAD's `FileChannels` and the other by the same class with the
+proposed `read`. On each copy it calls `read`, `judge` and `owes_close`, then runs a real
+`ChannelWriter` that creates a second link under the same name and records the files the sweep
+added. Closes are compared by kind and `channel_id`, since the sweep stamps them with the
+clock. Results for the 73 variants, in `results.txt` (43 ok, 0 failed):
+
+| Outcome | n | Variants |
+|---|---|---|
+| **sweep writes a `LinkClosed` under the proposed path only** | 45 | created then the skeptic's record; the skeptic's record then created; an unpaired creation then the skeptic's record; and for **each of the 21 board kinds**, a live creation followed by the kind with only `kind`/`at`, or with its first required field of the wrong JSON type |
+| `owes_close` False → None, no write | 1 | the skeptic's record alone. HEAD settles the link for good; the proposed writer re-reads it at every relink of the name. That costs a read, not a write |
+| `Read` differs, same `owes_close`, no write | 2 | a creation, the skeptic's record, then a close or a stop marker. HEAD's `Read` is `damaged`, the proposed one is not; both are `Short` and owe nothing |
+| identical | 25 | each board kind well-formed (21: `Unrecognised` either way, both owe a close); a malformed `recording-stopped` (in both tables, so damage both ways); a board kind with no `at` (fails before the table); an unknown kind |
+
+`judge` is `Short` on both paths in every variant, so startup withholds the link either way. Only
+the reason text differs (`record 1 cannot be read: task-claimed: no task_id` vs `1 record(s) of a
+kind this build does not define (task-claimed)`). The difference that matters is the sweep's write.
+
+**The smallest change to B1 that keeps today's behaviour (run).** `FileChannels.read` reads under
+the board's table, `files.read(directory, boardlog.KINDS)`, and not under `codec.kinds()`. In a copy
+of `readback.py` in `$TMPDIR` with `LINKS = BOARD`, **0 of 73 variants differ** in `owes_close`, the
+sweep's writes, `damaged` or the `judge` state. The only checks that fail are the two pins of a
+difference (part 6's text, part 6b's close). Part 6's `Unrecognised.text` difference also goes
+away, because HEAD's re-encoding is kept. That variant is the fourth mutation listed above, and it is
+now the recommendation. It retracts three lines of section (3), "Channels: tunnelling stays, the
+board table goes":
+- the board-record branch in `channels.decode` (:269-270) stays, because it is reachable;
+- channels keeps importing `boardlog`. After B1 that module is pure, so the edge costs no layer
+  rule, but "channels no longer imports a single board name" is withdrawn;
+- the no-shared-kinds assert (:228-230) stays where it is.
+
+Nothing else in B1 changes. The board side, the moves, the patch sites and the `Kinds` parameter
+all stand. One cost is worth recording: with both production callers passing `boardlog.KINDS`, the
+parameter's only other users are the tests that simulate an older build and any future journal.
+The registry argument against a module global still holds, but the parameter no longer separates
+channels from the board.
+
+**Left open, for the operator, not settled here.** The behaviour this measurement preserves is
+arguably arbitrary. HEAD closes an earlier link that holds a *well-formed* board record (21 identical
+rows above) and never closes one that holds a *malformed* one. The difference turns on the board's
+schema, which a channel log has no reason to consult. Adopting the proposed behaviour would let
+channels drop the board table, as section (3) intended. It would be a declared change to the sweep,
+with its own test, and not part of a move that claims to write nothing new. The choice between
+"B1 keeps the board table" and "the sweep changes on purpose, in its own task" goes back to the
+operator. Until then, B1 is built with the board table.
+
+**Not run.** The build. `--existing` on any real log. mypy on part 6b. The fix variant was run
+only as a `sed`-mutated copy in `$TMPDIR`, not as an edit to this directory's `readback.py`. During
+this run, `tests/test_layers.py` held another worker's uncommitted edit. This task did not touch it,
+and it bears on nothing measured here.
