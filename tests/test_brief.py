@@ -159,6 +159,54 @@ def test_an_entry_never_overwrites_one_that_is_already_there(tmp_path: Path) -> 
     assert (tmp_path / "002-amendment.md").exists()
 
 
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root reads a mode-0 file, so the entry cannot be made unreadable",
+)
+def test_an_entry_that_cannot_be_read_still_holds_its_ordinal(tmp_path: Path) -> None:
+    """
+    A reader skips an entry it cannot open, so a writer that numbered from what it
+    read would offer that ordinal again. With a different kind the name differs, the
+    link succeeds, and two entries share a number.
+
+    Made unreadable by its mode rather than a patched read, so the hazard is the one
+    a real directory presents whatever call the reader opens it with.
+    """
+    brief.write_entry(tmp_path, "first")
+    blocked = brief.write_entry(tmp_path, "second", kind="correction")
+    os.chmod(blocked, 0)
+    try:
+        assert [e.ordinal for e in entries(tmp_path)] == [0]
+
+        written = brief.write_entry(tmp_path, "third")
+        again = brief.write_entry(tmp_path, "fourth", kind="correction")
+    finally:
+        os.chmod(blocked, 0o600)
+
+    assert (written.name, again.name) == ("002-amendment.md", "003-correction.md")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "000-premises.md",
+        "001-correction.md",
+        "002-amendment.md",
+        "003-correction.md",
+    ]
+
+
+def test_an_entry_that_is_not_utf8_does_not_block_a_later_write(tmp_path: Path) -> None:
+    """
+    The entry is still on disk and still an entry by name, so it keeps its ordinal
+    and the next write lands above it.
+    """
+    brief.write_entry(tmp_path, "first")
+    (tmp_path / "001-amendment.md").write_bytes(b"\xff\xfe not utf-8\n")
+
+    written = brief.write_entry(tmp_path, "second")
+
+    assert written.name == "002-amendment.md"
+    assert written.read_text(encoding="utf-8") == "second\n"
+    assert (tmp_path / "001-amendment.md").read_bytes() == b"\xff\xfe not utf-8\n"
+
+
 def test_an_entry_reads_back_as_it_was_written(tmp_path: Path) -> None:
     brief.write_entry(tmp_path, "the parser is fixed-width\n\nevery field is positional")
 
@@ -336,15 +384,14 @@ def test_a_racing_writer_does_not_destroy_the_entry_that_beat_it(
     computed name is a file that listing already saw.
 
     The race is injected instead of waited for. A stale listing is exactly what a
-    writer holds when another one lands between its `read_entries` and the link that
-    names its file; the link refuses an existing name, so the late writer takes the
-    next ordinal instead of replacing the entry that beat it.
+    writer holds when another one lands between its listing and the link that names
+    its file; the link refuses an existing name, so the late writer takes the next
+    ordinal instead of replacing the entry that beat it.
     """
     brief.write_entry(tmp_path, "first")
     winner = brief.write_entry(tmp_path, "the entry that got there first")
 
-    stale = brief.read_entries(tmp_path)[:1]
-    monkeypatch.setattr(brief, "read_entries", lambda _d: stale)
+    monkeypatch.setattr(brief, "_next_ordinal", lambda _d: 1)
 
     brief.write_entry(tmp_path, "the racer")
 

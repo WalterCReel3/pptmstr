@@ -17,9 +17,11 @@ reason: a reader renders a consistent prefix while the writer keeps appending.
 atomic, so appending to a single document lets a reader catch a partial record, and
 rewriting a whole document per turn is what the 08-14 record calls *"not a slow path,
 it is a corruption path"*. Each entry is written to a temp file in the same directory
-and renamed over its target -- ``settings.save``'s primitive, named there as the right
-one. No locking, no partial reads, no O(n^2). Directory listing gives the
-consistent-prefix property ``Transcript`` gets from ``published_length``.
+and linked to a name that does not yet exist -- ``boardlog.append``'s primitive -- so
+an entry appears whole or not at all and is never written over. Its number comes from
+the names in a listing, not from the entries read. No locking, no partial reads, no
+O(n^2). Directory listing gives the consistent-prefix property ``Transcript`` gets
+from ``published_length``.
 
 **There is no file called ``brief.md``, deliberately.** Append-only plus permitted
 contradiction means a superseded premise is still on disk and still readable, so a
@@ -229,8 +231,7 @@ def write_entry(
     invisible until a worker acts on their absence, and the operator has to be told.
     """
     directory.mkdir(parents=True, exist_ok=True)
-    existing = read_entries(directory)
-    ordinal = (existing[-1].ordinal + 1) if existing else 0
+    ordinal = _next_ordinal(directory)
 
     fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=".entry-", suffix=".md")
     try:
@@ -254,6 +255,19 @@ def write_entry(
         with contextlib.suppress(OSError):
             os.unlink(tmp)
     return target
+
+
+def _next_ordinal(directory: Path) -> int:
+    """
+    One past the highest ordinal named in the directory, or 0 for none.
+
+    From the names alone, not from ``read_entries``: an entry that cannot be opened
+    or decoded is skipped by a reader but still holds its name, and numbering from
+    what was read would offer that ordinal again or fail on the bytes. Raises
+    ``OSError`` if the directory cannot be listed, as ``write_entry`` does.
+    """
+    ordinals = [int(m.group(1)) for m in map(_ENTRY.match, os.listdir(directory)) if m]
+    return max(ordinals) + 1 if ordinals else 0
 
 
 def count_entries(directory: Path) -> int:
