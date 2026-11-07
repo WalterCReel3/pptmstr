@@ -1696,7 +1696,7 @@ def test_a_worker_is_shown_its_own_sessions_board_and_no_other() -> None:
 
 def test_the_board_read_and_the_pane_are_one_projection() -> None:
     """
-    The reason ``board.py`` moved out of ``ui/``. Two derivations of "what is on
+    The reason ``board/rows.py`` moved out of ``ui/``. Two derivations of "what is on
     this board" would be two boards, and the operator and the team disagreeing
     about the work is the failure the whole record is organised around.
 
@@ -1704,7 +1704,7 @@ def test_the_board_read_and_the_pane_are_one_projection() -> None:
     formats what the pane draws, and a second implementation in ``bus.py`` is
     exactly what this forbids.
     """
-    from pptmstr.board import board_tasks
+    from pptmstr.board.rows import board_tasks
 
     store = Store()
     with _live_bus() as bus:
@@ -2347,7 +2347,7 @@ def test_the_ceiling_holds_across_board_shapes(tasks: int, notes: int) -> None:
     this asserts the bound it actually holds: the ceiling, or the structure plus
     the notice saying the board did not fit.
     """
-    from pptmstr.board import board_concerns, board_tasks
+    from pptmstr.board.rows import board_concerns, board_tasks
     from pptmstr.bus import _board_line
     from pptmstr.replies import _MAX_BOARD_CHARS
 
@@ -2458,7 +2458,7 @@ def test_rows_survive_a_board_whose_structure_alone_exceeds_the_ceiling() -> Non
 def _team(store: Store) -> None:
     """
     The records a role name is derived from. Without them every owner and sender
-    renders as ``board.UNKNOWN``, which is honest and says nothing about whether a
+    renders as ``board.rows.UNKNOWN``, which is honest and says nothing about whether a
     row names the right agent.
     """
     from pptmstr.intents import AgentSpawned
@@ -2652,7 +2652,7 @@ def test_the_ceiling_holds_when_rows_carry_results(tasks: int, notes: int) -> No
     A third paragraph per row is a third thing laid out on an indent, which is the
     exact place the ceiling was once exceeded by five characters a row.
     """
-    from pptmstr.board import board_concerns, board_tasks
+    from pptmstr.board.rows import board_concerns, board_tasks
     from pptmstr.bus import _board_line
     from pptmstr.replies import _MAX_BOARD_CHARS
 
@@ -3081,7 +3081,7 @@ def test_a_standing_survives_a_board_that_cut_every_word_it_qualifies() -> None:
     would leave the row's surviving attributions reading as the settled kind, so
     it is structure: present at a budget of nothing.
     """
-    from pptmstr.board import board_concerns, board_tasks
+    from pptmstr.board.rows import board_concerns, board_tasks
     from pptmstr.bus import _board_line
     from pptmstr.model import Basis
 
@@ -3248,7 +3248,7 @@ def test_a_property_is_shown_whole_on_a_board_that_cut_everything_else() -> None
     specification is cut and no property is: the sentence is structure, measured
     in the floor, and the ceiling still holds over it.
     """
-    from pptmstr.board import board_concerns, board_tasks
+    from pptmstr.board.rows import board_concerns, board_tasks
     from pptmstr.bus import _board_line
     from pptmstr.model import MAX_PROPERTY_CHARS
     from pptmstr.replies import _MAX_BOARD_CHARS
@@ -3410,7 +3410,7 @@ def test_a_list_of_what_was_not_run_survives_a_board_that_cut_every_word_of_it()
     reader still knows the claimer named something -- and is served the list
     before the result when there is room for one of them.
     """
-    from pptmstr.board import board_tasks
+    from pptmstr.board.rows import board_tasks
     from pptmstr.bus import _board_line
 
     store = Store()
@@ -3593,8 +3593,8 @@ def test_a_digest_reply_lists_every_unverified_statement_and_incident_the_board_
     could: the counts must not move, and the reply is held to the ceiling or to
     its own structure, whichever is larger.
     """
+    from pptmstr.board.digest import digest
     from pptmstr.bus import _digest_text
-    from pptmstr.digest import digest
     from pptmstr.replies import _MAX_BOARD_CHARS
     from tests.test_digest import (
         S1,
@@ -7052,7 +7052,7 @@ def test_a_result_behind_its_specification_is_not_told_the_text_changed_while_it
     tell that amendment from one made under the holder: the sentence is true of
     both. Built here as the later one -- completed at version one, then amended.
     """
-    from pptmstr.board import board_tasks
+    from pptmstr.board.rows import board_tasks
     from pptmstr.bus import _landed_behind_text
 
     store = Store()
@@ -7088,7 +7088,7 @@ def test_who_a_stale_holder_is_sent_to_is_the_sessions_answer_and_not_read_off_t
     is used when the session routes it, and one that looks like an address is
     not when the session does not.
     """
-    from pptmstr.board import BoardTask, BoardVersion
+    from pptmstr.board.rows import BoardTask, BoardVersion
     from pptmstr.bus import _landed_behind_text
 
     row = BoardTask(

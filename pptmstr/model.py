@@ -1518,7 +1518,7 @@ class AgentRecord:
     # sub-agent's node -- the reason this comes from the hook rather than from the
     # message stream.
     deliverable: str | None = None
-    # When this node last read a digest (``digest.py``), or None if it never has.
+    # When this node last read a digest (``board/digest.py``), or None if it never has.
     #
     # The mark a round is counted from, and it is here for the reason a delivered
     # concern carries ``delivered_at``: "since I last asked" kept in the bus
@@ -3070,7 +3070,7 @@ class Task:
         session at once, which is precisely the "claim work you were never shown"
         hole this predicate closes.
 
-        One predicate rather than two agreeing filters: ``board.board_tasks`` shows
+        One predicate rather than two agreeing filters: ``board.rows.board_tasks`` shows
         what it returns and ``store._pick_claim`` hands out what it returns, and
         those two had drifted -- the pane filtered by session and the reducer
         filtered by nothing.
@@ -3183,7 +3183,7 @@ class Task:
 
 
 # What an agent of an earlier run of its session is called on every surface, after
-# its address (``Snapshot.of_earlier_run``). ``board.FOREIGN`` is the same
+# its address (``Snapshot.of_earlier_run``). ``board.rows.FOREIGN`` is the same
 # qualifier in space; this one is in time.
 #
 # It says "run" and not "restart" because two things end a run and only one of
@@ -4798,7 +4798,7 @@ class Snapshot:
 
         Structural rather than presentational, which is why it sits beside
         ``children_of`` -- ``order`` is a pre-order walk this class already owns, and
-        the bus address projection in ``board.py`` needs it from outside ``ui/``.
+        the bus address projection in ``board/rows.py`` needs it from outside ``ui/``.
         """
         return tuple(
             self.nodes[nid]

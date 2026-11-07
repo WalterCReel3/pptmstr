@@ -14,7 +14,7 @@ import dataclasses
 import pytest
 
 from pptmstr import boardlog, bus
-from pptmstr.board import (
+from pptmstr.board.rows import (
     FOREIGN,
     UNDELIVERABLE,
     UNKNOWN,
@@ -944,7 +944,7 @@ def test_an_unstated_basis_is_named_as_unstated_and_a_stated_one_as_said() -> No
     the system checked it; and an absence that is named, because an unmarked text
     beside marked ones reads as the settled kind.
     """
-    from pptmstr.board import basis_label
+    from pptmstr.board.words import basis_label
     from pptmstr.model import Basis
 
     assert basis_label(None) == "basis unstated"
@@ -999,7 +999,7 @@ def test_what_was_not_run_is_unstated_until_said_and_nothing_only_when_stated() 
     collapse: a claimer that did not say, and one that said nothing was left.
     Neither label for a stated answer vouches for it.
     """
-    from pptmstr.board import not_run_label
+    from pptmstr.board.words import not_run_label
 
     assert not_run_label(None) == "not run: unstated"
     assert not_run_label("") == "says nothing was left unrun"
@@ -1008,7 +1008,7 @@ def test_what_was_not_run_is_unstated_until_said_and_nothing_only_when_stated() 
 
 
 def test_an_incident_is_marked_and_an_unmarked_concern_says_nothing_either_way() -> None:
-    from pptmstr.board import incident_marker, property_label
+    from pptmstr.board.words import incident_marker, property_label
 
     assert incident_marker(True) == "INCIDENT "
     assert incident_marker(False) == ""
@@ -1095,7 +1095,7 @@ def test_the_ledger_lists_every_finished_task_nobody_said_was_run_in_full() -> N
     The unstated rows are the point. A ledger of only the rows that volunteered
     something would be shortest for the team that said least.
     """
-    from pptmstr.board import unrun_ledger
+    from pptmstr.board.rows import unrun_ledger
 
     store = Store()
     _round(store)
@@ -1111,7 +1111,7 @@ def test_the_ledger_lists_every_finished_task_nobody_said_was_run_in_full() -> N
 
 
 def test_the_incident_list_is_the_marked_concerns_and_keeps_a_withdrawn_one() -> None:
-    from pptmstr.board import incidents
+    from pptmstr.board.rows import incidents
 
     store = Store()
     _round(store)
@@ -1124,7 +1124,7 @@ def test_the_incident_list_is_the_marked_concerns_and_keeps_a_withdrawn_one() ->
 
 
 def test_the_ledger_and_the_incident_list_are_scoped_to_the_session_asked_about() -> None:
-    from pptmstr.board import incidents, unrun_ledger
+    from pptmstr.board.rows import incidents, unrun_ledger
 
     store = Store()
     _round(store)
@@ -1140,7 +1140,7 @@ def test_a_row_carries_its_version_what_its_holder_was_handed_and_every_earlier_
     The amender is a name a reader can use: a role for an agent, and the operator
     by name where the record holds None.
     """
-    from pptmstr.board import OPERATOR, BoardVersion
+    from pptmstr.board.rows import OPERATOR, BoardVersion
     from pptmstr.intents import TaskAmended
     from pptmstr.model import Basis
 
@@ -1188,7 +1188,7 @@ def _versioned(*then: object) -> Store:
 
 
 def test_a_row_at_its_declared_specification_says_nothing_about_versions() -> None:
-    from pptmstr.board import stale_label, version_label
+    from pptmstr.board.rows import stale_label, version_label
 
     (row,) = board_tasks(_versioned().snapshot(), S1)
 
@@ -1197,7 +1197,7 @@ def test_a_row_at_its_declared_specification_says_nothing_about_versions() -> No
 
 
 def test_a_row_says_which_version_it_shows_and_who_replaced_the_last_one() -> None:
-    from pptmstr.board import version_label
+    from pptmstr.board.rows import version_label
     from pptmstr.intents import TaskAmended
 
     store = _versioned(
@@ -1217,7 +1217,7 @@ def test_a_row_says_when_its_holder_or_its_result_is_behind_the_specification() 
     been shown the text; once finished it is which text the result is an account
     of. A holder shown the current one, and a task nobody holds, say nothing.
     """
-    from pptmstr.board import stale_label
+    from pptmstr.board.rows import stale_label
     from pptmstr.intents import TaskAmended, TaskReleased, TaskVersionHanded
 
     dev = (S1, "agent-dev")
@@ -1248,7 +1248,7 @@ def test_a_claim_that_recorded_no_version_is_said_to_be_unrecorded_once_the_text
     """
     import dataclasses
 
-    from pptmstr.board import BoardVersion, stale_label
+    from pptmstr.board.rows import BoardVersion, stale_label
 
     (row,) = board_tasks(_versioned().snapshot(), S1)
     unrecorded = dataclasses.replace(row, claimed_version=None)
@@ -1268,7 +1268,7 @@ def test_a_replacers_name_cannot_break_the_line_a_version_is_said_on() -> None:
     """A role name is an agent's type, which is a string a model chose."""
     import dataclasses
 
-    from pptmstr.board import BoardVersion, version_label
+    from pptmstr.board.rows import BoardVersion, version_label
 
     (row,) = board_tasks(_versioned().snapshot(), S1)
     forged = dataclasses.replace(
@@ -1438,7 +1438,7 @@ def test_an_earlier_runs_agent_is_named_as_one_while_this_process_still_has_its_
     stopped. The new run's builder keeps its own address beside it, and the
     address alone -- what a log record is written with -- carries no qualifier.
     """
-    from pptmstr.board import address_in_session
+    from pptmstr.board.rows import address_in_session
 
     snap = _started_again().snapshot()
 
@@ -1498,7 +1498,7 @@ def test_a_row_the_operator_closed_says_so_and_is_nobodys_completion() -> None:
     who ended it, and that no work is reported. It is off the ledger of results
     nobody said were run, because it reports no result of anybody's.
     """
-    from pptmstr.board import closed_label, unrun_ledger
+    from pptmstr.board.rows import closed_label, unrun_ledger
     from pptmstr.intents import TaskClosed
 
     store = Store()
@@ -1524,7 +1524,7 @@ def test_a_claimer_that_types_the_closing_words_has_not_closed_its_task() -> Non
     """
     The label is read off the store's fact and never off text an agent wrote.
     """
-    from pptmstr.board import closed_label, unrun_ledger
+    from pptmstr.board.rows import closed_label, unrun_ledger
 
     store = Store()
     team(store, S1)
@@ -1546,7 +1546,7 @@ def test_a_row_its_declarer_withdrew_says_so_and_is_nobodys_completion() -> None
     ``closed_label``'s rule for a withdrawal, under its own words, and off the
     ledger for the same reason: it reports no result of anybody's work.
     """
-    from pptmstr.board import closed_label, ended_label, unrun_ledger, withdrawn_label
+    from pptmstr.board.rows import closed_label, ended_label, unrun_ledger, withdrawn_label
     from pptmstr.intents import TaskWithdrawn
 
     store = Store()
@@ -1585,7 +1585,7 @@ def test_a_withdrawn_row_says_who_withdrew_it_and_whose_words_its_reason_is(
     The row carries the task's two facts, and its label -- which the board
     pane draws through ``ended_label`` -- is ``model.withdrawal_label`` of them.
     """
-    from pptmstr.board import ended_label, withdrawn_label
+    from pptmstr.board.rows import ended_label, withdrawn_label
     from pptmstr.intents import AgentFinished, TaskWithdrawn
     from pptmstr.model import AgentState, withdrawal_label
 
@@ -1608,7 +1608,7 @@ def test_a_withdrawn_row_says_who_withdrew_it_and_whose_words_its_reason_is(
 
 
 def test_a_claimer_that_types_the_withdrawal_words_has_not_withdrawn_its_task() -> None:
-    from pptmstr.board import ended_label, unrun_ledger
+    from pptmstr.board.rows import ended_label, unrun_ledger
 
     store = Store()
     team(store, S1)
@@ -1632,7 +1632,7 @@ def test_a_row_waiting_on_another_sessions_id_says_it_cannot_end_and_what_ends_i
     fleet-wide, so declaring it here is refused and the wait has no end an agent
     can reach -- the row names it, says so, and says who can end it.
     """
-    from pptmstr.board import foreign_wait_label
+    from pptmstr.board.rows import foreign_wait_label
 
     store = Store()
     team(store, S1)
@@ -1940,7 +1940,7 @@ def test_a_gate_row_lists_its_writers_now_and_a_finished_one_only_what_was_decla
     ``writers``, which says which of those came from the word rather than from
     ``depends_on``. Neither is missing, and none is another session's.
     """
-    from pptmstr.board import all_writers_label
+    from pptmstr.board.rows import all_writers_label
     from pptmstr.model import ALL_WRITERS
 
     store = Store()

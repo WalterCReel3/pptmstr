@@ -21,7 +21,7 @@ import pytest
 
 from pptmstr import boardlog
 from pptmstr.approval import Policy
-from pptmstr.board import board_concerns, board_tasks
+from pptmstr.board.rows import board_concerns, board_tasks
 from pptmstr.boardlog import Clock, RestoredConcern, RestoredTask
 from pptmstr.command import (
     MAX_COMMAND_CHARS,
@@ -5737,10 +5737,10 @@ def test_a_restored_task_keeps_whether_it_waits_on_every_writer(gate: bool) -> N
 
 def test_graph_queries_pick_up_a_gate_on_every_writer_with_no_change_of_their_own() -> None:
     """
-    ``boardgraph`` reads ``Task.blocked_on``: on a D1 board the gate is not
+    ``board.graph`` reads ``Task.blocked_on``: on a D1 board the gate is not
     ready, and why it is blocked names the writers.
     """
-    from pptmstr.boardgraph import ready, why_blocked
+    from pptmstr.board.graph import ready, why_blocked
 
     store = _gated(*(_writer(f"w{n}", 2.0 + n) for n in range(1, 4)))
     store.apply(TaskClaimRequested(CHILD, request_id="k", task_id="w2"))

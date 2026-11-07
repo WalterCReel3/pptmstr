@@ -53,7 +53,7 @@ from typing import assert_never
 
 from imgui_bundle import imgui
 
-from ..board import role_name
+from ..board.rows import role_name
 from ..bridge import Bridge
 from ..effects import peer_identity, peer_text
 from ..intents import DecisionAnswered, DecisionDismissed

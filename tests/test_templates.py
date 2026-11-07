@@ -1174,10 +1174,10 @@ def test_a_lead_is_told_what_a_property_is_for_and_how_to_read_the_absences(
 def test_the_prompts_spell_the_labels_the_board_renders() -> None:
     """
     templates.py spells the board's labels instead of importing them, as it spells
-    the tool names. A label reworded in ``board.py`` has to reach the sentence
+    the tool names. A label reworded in ``board/words.py`` has to reach the sentence
     that tells an agent what the label means.
     """
-    from pptmstr.board import incident_marker, not_run_label, property_label
+    from pptmstr.board.words import incident_marker, not_run_label, property_label
 
     worker = worker_prompt(Role(name="w", description="d", prompt="p"))
     lead = _flat(lead_briefing(FEATURE))
@@ -1211,7 +1211,7 @@ def test_the_digest_is_the_leads_instruction_and_every_role_can_still_call_it() 
 
 
 def test_the_briefing_names_the_slots_as_the_digest_heads_them() -> None:
-    from pptmstr.digest import Digest, incidents_heading, unverified_heading
+    from pptmstr.board.digest import Digest, incidents_heading, unverified_heading
 
     briefing = lead_briefing(FEATURE)
     empty = Digest(since=None, changed=(), waiting=(), unverified=(), incidents=())

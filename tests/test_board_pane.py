@@ -27,7 +27,7 @@ import imscribe
 import pytest
 from imgui_bundle import icons_fontawesome_6 as fa
 
-from pptmstr.board import BoardConcern, BoardTask, board_concerns, board_tasks
+from pptmstr.board.rows import BoardConcern, BoardTask, board_concerns, board_tasks
 from pptmstr.bridge import Bridge
 from pptmstr.model import (
     AgentRecord,
@@ -400,7 +400,7 @@ def test_a_concern_the_operator_rewrote_says_so() -> None:
 
 
 def test_waiting_mail_to_a_party_that_is_not_running_says_so_in_place_of_waiting() -> None:
-    from pptmstr.board import UNDELIVERABLE
+    from pptmstr.board.rows import UNDELIVERABLE
 
     stuck = dataclasses.replace(board_concern(), undeliverable=True)
 
@@ -423,7 +423,7 @@ def _concern_colours(monkeypatch, *, undeliverable: bool) -> dict[str, object]:
 def test_an_undeliverable_concern_is_drawn_in_the_warning_colour_and_a_waiting_one_is_not(
     monkeypatch,
 ) -> None:
-    from pptmstr.board import UNDELIVERABLE
+    from pptmstr.board.rows import UNDELIVERABLE
 
     stuck = _concern_colours(monkeypatch, undeliverable=True)
     waiting = _concern_colours(monkeypatch, undeliverable=False)
@@ -439,7 +439,7 @@ def test_a_concern_the_board_marks_undeliverable_reaches_the_pane_marked(monkeyp
     not one this file set: mail posted to a party a restored log named and
     nothing in this process answers to.
     """
-    from pptmstr.board import UNDELIVERABLE, board_concerns
+    from pptmstr.board.rows import UNDELIVERABLE, board_concerns
     from pptmstr.model import Restore
 
     gone: NodeId = ("s1", "agent-old")
@@ -3193,7 +3193,7 @@ def test_the_board_pane_draws_no_line_of_the_digest(monkeypatch, seed: int) -> N
     item or an alarm row -- and no triangle is the digest's. The bodies the digest
     quotes are not counted: a result and a note are on the board's own rows too.
     """
-    from pptmstr.digest import digest, digest_mark
+    from pptmstr.board.digest import digest, digest_mark
     from pptmstr.intents import DigestRead
     from pptmstr.ui import digest_pane
     from tests.test_digest import S1, generated_round

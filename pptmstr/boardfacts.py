@@ -32,7 +32,7 @@ reducer arm they follow does.
 
 **A fact goes to one session's log**, and ``Fact`` says which: a task's is its
 declarer's, the session whose board shows it (``Task.belongs_to``), and a
-concern's is its sender's (``board.board_concerns``), and a decision's is its
+concern's is its sender's (``board.rows.board_concerns``), and a decision's is its
 asker's (``Decision.session_id``), whichever agent of the session asked and
 whoever ended it. A task with no declarer is on no board and has no log to go
 to, so nothing is derived for it.
@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from typing import TypeVar, assert_never
 
 from . import boardlog
-from .board import address_in_session
+from .board.rows import address_in_session
 from .boardlog import Clock, Record
 from .intents import (
     AgentFinished,
@@ -672,7 +672,7 @@ def _address(snap: Snapshot, node: NodeId | None) -> str:
     What ``node``'s own session calls it, or the empty string when nothing there
     answers to it.
 
-    The address alone (``board.address_in_session``), so the answer never
+    The address alone (``board.rows.address_in_session``), so the answer never
     carries a qualifier a board puts after a name -- for another session's
     agent, for one of an earlier run -- nor the board's word for a node with no
     record: each is something a board says about a node, and written as an

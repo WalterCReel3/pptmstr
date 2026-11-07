@@ -26,7 +26,8 @@ import pytest
 from imgui_bundle import imgui as real_imgui
 
 from pptmstr import approval as policy
-from pptmstr import bus, commandbus, commandfile, commandrun, commandtext, digest, theme
+from pptmstr import bus, commandbus, commandfile, commandrun, commandtext, theme
+from pptmstr.board import digest
 from pptmstr.bridge import Bridge
 from pptmstr.command import (
     MAX_OPEN_PER_ASKER,

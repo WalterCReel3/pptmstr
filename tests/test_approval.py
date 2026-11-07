@@ -1392,7 +1392,7 @@ def test_the_row_reads_a_standing_and_a_mark_the_way_the_handler_will() -> None:
     Compared against ``model``'s readers over inputs chosen to split a strict
     reading from the forgiving one.
     """
-    from pptmstr.board import basis_label, incident_marker
+    from pptmstr.board.words import basis_label, incident_marker
     from pptmstr.model import Basis, stated_incident
 
     for raw in (" Run ", "RELAYED", "", None):

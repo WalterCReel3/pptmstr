@@ -33,7 +33,8 @@ from typing import Literal, assert_never
 
 from . import drawable
 from .approval import Policy, Summary, peer_channel, summary_of
-from .board import board_concerns, board_tasks, role_name
+from .board.digest import digest
+from .board.rows import board_concerns, board_tasks, role_name
 from .boardlog import Board, Party, RestoredConcern, RestoredDecision, RestoredTask
 from .channels.records import (
     EVERY_CHANNEL,
@@ -61,7 +62,6 @@ from .command import (
     request_refusal,
 )
 from .command import Withdrawn as CommandTakenBack
-from .digest import digest
 from .effects import (
     BoardDelivered,
     ClaimSettled,
@@ -2046,7 +2046,7 @@ def _auto_depends(tasks: dict[TaskId, Task], new: Task) -> tuple[TaskId, ...]:
     edge to another session's task would be one nothing could ever satisfy: a
     dependency is looked up on the task's own board (``model.Task.dependency``),
     so an id only another board has reads as missing, the row says it waits on
-    an id another session holds (``board.foreign_wait_label``), and no
+    an id another session holds (``board.rows.foreign_wait_label``), and no
     completion over there releases it. Adding that automatically would strand
     the task being declared, which is worse than the concurrent write. The
     honest limit: **two sessions in one working directory get no protection from
@@ -2409,7 +2409,7 @@ def _pick_claim(
     **Scoped to the claimer's own session.** ``tasks`` is fleet-wide -- one ``Store``
     serves every session -- and a worker handed a task from outside its session
     would be working something that appears on no board it or its operator can
-    see. This and ``board.board_tasks`` both ask ``Task.belongs_to``, which makes
+    see. This and ``board.rows.board_tasks`` both ask ``Task.belongs_to``, which makes
     the two answers one answer rather than two that agree by inspection.
 
     Blocked-ness is scoped the same way, by the task and not by narrowing the
@@ -2500,7 +2500,7 @@ def _may_reclaim(snap: Snapshot, intent: TaskReleased) -> bool:
     **Which holders those are is** ``Snapshot.of_earlier_run``, and nothing is
     restated here: a party a restored board names that this process has no
     record of, or a terminal sub-agent spawned before the session was last
-    started. Not ``board._is_gone``, which is also true of an agent of the
+    started. Not ``board.rows._is_gone``, which is also true of an agent of the
     current run that finished its turn -- that agent can be woken, and may be
     holding the task across a wait; under that reading a root could take work
     from any builder that had returned to it. And not merely "no record", which
@@ -3876,7 +3876,7 @@ def _owing_decisions(world: Snapshot) -> Snapshot:
 
     A second step over a built snapshot and not a branch of ``_needs_you``,
     because a decision's row names its asker's role and the tasks it blocks, and
-    both are projections of a whole snapshot (``board.role_name``,
+    both are projections of a whole snapshot (``board.rows.role_name``,
     ``Task.belongs_to``). The common case -- no decision open -- returns
     ``world`` itself.
 

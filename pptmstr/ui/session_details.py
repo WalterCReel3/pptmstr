@@ -37,10 +37,10 @@ from typing import assert_never
 from claude_agent_sdk import project_key_for_directory
 from imgui_bundle import imgui
 
-from .. import board as board_mod
 from .. import boardsync, sessionfile
 from .. import brief as brief_mod
 from ..approval import Policy
+from ..board.rows import role_name
 from ..journal import files
 from ..model import (
     AgentRecord,
@@ -904,7 +904,7 @@ def _agent_view(
     assert agent_id is not None
     root = snap.get((session_id, None))
     identity = [
-        _known("address", board_mod.role_name(snap, rec.node_id, session_id)),
+        _known("address", role_name(snap, rec.node_id, session_id)),
         _known("agent id", agent_id),
         (
             _known("type", one_line(rec.agent_type))

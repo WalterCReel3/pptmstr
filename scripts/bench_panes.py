@@ -84,8 +84,9 @@ sys.path.insert(0, str(ROOT))
 import imgui_bundle  # noqa: E402
 from imgui_bundle import imgui  # noqa: E402
 
-from pptmstr import board, fake_driver, theme  # noqa: E402
+from pptmstr import fake_driver, theme  # noqa: E402
 from pptmstr.approval import diff_texts, render_texts, summarize  # noqa: E402
+from pptmstr.board.rows import board_concerns, board_tasks  # noqa: E402
 from pptmstr.bridge import Bridge  # noqa: E402
 from pptmstr.intents import (  # noqa: E402
     AgentFinished,
@@ -1021,8 +1022,8 @@ def bench_board(harness: Harness, frames: int, fleet: tuple[Any, Snapshot]) -> l
     focus.to_node(snap, lead, scope=Scope.SESSION)
     node = focus.node(snap)
     assert node is not None and node[0] == lead[0]
-    tasks = board.board_tasks(snap, lead[0])
-    concerns = board.board_concerns(snap, lead[0])
+    tasks = board_tasks(snap, lead[0])
+    concerns = board_concerns(snap, lead[0])
     size = f"{len(tasks)} tasks, {len(concerns)} concerns"
     bridge = Bridge()
     rows: list[Row] = []

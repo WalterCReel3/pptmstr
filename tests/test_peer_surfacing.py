@@ -36,7 +36,8 @@ from typing import Any
 
 import pytest
 
-from pptmstr import app, boardlog, bus, digest
+from pptmstr import app, boardlog, bus
+from pptmstr.board import digest
 from pptmstr.boardfacts import outcomes
 from pptmstr.boardlog import Clock
 from pptmstr.bridge import Bridge

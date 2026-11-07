@@ -6,7 +6,7 @@ Pure: no clock, no IO, and no import from pptmstr. That is what lets the driver,
 the board log and the board share it without any of them importing the others,
 and it is held by ``tests/test_layers.py``.
 
-What a node in a snapshot is called on a board (``board.role_name``) is not here.
+What a node in a snapshot is called on a board (``board.rows.role_name``) is not here.
 It reads a ``Snapshot``, and ``model`` reaches ``board`` through ``approval``'s
 lazy imports, so a module that imports ``model`` cannot be one that ``board``'s
 importers use to avoid ``board``.
@@ -41,7 +41,7 @@ def address_for(
     ``held`` is every address of the session that is spoken for, with the agent
     id it belongs to: the ones allocated so far in this process, and the ones an
     earlier process's log names (``reserved``). The driver asks this when a
-    sub-agent starts and routes mail by the answer; ``board._addresses`` asks it
+    sub-agent starts and routes mail by the answer; ``board.rows._addresses`` asks it
     once per record in spawn order and that is what every board read, the pane
     and the log's records show. Two callers of one function over the same table
     and the same order cannot name an agent differently, and neither has a rule

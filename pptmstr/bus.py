@@ -34,7 +34,7 @@ answered by the store on the next frame (``effects.py``): ``read_inbox``,
 ``why_blocked``, ``ready`` and ``claim_task``, which ask questions, and the
 board writes and the two decision writes, which assert facts the reducer is
 entitled to refuse. ``why_blocked``, ``ready`` and a dry-run ``declare_task``
-are board reads whose answer is computed here, by ``boardgraph``, from the
+are board reads whose answer is computed here, by ``board.graph``, from the
 snapshot the read delivered; a dry run emits no write.
 
 **The bus raises and withdraws a decision and never ends one.** An answer and a
@@ -72,44 +72,9 @@ from typing import TYPE_CHECKING, Any, Protocol, assert_never
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from . import boardgraph, brief, drawable, ids
-from .board import (
-    UNDELIVERABLE,
-    BoardConcern,
-    BoardTask,
-    BoardVersion,
-    all_writers_label,
-    basis_label,
-    ended_label,
-    foreign_wait_label,
-    incident_marker,
-    not_run_label,
-    property_label,
-    role_name,
-    stale_label,
-    version_label,
-)
-from .boardgraph import (
-    DryRun,
-    Edge,
-    Hop,
-    Ready,
-    Root,
-    RootKind,
-    Verdict,
-    WhyBlocked,
-    is_open,
-)
-from .bridge import Bridge
-from .channels.records import (
-    EVERY_CHANNEL,
-    CitedQuestion,
-    PeerIdentity,
-    PeerRefusal,
-    PeerWithdrawRefusal,
-    channel_refusal,
-)
-from .digest import (
+from . import brief, drawable, ids
+from .board import graph
+from .board.digest import (
     EARLIER_INCIDENTS,
     ChangeKind,
     Digest,
@@ -126,6 +91,29 @@ from .digest import (
     owed_standing,
     unverified_heading,
     unverified_label,
+)
+from .board.graph import DryRun, Edge, Hop, Ready, Root, RootKind, Verdict, WhyBlocked, is_open
+from .board.rows import (
+    UNDELIVERABLE,
+    BoardConcern,
+    BoardTask,
+    BoardVersion,
+    all_writers_label,
+    ended_label,
+    foreign_wait_label,
+    role_name,
+    stale_label,
+    version_label,
+)
+from .board.words import basis_label, incident_marker, not_run_label, property_label
+from .bridge import Bridge
+from .channels.records import (
+    EVERY_CHANNEL,
+    CitedQuestion,
+    PeerIdentity,
+    PeerRefusal,
+    PeerWithdrawRefusal,
+    channel_refusal,
 )
 from .effects import PEER_TITLE_CHARS as PEER_TITLE_CHARS
 from .effects import (
@@ -720,7 +708,7 @@ def _board_line(
     the row knows which (``BoardTask.held_elsewhere``): an id nothing in the
     window has is a typo in somebody's ``depends_on`` or a task not declared
     yet (``_UNDECLARED``), and an id another session's task has can never be
-    declared here at all (``board.foreign_wait_label``).
+    declared here at all (``board.rows.foreign_wait_label``).
 
     **Carries ``detail``, which is the point of the tool rather than a detail of
     it.** ``Task.detail`` is the closest thing to an authoritative specification
@@ -760,7 +748,7 @@ def _board_line(
     default this refuses.
 
     **A row the operator closed says that on its headline and has no claimer's
-    standing at all** (``board.closed_label``): it is finished and nothing was
+    standing at all** (``board.rows.closed_label``): it is finished and nothing was
     built, so a basis and a "not run" beside it would describe work nobody
     reported. The operator's reason is laid out where a result would be, behind
     the operator's mark and not an agent's (``_ANSWER``, ``_closing_reason``).
@@ -995,7 +983,7 @@ _WITHDRAWN_UNDER_YOU = (
 # A dependency on an id nothing in this window has, on a row. Capitals because
 # it is a blocker that never clears by waiting. An id another session's task has
 # is not said this way: a reader told "never declared" goes on to declare it
-# and is refused (``board.foreign_wait_label`` is what such a row says).
+# and is refused (``board.rows.foreign_wait_label`` is what such a row says).
 _UNDECLARED = "NEVER DECLARED ON THIS BOARD"
 
 # What a dependency on such an id needs, said where one task is read whole.
@@ -1173,7 +1161,7 @@ def _result_heading(row: BoardTask) -> str:
     On a row the operator closed there is no claimer and no account of work, so
     the heading introduces the one thing under it, the operator's reason. That
     the row was closed, and what that means, is said above it wherever this is
-    laid out (``board.closed_label``).
+    laid out (``board.rows.closed_label``).
 
     Attributed because the reader has to weigh it, and "held by" earlier in the row
     says who holds the task rather than who is speaking in this paragraph. The
@@ -1320,8 +1308,8 @@ def _delimited_task(row: BoardTask) -> BoardTask:
     reader of the field tells there is none.
 
     The owner is only made one line. A role name is the address the bus routes
-    to and the board's own words for a holder it cannot name (``board.UNKNOWN``,
-    ``board.FOREIGN``); between quotes those would read as something an agent
+    to and the board's own words for a holder it cannot name (``board.rows.UNKNOWN``,
+    ``board.rows.FOREIGN``); between quotes those would read as something an agent
     wrote.
     """
 
@@ -1780,7 +1768,7 @@ def _landed_behind_text(row: BoardTask, root: bool, reachable: bool) -> str:
     this size is one an agent has been measured unable to read
     (``_MAX_BOARD_CHARS``). So the result is stored against the version the holder
     was handed, which is what it is an account of, and the board says so on the
-    row (``board.stale_label``).
+    row (``board.rows.stale_label``).
 
     The current text is bounded as a board row's is and names ``read_task`` for
     the rest: this reply is a notice, and the read is where the text is whole.
@@ -2035,7 +2023,7 @@ def _waiting_line(owed: Owed) -> str:
     An approval, a question and a failure each stop the node they name, so "is
     waiting" is true of it; an agent that raised a decision or asked for a command was told to
     carry on, and may be working. A command says which of its two open states it
-    is in (``digest.owed_standing``), because one the operator has started is
+    is in (``board.digest.owed_standing``), because one the operator has started is
     owed a cancel and not a reading, and "has not run" would be false of it.
     """
     who = _one_line(owed.who)
@@ -3226,7 +3214,7 @@ def _loop_has_a_gate(
 
 # -- the graph queries ----------------------------------------------------------
 #
-# Words for ``boardgraph``'s answers. Every one is computed from the one
+# Words for ``board.graph``'s answers. Every one is computed from the one
 # ``Snapshot`` a single board read delivered (``BoardDelivered.snapshot``), so a
 # reply never mixes two moments of the board.
 
@@ -3324,7 +3312,7 @@ def _why_blocked_text(answer: WhyBlocked, snap: Snapshot) -> str:
     **An unknown id is two mistakes, named apart** (STYLE.md section 3): an id no
     session in the window has, which is a typo or a task not yet declared, and
     the id of a task on another session's board, which is right and out of reach.
-    ``boardgraph`` answers both UNKNOWN, as a claim of either is refused; the
+    ``board.graph`` answers both UNKNOWN, as a claim of either is refused; the
     snapshot holds every session's tasks, so the second is told by the id
     being in it.
     """
@@ -4673,7 +4661,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         if world is None:
             return _text(f"The board was NOT read. {_refusal_text(TaskRefusal.NOT_APPLIED)}")
         _, snap = world
-        return _text(_why_blocked_text(boardgraph.why_blocked(snap, me[0], task_id), snap))
+        return _text(_why_blocked_text(graph.why_blocked(snap, me[0], task_id), snap))
 
     @tool(
         "ready",
@@ -4691,7 +4679,7 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         if world is None:
             return _text(f"The board was NOT read. {_refusal_text(TaskRefusal.NOT_APPLIED)}")
         board, snap = world
-        return _text(_ready_text(boardgraph.ready(snap, me[0]), board.tasks))
+        return _text(_ready_text(graph.ready(snap, me[0]), board.tasks))
 
     @tool(
         "declare_task",
@@ -4878,12 +4866,12 @@ def build_server(session: AgentSession, command_tools: Sequence[OfferedTool]) ->
         if dry_run:
             # The same Task the real declaration would emit, applied to one
             # snapshot through the real arm and discarded
-            # (``boardgraph.dry_run_declare``). Nothing is emitted but the read.
+            # (``board.graph.dry_run_declare``). Nothing is emitted but the read.
             world = await board_world(me)
             if world is None:
                 return _text(f"The dry run was NOT made. {_refusal_text(TaskRefusal.NOT_APPLIED)}")
             board, snap = world
-            dry = boardgraph.dry_run_declare(snap, me[0], task, me, time.monotonic())
+            dry = graph.dry_run_declare(snap, me[0], task, me, time.monotonic())
             mine = any(row.id == task_id for row in board.tasks)
             # What an operator's edit dropped is said as the real reply says it:
             # the rehearsed task is the one without it.

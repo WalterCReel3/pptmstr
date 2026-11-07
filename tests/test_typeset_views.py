@@ -785,12 +785,13 @@ def test_a_code_line_arriving_in_a_stream_can_be_scrolled_to(seam: Any) -> None:
 
 
 def _fleet_bodies() -> dict[str, str]:
-    from pptmstr import board, fake_driver
+    from pptmstr import fake_driver
+    from pptmstr.board.rows import board_concerns
     from tests.test_fake_fixtures import _seeded
 
     driver, store = _seeded()
     snap = store.snapshot()
-    bodies = {c.id: c.body for c in board.board_concerns(snap, driver.cast["lead"][0])}
+    bodies = {c.id: c.body for c in board_concerns(snap, driver.cast["lead"][0])}
     bodies["concern"] = fake_driver._POST_CONCERN[1]["body"]
     bodies["declare"] = fake_driver._DECLARE_TASK[1]["detail"]
     bodies["report"] = fake_driver._REPORT_OPENING + fake_driver._REPORT_BODY

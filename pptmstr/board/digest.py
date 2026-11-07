@@ -30,8 +30,8 @@ design.**
 
 The last two are the property this module may not break: **a digest never shows
 fewer unverified items or incidents than the board holds for the session.**
-``unverified`` is built from ``board.unrun_ledger`` and the board's own rows, and
-the incident slots from ``board.incidents``, so that is a property of the
+``unverified`` is built from ``rows.unrun_ledger`` and the board's own rows, and
+the incident slots from ``rows.incidents``, so that is a property of the
 construction and is pinned as an invariant over generated boards in
 ``tests/test_digest.py``.
 
@@ -75,18 +75,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import assert_never
 
-from .board import (
-    BoardConcern,
-    BoardTask,
-    basis_label,
-    board_tasks,
-    incidents,
-    not_run_label,
-    role_name,
-    unrun_ledger,
-)
-from .command import CommandState
-from .model import (
+from ..command import CommandState
+from ..model import (
     CLOSED_BY_OPERATOR,
     EARLIER_RUN,
     Basis,
@@ -100,6 +90,15 @@ from .model import (
     TaskState,
     withdrawal_label,
 )
+from .rows import (
+    BoardConcern,
+    BoardTask,
+    board_tasks,
+    incidents,
+    role_name,
+    unrun_ledger,
+)
+from .words import basis_label, not_run_label
 
 
 class ChangeKind(enum.Enum):
@@ -142,7 +141,7 @@ class TaskChange:
     kind: ChangeKind
     task_id: TaskId
     title: str
-    # Who finished it, or who replaced its specification (``board.OPERATOR`` when
+    # Who finished it, or who replaced its specification (``rows.OPERATOR`` when
     # no agent did), under the name the board gives them. None for a declaration
     # and for a release: the record keeps the set of agents that ever gave a task
     # back and not which of them did so last, so naming one would be a guess.
@@ -160,7 +159,7 @@ class TaskChange:
     before_restart: bool = False
     # Of a withdrawal: the session's root withdrew it in place of a declarer
     # that had stopped, and the operator rewrote the reason in flight
-    # (``board.BoardTask``'s two flags). Who the reason's words are, which
+    # (``rows.BoardTask``'s two flags). Who the reason's words are, which
     # ``model.withdrawal_label`` says.
     withdrawn_by_lead: bool = False
     withdrawal_edited: bool = False
@@ -227,8 +226,8 @@ class Unverified:
     title: str
     owner: str | None
     doubt: Doubt
-    # Where the statement stands, in the board's words (``board.basis_label``,
-    # ``board.not_run_label``).
+    # Where the statement stands, in the board's words (``words.basis_label``,
+    # ``words.not_run_label``).
     standing: str
     # The claimer's list of what it did not run, when it gave one. Empty for the
     # other two doubts and for a claimer that did not say.
@@ -243,7 +242,7 @@ class Reported:
     concern: BoardConcern
     # Whether a row of the session's board carries this concern, which is the one
     # condition under which a board read shows its body to every agent
-    # (``board.BoardTask.concerns``): it named a task that is on the board and
+    # (``rows.BoardTask.concerns``): it named a task that is on the board and
     # was not withdrawn. Derived from the same rows, so a surface an agent reads
     # can show an incident's text exactly when the board does and cannot drift
     # from it. No default: a surface that built one without asking would be
@@ -460,7 +459,7 @@ def _unverified(
     task with no specification text, or no result, makes no statement of that
     kind to doubt.
 
-    What was not run comes from ``ledger`` -- ``board.unrun_ledger`` -- and is
+    What was not run comes from ``ledger`` -- ``rows.unrun_ledger`` -- and is
     not recomputed here, so the two cannot disagree about which finished rows
     count.
 
@@ -493,7 +492,7 @@ def _unverified(
 
 # -- the words both readers are shown ----------------------------------------------
 #
-# Here, beside the projection, for the reason ``board.basis_label`` is beside its
+# Here, beside the projection, for the reason ``words.basis_label`` is beside its
 # own: the bus tool and the pane both render a digest, and a slot headed one way
 # for the lead and another for the operator would be two reports of one round.
 # Layout, bounds and what each reader may see of the waiting slot stay with the

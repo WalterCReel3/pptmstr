@@ -26,7 +26,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from pptmstr.board import BoardTask, board_tasks, role_name
+from pptmstr.board.rows import BoardTask, board_tasks, role_name
 from pptmstr.effects import TaskWriteSettled
 from pptmstr.intents import TaskDeclared
 from pptmstr.model import (
@@ -109,7 +109,7 @@ class Hop:
     One task on a path from the task asked about to a root.
 
     ``state`` and ``holder`` are None for an id this board has no task for.
-    ``holder`` is the name a reader can address (``board.role_name``), never a
+    ``holder`` is the name a reader can address (``rows.role_name``), never a
     NodeId. ``edge`` is the wait that led here from the hop before it.
     """
 
@@ -302,7 +302,7 @@ class Ready:
 
 
 def _board_order(snap: Snapshot, session_id: str) -> list[Task]:
-    """The board's tasks in declaration order, as ``board.board_tasks`` orders them."""
+    """The board's tasks in declaration order, as ``rows.board_tasks`` orders them."""
     return [
         t
         for t in sorted(snap.tasks.values(), key=lambda t: (t.declared_at, t.id))
@@ -359,7 +359,7 @@ def is_open(row: BoardTask) -> bool:
 
 def open_tasks(snap: Snapshot, session_id: str) -> tuple[BoardTask, ...]:
     """
-    The board's rows that are open (``is_open``), as ``board.board_tasks``
+    The board's rows that are open (``is_open``), as ``rows.board_tasks``
     builds them.
 
     The rows themselves and not a summary, so an open-only board read renders

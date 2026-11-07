@@ -1338,7 +1338,7 @@ def summary_of(
     whose destination cannot be read is one the operator should open.
 
     **A message, a declaration and an amendment say what their author said about
-    them**, in the words the board will use once they land (``board.basis_label``
+    them**, in the words the board will use once they land (``board.words.basis_label``
     and its neighbours, and ``model``'s reading of the raw arguments). This is the
     row the operator signs the text off from, so a standing the board shows
     afterwards and this row did not would be a claim approved unseen. The standing and the
@@ -1378,9 +1378,11 @@ def summary_of(
     row runs them, whole, since the row is cut only past the head; None when
     ``reaches`` is a sentence saying why nobody is reached.
     """
-    # Imported here because ``model`` imports ``Policy`` from this module, so a
-    # top-level import closes a cycle. Neither pulls in the SDK.
-    from .board import basis_label, incident_marker, property_label
+    # ``model`` is imported here because it imports ``Policy`` from this module, so
+    # a top-level import closes a cycle. ``board.words`` imports nothing from
+    # pptmstr at runtime and closes none; it sits beside the one function that
+    # reads it. Neither pulls in the SDK.
+    from .board.words import basis_label, incident_marker, property_label
     from .model import Basis, normalised_property, stated_flag, stated_incident
 
     def standing(raw: object) -> str:

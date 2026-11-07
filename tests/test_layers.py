@@ -3,7 +3,7 @@ The layer rules the tree states in prose, checked against its imports.
 
 Each rule below was a sentence in a docstring, in ``STYLE.md`` or in a planning
 record, and nothing held the code to it (``planning/2026-11-06-modules-are-named-
-for-what-they-require.md``, T3, T7 and A7). Nine are checked here:
+for-what-they-require.md``, T3, T7 and A7). Ten are checked here:
 
 1. A module whose docstring says it imports no ImGui imports no ``imgui_bundle``,
    directly in any form, and does not reach it through the imports that run when
@@ -22,6 +22,9 @@ for-what-they-require.md``, T3, T7 and A7). Nine are checked here:
 9. ``pptmstr.channels`` imports nothing, ``channels.records`` imports nothing from
    pptmstr, only ``app`` imports ``channels.log``, and a name ``records`` defines
    is imported from ``records`` alone (B6).
+10. ``pptmstr.board`` imports nothing, ``board.words`` imports nothing from
+    pptmstr when it runs, and a name ``words`` defines is imported from ``words``
+    alone (B5).
 
 **Read from the source, never imported.** Every import is collected with ``ast``,
 including those inside a function (``lazy``) and those under ``if TYPE_CHECKING:``
@@ -343,10 +346,10 @@ class Claim:
 NO_IMGUI: dict[str, Claim] = {
     # approval.py:4
     "pptmstr.approval": Claim("pptmstr/approval.py", "No SDK and no UI"),
-    # board.py:24
-    "pptmstr.board": Claim("pptmstr/board.py", "Imports no imgui"),
-    # digest.py:67
-    "pptmstr.digest": Claim("pptmstr/digest.py", "Imports no imgui and no SDK"),
+    # board/rows.py:24
+    "pptmstr.board.rows": Claim("pptmstr/board/rows.py", "Imports no imgui"),
+    # board/digest.py:67
+    "pptmstr.board.digest": Claim("pptmstr/board/digest.py", "Imports no imgui and no SDK"),
     # commandtext.py:4
     "pptmstr.commandtext": Claim("pptmstr/commandtext.py", "Pure functions: no UI, no IO"),
     # shellscan.py:4
@@ -762,13 +765,14 @@ PURE: dict[str, Claim] = {
     "pptmstr.effects": Claim("pptmstr/effects.py", "``_apply`` is a pure function"),
     # boardfacts.py:2
     "pptmstr.boardfacts": Claim("pptmstr/boardfacts.py", "Pure: two snapshots and the intent"),
-    # boardgraph.py:5
-    "pptmstr.boardgraph": Claim(
-        "pptmstr/boardgraph.py", "Every function here is pure over one ``Snapshot``"
+    # board/graph.py:5
+    "pptmstr.board.graph": Claim(
+        "pptmstr/board/graph.py", "Every function here is pure over one ``Snapshot``"
     ),
-    # digest.py:8-9
-    "pptmstr.digest": Claim(
-        "pptmstr/digest.py", "``digest`` is a pure function of a snapshot, a session and a point"
+    # board/digest.py:8-9
+    "pptmstr.board.digest": Claim(
+        "pptmstr/board/digest.py",
+        "``digest`` is a pure function of a snapshot, a session and a point",
     ),
     # command.py:5
     "pptmstr.command": Claim(
@@ -863,6 +867,8 @@ def test_the_bus_and_commandbus_import_nothing_of_each_other() -> None:
 
 # -- 6. naming imports nothing of pptmstr ------------------------------------------
 
+BOARD = "pptmstr.board"
+
 
 def test_naming_imports_nothing_from_pptmstr() -> None:
     """
@@ -874,18 +880,22 @@ def test_naming_imports_nothing_from_pptmstr() -> None:
     assert not found, ", ".join(f"{edge.target} ({edge.kind}, line {edge.line})" for edge in found)
 
 
+def _is_board(target: str) -> bool:
+    return target == BOARD or target.startswith(BOARD + ".")
+
+
 def test_nothing_reaches_a_moved_name_through_board() -> None:
     """
-    No shim: a name ``naming`` holds is imported from it, never from ``board``.
+    No shim: a name ``naming`` holds is imported from it, never from the ``board``
+    package or any module in it.
     """
     moved = {"LEAD", "ROOT_NAMES", "address_for", "reserved"}
     found = [
         f"{module} line {node.lineno}"
         for module in modules()
-        if module != "pptmstr.board"
         for node in ast.walk(tree_of(module))
         if isinstance(node, ast.ImportFrom)
-        and (node.module == "pptmstr.board" or (node.level and node.module == "board"))
+        and _is_board(_from(module, modules()[module].name == "__init__.py", node))
         and any(alias.name in moved for alias in node.names)
     ]
     assert not found, "imports a naming name through board: " + ", ".join(found)
@@ -1026,3 +1036,52 @@ def test_nothing_reaches_a_channel_record_through_another_module() -> None:
         and _from(module, modules()[module].name == "__init__.py", node) != RECORDS
     ]
     assert not found, "imports a channel record through another module: " + ", ".join(found)
+
+
+# -- 10. board: the read side, and words that need no snapshot ---------------------
+
+BOARD_WORDS = "pptmstr.board.words"
+
+
+def test_the_board_package_imports_nothing() -> None:
+    """
+    ``approval`` imports ``board.words`` from inside the cycle through ``model``,
+    and importing it runs ``board/__init__`` first. An import there would bring
+    ``rows`` -- and ``model`` -- with it, so the package's ``__init__`` is a
+    docstring only.
+    """
+    found = imports_of(BOARD)
+    assert not found, ", ".join(f"{edge.target} ({edge.kind}, line {edge.line})" for edge in found)
+
+
+def test_board_words_import_nothing_from_pptmstr_when_they_run() -> None:
+    """
+    ``Basis`` is named in an annotation and read as ``.value``, so it is imported
+    under ``TYPE_CHECKING`` only. An eager or lazy edge into the package is the one
+    that runs, and the one that would close the loop through ``model``.
+    """
+    found = [
+        edge
+        for edge in imports_of(BOARD_WORDS)
+        if edge.target.startswith("pptmstr") and edge.kind != "typing"
+    ]
+    assert not found, ", ".join(f"{edge.target} ({edge.kind}, line {edge.line})" for edge in found)
+
+
+def test_nothing_reaches_a_board_word_through_another_module() -> None:
+    """
+    No shim: every module imports the board's words from ``words``, never through
+    ``rows`` or a module that imported them.
+    """
+    defined = _defined_at_top(BOARD_WORDS)
+    assert {"basis_label", "property_label", "not_run_label", "incident_marker"} <= defined
+    found = [
+        f"{module} line {node.lineno}: {alias.name} from {_from(module, False, node)}"
+        for module in modules()
+        for node in ast.walk(tree_of(module))
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name in defined
+        and _from(module, modules()[module].name == "__init__.py", node) != BOARD_WORDS
+    ]
+    assert not found, "imports a board word through another module: " + ", ".join(found)

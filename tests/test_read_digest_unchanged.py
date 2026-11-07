@@ -3,7 +3,7 @@ What ``read_digest`` hands a lead, pinned byte for byte over the board scenario.
 
 The DIGEST pane was reorganised for the operator -- decisions taken without them
 first, incidents second, the rest folded -- and the lead's text was to stay as it
-was. A pane change can reach that text only through ``digest.py`` or the bus's
+was. A pane change can reach that text only through ``board/digest.py`` or the bus's
 renderer, so the pin is the whole rendered string for one state, recorded from
 the tree before the pane changed.
 
@@ -18,8 +18,8 @@ from __future__ import annotations
 import asyncio
 
 from pptmstr import bus
+from pptmstr.board.digest import digest, digest_mark
 from pptmstr.bridge import Bridge
-from pptmstr.digest import digest, digest_mark
 from pptmstr.intents import (
     ConcernPosted,
     DecisionRaised,
@@ -126,7 +126,7 @@ def test_read_digest_is_byte_identical_for_the_board_scenario() -> None:
 
 
 # Recorded from the tree before the pane was reorganised, and again over the fake
-# fleet's board as this branch has it, with ``digest.py`` and the bus's renderer
+# fleet's board as this branch has it, with ``board/digest.py`` and the bus's renderer
 # unchanged: every line of the first recording is here, under the scenario's own
 # rows' ids, and the rest is the rows and parked calls the fake board adds.
 _PINNED = (

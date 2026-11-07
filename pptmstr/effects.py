@@ -41,10 +41,10 @@ from dataclasses import dataclass
 from pathlib import PurePath
 
 from . import drawable
-from .board import BoardConcern, BoardTask
+from .board.digest import Digest
+from .board.rows import BoardConcern, BoardTask
 from .channels.records import Channel, CitedQuestion, PeerIdentity, PeerRefusal, PeerWithdrawRefusal
 from .command import Command, CommandId, RequestRefusal
-from .digest import Digest
 from .model import (
     ClaimRefusal,
     CommandRefusal,
@@ -378,12 +378,12 @@ class BoardDelivered:
     """
     What is on the asking agent's board, as the rows the operator is also shown.
 
-    ``board.BoardTask`` rather than ``model.Task`` on purpose. A worker needs the
+    ``board.rows.BoardTask`` rather than ``model.Task`` on purpose. A worker needs the
     same three derived facts a reader does -- who holds it under the address the bus
     routes to, what it is waiting on, and which of those dependencies were never
     declared -- and none of them are on the record. Handing over raw ``Task`` values
     would put that derivation in ``bus.py``, which is a second implementation of the
-    projection ``board.py`` already owns, free to disagree with the pane.
+    projection ``board/rows.py`` already owns, free to disagree with the pane.
 
     Carries the concern rows as well as the tasks, and carries *all* of them --
     the same projection the pane draws. Which of them an agent is shown is the
@@ -396,7 +396,7 @@ class BoardDelivered:
     asyncio thread.
 
     ``snapshot`` is the world the rows were projected from, for the bus's graph
-    queries (``boardgraph``: why a task is blocked, what is ready, what a
+    queries (``board.graph``: why a task is blocked, what is ready, what a
     declaration would do), which walk ``Task`` records the rows do not carry.
     Handed over and not read, and the handler never reaches the store. What
     makes that safe is narrower than "a frozen value": the snapshot's maps are
@@ -423,7 +423,7 @@ class DigestDelivered:
 
     The ``Digest`` and not text, for ``BoardDelivered``'s reason: the words an
     agent reads are the shell's, and one of the four slots holds text an agent
-    must not be shown at all (``digest.Owed.summary``), which is a decision about
+    must not be shown at all (``board.digest.Owed.summary``), which is a decision about
     presentation that a string built here would have already made.
 
     ``digest`` None is the answer to a request the store never saw. It is the
