@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import itertools
 import pathlib
 import random
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -143,7 +145,7 @@ from pptmstr.model import (
     is_address_only,
     stored_as_sent,
 )
-from pptmstr.store import Store, _apply
+from pptmstr.store import Store, _apply, _raise_refusal, _request_refusal
 from pptmstr.transcript import Transcript
 
 ROOT: NodeId = ("sess-1", None)
@@ -7105,6 +7107,145 @@ def test_a_finished_workers_open_commands_do_not_turn_a_working_one_away() -> No
     gone, _ = step(snap, AgentFinished((CS, "k0"), AgentState.FAILED, 5.0, "died"))
 
     assert step(gone, request)[1] == (CommandSettled("rq", cid(n)),)
+
+
+# The two caps a decision and a command request share, pinned at their edges
+# through each refusal: one under, at and one over the asker's cap and the
+# sub-agents' cap, and what is held in another session, by a finished worker,
+# or no longer open. A holding is (holder, how many, open), and the counts are
+# given as functions of the kind's (per-asker, sub-agents) caps.
+
+_GONE: NodeId = (CS, "gone")
+_Holdings = list[tuple[NodeId, int, bool]]
+
+
+def _spread(session: str, total: int, per: int) -> _Holdings:
+    """``total`` open items over the workers ``k0``.. of ``session``, ``per`` each."""
+    return [((session, f"k{i}"), min(per, total - i * per), True) for i in range(-(-total // per))]
+
+
+_ALLOWANCE_CASES: list[tuple[str, NodeId, Any, str | None]] = [
+    ("asker one under its cap", C_ASKER, lambda p, w: [(C_ASKER, p - 1, True)], None),
+    ("asker at its cap", C_ASKER, lambda p, w: [(C_ASKER, p, True)], "asker"),
+    ("asker over its cap", C_ASKER, lambda p, w: [(C_ASKER, p + 1, True)], "asker"),
+    ("root one under its cap", C_ROOT, lambda p, w: [(C_ROOT, p - 1, True)], None),
+    ("root at its cap", C_ROOT, lambda p, w: [(C_ROOT, p, True)], "asker"),
+    ("root over its cap", C_ROOT, lambda p, w: [(C_ROOT, p + 1, True)], "asker"),
+    ("ended ones are not held", C_ASKER, lambda p, w: [(C_ASKER, p + 1, False)], None),
+    ("workers one under their cap", C_ASKER, lambda p, w: _spread(CS, w - 1, p), None),
+    ("workers at their cap", C_ASKER, lambda p, w: _spread(CS, w, p), "workers"),
+    ("workers over their cap", C_ASKER, lambda p, w: _spread(CS, w + 1, p), "workers"),
+    ("the root beside full workers", C_ROOT, lambda p, w: _spread(CS, w + 1, p), None),
+    (
+        "the root's own are not the workers'",
+        C_ASKER,
+        lambda p, w: [(C_ROOT, p, True), *_spread(CS, w - 1, p)],
+        None,
+    ),
+    (
+        "the asker's own count toward the workers' cap",
+        C_ASKER,
+        lambda p, w: [(C_ASKER, p - 1, True), *_spread(CS, w - p + 1, p)],
+        "workers",
+    ),
+    (
+        "the asker's own one short of the workers' cap",
+        C_ASKER,
+        lambda p, w: [(C_ASKER, p - 1, True), *_spread(CS, w - p, p)],
+        None,
+    ),
+    (
+        "another session's are its own",
+        C_ASKER,
+        lambda p, w: [((CT, "w1"), p + 1, True), *_spread(CT, w + 1, p)],
+        None,
+    ),
+    (
+        "a finished worker's do not count",
+        C_ASKER,
+        lambda p, w: [(_GONE, p, True), *_spread(CS, w - 1, p)],
+        None,
+    ),
+    (
+        "a finished asker's own still count",
+        _GONE,
+        lambda p, w: [(_GONE, p - 1, True), *_spread(CS, w - p + 1, p)],
+        "workers",
+    ),
+]
+
+
+def _allowance_world() -> Snapshot:
+    snap = command_world()
+    for session in (CS, CT):
+        root: NodeId = (session, None)
+        snap, _ = step(snap, *(spawn((session, f"k{i}"), root) for i in range(5)))
+    snap, _ = step(snap, spawn((CT, "w1"), C_OTHER_ROOT), spawn(_GONE, C_ROOT))
+    snap, _ = step(snap, AgentFinished(_GONE, AgentState.DONE, 5.0))
+    return snap
+
+
+@pytest.mark.parametrize(
+    ("asker", "holding", "spent"),
+    [pytest.param(a, h, s, id=name) for name, a, h, s in _ALLOWANCE_CASES],
+)
+def test_a_decision_is_refused_at_each_cap_and_not_before(
+    asker: NodeId, holding: Any, spent: str | None
+) -> None:
+    held: _Holdings = holding(MAX_OPEN_DECISIONS_PER_ASKER, MAX_OPEN_SUBAGENT_DECISIONS)
+    made = [
+        _decision(
+            f"held-{who[0]}-{who[1]}-{i}", asker=who, outcome=None if open_ else Dismissed(at=1.0)
+        )
+        for who, count, open_ in held
+        for i in range(count)
+    ]
+    snap = dataclasses.replace(
+        _allowance_world(), decisions=MappingProxyType({d.id: d for d in made})
+    )
+
+    refusal = _raise_refusal(snap, DecisionRaised(asker, _decision("asking", asker=asker)))
+
+    assert (
+        refusal
+        is {
+            None: None,
+            "asker": DecisionRefusal.TOO_MANY_OPEN,
+            "workers": DecisionRefusal.SESSION_FULL,
+        }[spent]
+    )
+
+
+@pytest.mark.parametrize(
+    ("asker", "holding", "spent"),
+    [pytest.param(a, h, s, id=name) for name, a, h, s in _ALLOWANCE_CASES],
+)
+def test_a_command_is_refused_at_each_cap_and_not_before(
+    asker: NodeId, holding: Any, spent: str | None
+) -> None:
+    held: _Holdings = holding(MAX_OPEN_PER_ASKER, MAX_OPEN_SUBAGENTS)
+    numbers = itertools.count(1)
+    made = [
+        dataclasses.replace(
+            handed(next(numbers)), asker=who, end=None if open_ else End(Lapsed(), 1.0)
+        )
+        for who, count, open_ in held
+        for _ in range(count)
+    ]
+    snap = dataclasses.replace(
+        _allowance_world(), commands=MappingProxyType({c.id: c for c in made})
+    )
+
+    refusal = _request_refusal(snap, CommandRequested(asker, handed(999), "rq", 100.0))
+
+    assert (
+        refusal
+        is {
+            None: None,
+            "asker": CommandRefusal.TOO_MANY_OPEN,
+            "workers": CommandRefusal.SESSION_FULL,
+        }[spent]
+    )
 
 
 # What each intent does to one command asked by C_ASKER, as a function of who it

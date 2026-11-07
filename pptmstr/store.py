@@ -26,10 +26,10 @@ import math
 import re
 import time
 from collections import deque
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from types import MappingProxyType
-from typing import assert_never
+from typing import Literal, assert_never
 
 from . import drawable
 from .approval import Policy, Summary, peer_channel, summary_of
@@ -2788,18 +2788,44 @@ def _raise_refusal(snap: Snapshot, intent: DecisionRaised) -> DecisionRefusal | 
     ):
         return DecisionRefusal.UNKNOWN_TASK
     still_open = [d for d in snap.decisions.values() if d.is_open and d.session_id == asker[0]]
-    if sum(1 for d in still_open if d.asker == asker) >= MAX_OPEN_DECISIONS_PER_ASKER:
-        return DecisionRefusal.TOO_MANY_OPEN
+    match _allowance(
+        snap, still_open, asker, MAX_OPEN_DECISIONS_PER_ASKER, MAX_OPEN_SUBAGENT_DECISIONS
+    ):
+        case "asker":
+            return DecisionRefusal.TOO_MANY_OPEN
+        case "workers":
+            return DecisionRefusal.SESSION_FULL
+        case None:
+            return None
+
+
+def _allowance(
+    snap: Snapshot,
+    open_items: Sequence[Decision | Command],
+    asker: NodeId,
+    per_asker_cap: int,
+    worker_cap: int,
+) -> Literal["asker", "workers"] | None:
+    """
+    Which of the two caps ``asker`` has met, or None if neither: its own
+    (``"asker"``), or the one its session's sub-agents share (``"workers"``).
+    The root meets only its own. The reasons are ``_raise_refusal``'s.
+
+    ``open_items`` is what the caller counts as open in the asker's session,
+    already filtered: a decision and a command are open for different reasons,
+    and this counts and does not judge.
+    """
+    if sum(1 for item in open_items if item.asker == asker) >= per_asker_cap:
+        return "asker"
     if asker[1] is None:
         return None
     among_workers = sum(
         1
-        for d in still_open
-        if d.asker[1] is not None and (d.asker == asker or not _asker_fate(snap, d.asker).has_ended)
+        for item in open_items
+        if item.asker[1] is not None
+        and (item.asker == asker or not _asker_fate(snap, item.asker).has_ended)
     )
-    if among_workers >= MAX_OPEN_SUBAGENT_DECISIONS:
-        return DecisionRefusal.SESSION_FULL
-    return None
+    return "workers" if among_workers >= worker_cap else None
 
 
 def _woken(asker: NodeId, reason: WakeReason, subject_id: str) -> tuple[Effect, ...]:
@@ -3637,18 +3663,13 @@ def _request_refusal(
     # The caps are on what an agent has asked and not had an end to: a command
     # left running unsupervised owes a row, and is no request of anybody's.
     still_open = [c for c in snap.commands_awaiting(asker[0]) if c.is_open]
-    if sum(1 for c in still_open if c.asker == asker) >= MAX_OPEN_PER_ASKER:
-        return CommandRefusal.TOO_MANY_OPEN
-    if asker[1] is None:
-        return None
-    among_workers = sum(
-        1
-        for c in still_open
-        if c.asker[1] is not None and (c.asker == asker or not _asker_fate(snap, c.asker).has_ended)
-    )
-    if among_workers >= MAX_OPEN_SUBAGENTS:
-        return CommandRefusal.SESSION_FULL
-    return None
+    match _allowance(snap, still_open, asker, MAX_OPEN_PER_ASKER, MAX_OPEN_SUBAGENTS):
+        case "asker":
+            return CommandRefusal.TOO_MANY_OPEN
+        case "workers":
+            return CommandRefusal.SESSION_FULL
+        case None:
+            return None
 
 
 def _approved(snap: Snapshot, intent: CommandApproved) -> Command | None:
