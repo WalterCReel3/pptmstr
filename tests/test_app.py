@@ -8250,6 +8250,195 @@ def test_a_request_the_store_refuses_writes_no_file(commands: _Commands) -> None
     assert commands.state.command_pending == set() and not commands.root.exists()
 
 
+def test_a_command_record_that_cannot_be_queued_is_said_once_and_the_batch_is_kept(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    ``_record_commands`` must not raise: ``apply_all`` would abandon the batch,
+    and the session file's half of the same step would go with it. A writer
+    that refuses the same way on every step is one line in the log, the error
+    held on ``AppState``, and every intent applied.
+    """
+    from pptmstr import app, fleetsync
+    from pptmstr.command import Command
+    from pptmstr.intents import AgentSpawned, CommandRequested, StateChanged
+    from pptmstr.model import AgentState
+
+    class Fleet(fleetsync.FleetWriter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.submitted: list[fleetsync.Change] = []
+
+        def submit(self, change: fleetsync.Change) -> int:
+            self.submitted.append(change)
+            return 0
+
+    fleet = Fleet()
+
+    class Unqueueable(app.CommandFiles):
+        def __init__(self) -> None:
+            super().__init__(tmp_path / "sessions")
+            self.asked: list[str] = []
+            self.fleet_at_first: int | None = None
+
+        def request(self, command: Command) -> None:
+            if self.fleet_at_first is None:
+                self.fleet_at_first = len(fleet.submitted)
+            self.asked.append(command.id)
+            raise OSError("no room")
+
+        def end(self, command: Command) -> None:
+            raise AssertionError("nothing here gains an end")
+
+    logged: list[tuple[str, str]] = []
+    monkeypatch.setattr(app.LOG, "error", lambda where, said: logged.append((where, said)))
+    monkeypatch.setattr(app.LOG, "debug", lambda where, said: None)
+    files = Unqueueable()
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    state.fleet_writer = fleet
+    state.command_files = files
+
+    def asked(serial: int) -> CommandRequested:
+        command = Command(
+            id=f"cmd-20261013T101500Z-{serial:012x}",
+            asker=_CROOT,
+            asked="true",
+            reason="why",
+            expects="what",
+            asked_at=1.0,
+        )
+        return CommandRequested(_CROOT, command, None, time.time())
+
+    first, second = asked(1), asked(2)
+    for intent in (
+        AgentSpawned(
+            node_id=_CROOT,
+            parent=None,
+            task="rotate the key",
+            model="claude-opus-5",
+            started_at=0.0,
+            cwd="/work",
+        ),
+        StateChanged(_CROOT, AgentState.THINKING),
+        first,
+        StateChanged(_CROOT, AgentState.AWAITING_INPUT),
+    ):
+        state.bridge.emit(intent)
+    app.apply_intents(state)
+    state.bridge.emit(second)
+    app.apply_intents(state)
+
+    held = state.store.snapshot()
+    assert set(held.commands) == {first.command.id, second.command.id}
+    assert held.nodes[_CROOT].state is AgentState.AWAITING_INPUT
+    # Each step is derived on its own: the second request was still handed over.
+    assert files.asked == [first.command.id, second.command.id]
+    assert state.command_pending == {first.command.id, second.command.id}
+    assert state.command_observer_failed == "OSError: no room"
+    assert [where for where, _ in logged] == ["command"]
+    # The session file's half ran for the step after the one that failed.
+    assert files.fleet_at_first is not None
+    assert len(fleet.submitted) > files.fleet_at_first
+
+
+# Every arm of ``store._apply`` that rebinds ``commands``, and what it does to the
+# map. ``_record_commands`` derives every record from the two maps except one bit,
+# whether an appeared command came from a file, which only the intent can say: it
+# is read as ``isinstance(intent, ...)``. An arm that adds commands read from a
+# file and is not named there is taken for "asked in this window", and its
+# commands are not marked as read back (``AppState.command_restored``).
+_COMMAND_ARMS = {
+    "CommandRequested": "adds one asked in this window",
+    "CommandsRestored": "adds those read from a session's files",
+    "CommandApproved": "changes one held",
+    "CommandRefused": "changes one held",
+    "CommandWithdrawn": "changes one held",
+    "CommandStopAsked": "changes one held",
+    "CommandEnded": "changes one held",
+    "CommandsRead": "changes one held",
+}
+_FROM_FILES = "adds those read from a session's files"
+
+
+def _class_names(pattern: object) -> set[str]:
+    import ast
+
+    match pattern:
+        case ast.MatchClass(cls=ast.Name(id=name)):
+            return {name}
+        case ast.MatchOr(patterns=alternatives):
+            return set().union(*(_class_names(each) for each in alternatives))
+        case ast.MatchAs(pattern=inner) if inner is not None:
+            return _class_names(inner)
+        case _:
+            raise AssertionError(f"a case pattern this test does not read: {ast.dump(pattern)}")  # type: ignore[arg-type]
+
+
+def test_every_intent_that_brings_commands_in_from_files_is_read_as_a_restore() -> None:
+    """
+    The one open edge of the snapshot diff: a second intent that loads commands
+    from files would be read as asked in this window, every test of the reducer
+    passing. So every arm that rebinds ``commands`` is named above with what it
+    does, and the intents ``_record_commands`` reads as a restore are exactly
+    the ones the table says add commands from files.
+    """
+    import ast
+    import inspect
+
+    from pptmstr import app, store
+
+    tree = ast.parse(inspect.getsource(store))
+    (apply,) = (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_apply")
+
+    def rebinds_commands(nodes: list[ast.stmt]) -> bool:
+        return any(
+            isinstance(target, ast.Name) and target.id == "commands"
+            for node in nodes
+            for each in ast.walk(node)
+            if isinstance(each, ast.Assign | ast.AugAssign | ast.AnnAssign)
+            for target in (each.targets if isinstance(each, ast.Assign) else [each.target])
+        )
+
+    arms: set[str] = set()
+    inside: set[int] = set()
+    for match in (n for n in ast.walk(apply) if isinstance(n, ast.Match)):
+        assert isinstance(match.subject, ast.Name) and match.subject.id == "intent"
+        for case in match.cases:
+            inside.update(id(n) for stmt in case.body for n in ast.walk(stmt))
+            if rebinds_commands(case.body):
+                arms |= _class_names(case.pattern)
+    assert arms == set(_COMMAND_ARMS), (
+        "the arms of _apply that rebind ``commands`` changed: say in _COMMAND_ARMS what"
+        " each does to the map, and if it adds commands read from files,"
+        " _record_commands must read it as a restore"
+    )
+    # Outside the arms, ``commands`` is only bound to the snapshot's.
+    outside = [
+        ast.unparse(n)
+        for n in ast.walk(apply)
+        if isinstance(n, ast.Assign | ast.AugAssign | ast.AnnAssign)
+        and id(n) not in inside
+        and rebinds_commands([n])
+    ]
+    assert outside == ["commands = snap.commands"]
+
+    observer = ast.parse(inspect.getsource(app._record_commands))
+    read_as_restore = {
+        name.id
+        for call in ast.walk(observer)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "isinstance"
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "intent"
+        for name in ast.walk(call.args[1])
+        if isinstance(name, ast.Name)
+    }
+    assert read_as_restore == {
+        intent for intent, does in _COMMAND_ARMS.items() if does == _FROM_FILES
+    }
+
+
 def test_the_readme_states_the_runners_numbers_as_the_code_has_them() -> None:
     """
     The README's section for the operator spells numbers the code owns. Each

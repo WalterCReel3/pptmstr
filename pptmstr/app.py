@@ -63,10 +63,14 @@ from .command import (
     CommandId,
     CommandState,
     End,
+    EndOwed,
     EndUnknown,
+    FromFile,
     NotStarted,
     Released,
+    RequestOwed,
     Survivor,
+    owed_records,
 )
 from .command import Withdrawn as CommandWithdrawnEnd
 from .driver import AgentSession, UncontainedAutonomy
@@ -575,15 +579,11 @@ def _abandon_command(state: AppState, command_id: CommandId) -> str:
 def _record_commands(state: AppState) -> Observer:
     """
     The commands' half of the observer: what each applied step means for a
-    command's files, queued for ``CommandFiles``, and which commands came from
-    a file.
+    command's files (``command.owed_records``), queued for ``CommandFiles``,
+    and which commands came from a file (``AppState.command_restored``).
 
-    Derived from the two snapshots and not from the intent, so a request the
-    store refused writes nothing: a command that appeared is asked, and gets
-    its ``request.json``; one that gained an end with no run was refused or
-    withdrawn, and gets its ``end.json``. A command that appeared under a
-    ``CommandsRestored`` is one a file already holds, and is only noted
-    (``AppState.command_restored``).
+    The one thing read off the intent is whether the step is a restore; the
+    rest is the difference between the two snapshots' commands.
 
     **It does not raise**, for the reason ``_record_board`` gives. A step it
     could not derive is a record a command does not get, said once.
@@ -594,22 +594,20 @@ def _record_commands(state: AppState) -> Observer:
             return
         try:
             files = state.command_files
-            from_file = isinstance(intent, CommandsRestored)
-            for command_id, command in after.commands.items():
-                was = before.commands.get(command_id)
-                if was is None:
-                    if from_file:
+            restoring = isinstance(intent, CommandsRestored)
+            for owed in owed_records(before.commands, after.commands, restoring=restoring):
+                match owed:
+                    case FromFile(command_id):
                         state.command_restored.add(command_id)
-                    elif files is not None and command.state is CommandState.ASKED:
-                        state.command_pending.add(command_id)
-                        files.request(command)
-                elif (
-                    files is not None
-                    and was.end is None
-                    and command.end is not None
-                    and command.run is None
-                ):
-                    files.end(command)
+                    case RequestOwed(asked):
+                        if files is not None:
+                            state.command_pending.add(asked.id)
+                            files.request(asked)
+                    case EndOwed(ended):
+                        if files is not None:
+                            files.end(ended)
+                    case _:
+                        assert_never(owed)
         except Exception as exc:  # noqa: BLE001 - see the docstring: this must not raise
             reason = f"{type(exc).__name__}: {exc}"
             if state.command_observer_failed != reason:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import enum
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, assert_never
 
@@ -928,3 +929,73 @@ class Command:
     def owes_row(self) -> bool:
         """Asked, running, or left running unsupervised."""
         return self.end is None or self.unsupervised is not None
+
+
+# -- the records a step owes ------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RequestOwed:
+    """A command asked in this window: its ``request.json`` is owed."""
+
+    command: Command
+
+
+@dataclass(frozen=True, slots=True)
+class EndOwed:
+    """A command that ended with no run, refused or withdrawn: its ``end.json`` is owed."""
+
+    command: Command
+
+
+@dataclass(frozen=True, slots=True)
+class FromFile:
+    """A command read back from a session's files. Nothing is owed: a file holds it."""
+
+    command_id: CommandId
+
+
+Owed = RequestOwed | EndOwed | FromFile
+
+
+def owed_records(
+    before: Mapping[CommandId, Command],
+    after: Mapping[CommandId, Command],
+    *,
+    restoring: bool,
+) -> tuple[Owed, ...]:
+    """
+    What one reducer step that took ``before`` to ``after`` owes the commands'
+    files, in ``after``'s order. ``restoring`` is whether the step brought
+    commands in from a session's files, which only the intent can say.
+
+    Derived from the two maps and not from the intent, so a request the store
+    refused owes nothing: a command that appeared is asked, and owes its
+    ``request.json``; one that gained an end with no run was refused or
+    withdrawn, and owes its ``end.json``. A command that appeared in a restore
+    is one a file already holds, and is only said to have come from one.
+
+    **The comparison is the definition.** ``boardfacts`` matches on the intent
+    because a difference between two snapshots cannot name a board record on
+    its own. It can name a command's: both records take only the ``Command``,
+    and which is owed follows from its ``run`` and ``end``, which are the whole
+    of its state. A diff also cannot miss an arm of the reducer that changes
+    ``commands``, where a closed match over all 57 members of ``Intent`` would
+    hold that only for an arm someone put the intent in.
+
+    Whether a writer exists is the caller's to know, so an asked command is
+    owed whether or not there is one.
+    """
+    if after is before:
+        return ()
+    owed: list[Owed] = []
+    for command_id, command in after.items():
+        was = before.get(command_id)
+        if was is None:
+            if restoring:
+                owed.append(FromFile(command_id))
+            elif command.state is CommandState.ASKED:
+                owed.append(RequestOwed(command))
+        elif was.end is None and command.end is not None and command.run is None:
+            owed.append(EndOwed(command))
+    return tuple(owed)

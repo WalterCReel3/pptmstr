@@ -88,8 +88,9 @@ no case here would persist nothing while every test of the reducer passed". A cl
 turns that into a type error *when the intent is added*. After that, it relies on someone
 putting the intent in the right arm. A diff over `commands` cannot miss such an arm: every
 arm that rebinds `commands` (store.py:1484-1614 today; `commands=` appears nowhere else in
-`_apply`) is observed whether or not anyone thought of it. A closed match whose ~65
-non-command members return `()` would replace that guarantee with a weaker one.
+`_apply`) is observed whether or not anyone thought of it. A closed match over all 57
+members of `Intent`, the 49 that are not command intents returning `()`, would replace that
+guarantee with a weaker one.
 
 `fleetsync` already mixes the two shapes. It uses a closed match for runs, which an intent
 names, and a diff for fleet membership, with the comment "the comparison is the definition"
@@ -116,7 +117,7 @@ This design does not build one:
 
 Read literally, D-c does not reach it. But if D-c was meant as "every observer half is a
 closed match on `Intent`", this design contradicts it, and that is the operator's call. It is
-**flagged, not settled**. The cost of the other reading is a match that lists about 65
+**flagged, not settled**. The cost of the other reading is a match that lists all 57
 members to compute one boolean. That list would need editing on every new `Intent`, and it
 would replace a guarantee by construction with one by review.
 

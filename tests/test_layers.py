@@ -764,6 +764,10 @@ PURE: dict[str, Claim] = {
     "pptmstr.digest": Claim(
         "pptmstr/digest.py", "``digest`` is a pure function of a snapshot, a session and a point"
     ),
+    # command.py:5
+    "pptmstr.command": Claim(
+        "pptmstr/command.py", "Nothing here performs IO, reads a clock, or draws"
+    ),
     # commandtext.py:4
     "pptmstr.commandtext": NO_IMGUI["pptmstr.commandtext"],
     # shellscan.py:4
