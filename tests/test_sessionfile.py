@@ -26,8 +26,9 @@ from typing import Any
 
 import pytest
 
-from pptmstr import boardlog, ondisk, sessionfile, settings
+from pptmstr import ondisk, sessionfile, settings
 from pptmstr.approval import Policy
+from pptmstr.journal import files as journal_files
 from pptmstr.sessionfile import (
     FORMAT,
     MAX_FILE_BYTES,
@@ -726,7 +727,7 @@ def test_the_paths_of_an_id_are_inside_its_own_directory(tmp_path: Path) -> None
     assert sessionfile.board_dir(SID, tmp_path) == tmp_path / SID / "board"
     # The same rule as the board log's, by being the same function.
     for session_id in (*_NOT_IDS, SID, "a b", "café"):
-        assert sessionfile.session_dir(session_id, tmp_path) == boardlog.session_dir(
+        assert sessionfile.session_dir(session_id, tmp_path) == journal_files.session_dir(
             tmp_path, session_id
         )
 

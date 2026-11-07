@@ -47,6 +47,7 @@ from pptmstr.intents import (
     PeerInboxRead,
     PeerSent,
 )
+from pptmstr.journal import codec
 from pptmstr.model import (
     EVERY_CHANNEL,
     AgentState,
@@ -150,7 +151,7 @@ def test_a_message_reaches_the_other_members_lead_and_is_filed_in_the_senders_lo
     assert filed.state is ConcernState.POSTED
     # Filed as ``peer-posted``, in the sender's own log and nobody else's.
     assert [(f.session_id, type(f.record)) for f in facts] == [(S, PeerPosted)]
-    assert json.loads(boardlog.encode(facts[0].on_the_wall(Clock(10.0, 5.0))))["kind"] == (
+    assert json.loads(codec.encode(facts[0].on_the_wall(Clock(10.0, 5.0))))["kind"] == (
         "peer-posted"
     )
 
@@ -1615,8 +1616,8 @@ def _sender_log(*intents: Intent) -> tuple[boardlog.Record, ...]:
         after, _, facts = apply(snap, intent)
         for fact in facts:
             if fact.session_id == S:
-                record = boardlog.decode(boardlog.encode(fact.record))
-                assert not isinstance(record, boardlog.Malformed)
+                record = codec.decode(codec.encode(fact.record), boardlog.KINDS)
+                assert not isinstance(record, codec.Malformed)
                 records.append(record)
         snap = after
     return tuple(records)
@@ -1653,21 +1654,19 @@ def test_a_withdrawal_after_delivery_restores_withdrawn_and_owed_nothing() -> No
 
 def test_the_retraction_kind_does_not_carry_the_reason() -> None:
     *_, retracted = _sender_log(*_RETRACTED)
-    payload = json.loads(boardlog.encode(retracted))
+    payload = json.loads(codec.encode(retracted))
     assert payload == {"kind": "peer-retracted", "at": 5.0, "concern_id": Q}
 
 
-def test_a_build_older_than_the_retraction_kind_reads_it_as_unrecognised_not_contested(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    texts = [boardlog.encode(r) for r in _sender_log(*_RETRACTED)]
-    older = {k: v for k, v in boardlog._KINDS.items() if k != "peer-retracted"}
-    monkeypatch.setattr(boardlog, "_KINDS", older)
+def test_a_build_older_than_the_retraction_kind_reads_it_as_unrecognised_not_contested() -> None:
+    texts = [codec.encode(r) for r in _sender_log(*_RETRACTED)]
+    by_name = {k: v for k, v in boardlog.KINDS.by_name.items() if k != "peer-retracted"}
+    older = codec.Kinds(by_name, boardlog.KINDS.hints)
 
-    records = [boardlog.decode(t) for t in texts]
-    board = boardlog.restore([r for r in records if not isinstance(r, boardlog.Malformed)])
+    records = [codec.decode(t, older) for t in texts]
+    board = boardlog.restore([r for r in records if not isinstance(r, codec.Malformed)])
 
-    assert isinstance(records[-1], boardlog.Unrecognised)
+    assert isinstance(records[-1], codec.Unrecognised)
     (logged,) = board.concerns
     # Short, which is not damage: the message stands as that build knew it.
     assert (logged.state, logged.contested, board.contested) == (ConcernState.DELIVERED, False, ())

@@ -4,7 +4,7 @@ record that did not land. Then where the logs are: the session's own directory,
 the legacy one, and the move from the second to the first.
 
 Against real directories under ``tmp_path``. Where a test has to see or hold the
-append itself, ``boardlog.append`` is wrapped and still called, so what reaches disk
+append itself, ``journal_files.append`` is wrapped and still called, so what reaches disk
 is what the real one wrote.
 """
 
@@ -19,16 +19,7 @@ from pathlib import Path
 import pytest
 
 from pptmstr import boardlog, boardsync, sessionfile, settings
-from pptmstr.boardlog import (
-    Board,
-    Claimed,
-    Completed,
-    Declared,
-    Record,
-    RecordingStopped,
-    Unwritten,
-    Written,
-)
+from pptmstr.boardlog import Board, Claimed, Completed, Declared, Record
 from pptmstr.boardsync import (
     BoardWriter,
     Found,
@@ -41,6 +32,10 @@ from pptmstr.boardsync import (
     Report,
     Stopped,
 )
+from pptmstr.journal import codec
+from pptmstr.journal import files as journal_files
+from pptmstr.journal.codec import RecordingStopped
+from pptmstr.journal.files import Unwritten, Written
 from pptmstr.ondisk import TEMP_PREFIX
 
 
@@ -58,7 +53,7 @@ def _declared(n: int) -> Declared:
 def _logged(writer: BoardWriter, session_id: str) -> tuple[Record, ...]:
     directory = writer.directory(session_id)
     assert directory is not None
-    log = boardlog.read(directory)
+    log = journal_files.read(directory, boardlog.KINDS)
     assert log.damage is None
     return log.records
 
@@ -124,7 +119,7 @@ def test_records_reach_disk_in_the_order_they_were_submitted_across_two_sessions
 def test_a_later_submission_is_never_appended_before_an_earlier_one_has_returned(
     writer: BoardWriter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real = boardlog.append
+    real = journal_files.append
     inside = 0
     overlapped: list[Record] = []
 
@@ -138,7 +133,7 @@ def test_a_later_submission_is_never_appended_before_an_earlier_one_has_returned
         inside -= 1
         return result
 
-    monkeypatch.setattr(boardlog, "append", one_at_a_time)
+    monkeypatch.setattr(journal_files, "append", one_at_a_time)
     for n in range(60):
         writer.submit("alpha" if n % 2 else "beta", _declared(n))
     _settle(writer, 60)
@@ -154,18 +149,18 @@ def test_neither_the_append_nor_the_listing_before_it_runs_on_the_submitting_thr
 ) -> None:
     appended_on: list[int] = []
     listed_on: list[int] = []
-    real_append, real_next = boardlog.append, boardlog.next_ordinal
+    real_append, real_next = journal_files.append, journal_files.next_ordinal
 
     def append(directory: Path, record: Record) -> Written | Unwritten:
         appended_on.append(threading.get_ident())
         return real_append(directory, record)
 
-    def next_ordinal(directory: Path) -> int | boardlog.Unlisted:
+    def next_ordinal(directory: Path) -> int | journal_files.Unlisted:
         listed_on.append(threading.get_ident())
         return real_next(directory)
 
-    monkeypatch.setattr(boardlog, "append", append)
-    monkeypatch.setattr(boardlog, "next_ordinal", next_ordinal)
+    monkeypatch.setattr(journal_files, "append", append)
+    monkeypatch.setattr(journal_files, "next_ordinal", next_ordinal)
 
     for n in range(20):
         writer.submit("alpha" if n % 2 else "beta", _declared(n))
@@ -182,14 +177,14 @@ def test_submit_and_drain_return_while_an_append_is_held(
     writer: BoardWriter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     entered, release = threading.Event(), threading.Event()
-    real = boardlog.append
+    real = journal_files.append
 
     def held(directory: Path, record: Record) -> Written | Unwritten:
         entered.set()
         assert release.wait(10)
         return real(directory, record)
 
-    monkeypatch.setattr(boardlog, "append", held)
+    monkeypatch.setattr(journal_files, "append", held)
 
     writer.submit("alpha", _declared(0))
     assert entered.wait(10)
@@ -228,14 +223,14 @@ def test_an_append_the_filesystem_refuses_is_drained_as_a_value_and_the_next_one
 def test_an_append_that_raises_is_drained_as_a_value_and_does_not_end_the_worker(
     writer: BoardWriter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real = boardlog.append
+    real = journal_files.append
 
     def raising(directory: Path, record: Record) -> Written | Unwritten:
         if record == _declared(0):
             raise RuntimeError("the disk is on fire")
         return real(directory, record)
 
-    monkeypatch.setattr(boardlog, "append", raising)
+    monkeypatch.setattr(journal_files, "append", raising)
 
     writer.submit("alpha", _declared(0))
     writer.submit("beta", _declared(1))
@@ -267,7 +262,7 @@ def test_after_one_append_fails_nothing_later_is_appended_for_that_session(
     those would leave ordinals 0 and 1 holding the first and third facts, which
     reads back whole.
     """
-    real = boardlog.append
+    real = journal_files.append
     asked: list[Record] = []
 
     def full_for_a_moment(directory: Path, record: Record) -> Written | Unwritten:
@@ -276,7 +271,7 @@ def test_after_one_append_fails_nothing_later_is_appended_for_that_session(
             return Unwritten("OSError: [Errno 28] No space left on device")
         return real(directory, record)
 
-    monkeypatch.setattr(boardlog, "append", full_for_a_moment)
+    monkeypatch.setattr(journal_files, "append", full_for_a_moment)
 
     for n in range(4):
         writer.submit("alpha", _declared(n))
@@ -315,7 +310,7 @@ def test_a_record_too_long_to_log_stops_its_session_and_is_reported_once(
         task_id="big",
         title="big",
         declared_by="lead",
-        detail="x" * (boardlog.MAX_RECORD_BYTES + 1),
+        detail="x" * (journal_files.MAX_RECORD_BYTES + 1),
     )
 
     writer.submit("alpha", _declared(0))
@@ -360,7 +355,7 @@ def test_a_session_id_that_names_no_directory_is_a_value_from_submit_and_from_lo
 
 def _finished_too_long(task_id: str) -> Completed:
     return Completed(
-        at=3.0, task_id=task_id, by="builder", result="x" * (boardlog.MAX_RECORD_BYTES + 1)
+        at=3.0, task_id=task_id, by="builder", result="x" * (journal_files.MAX_RECORD_BYTES + 1)
     )
 
 
@@ -431,15 +426,15 @@ def test_a_session_whose_first_record_did_not_land_loads_as_short_and_not_as_no_
 def test_the_marker_lands_when_the_reason_for_the_stop_is_itself_too_long_to_log(
     writer: BoardWriter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real = boardlog.append
-    essay = "no room " * boardlog.MAX_RECORD_BYTES
+    real = journal_files.append
+    essay = "no room " * journal_files.MAX_RECORD_BYTES
 
     def failing(directory: Path, record: Record) -> Written | Unwritten:
         if record == _declared(1):
             return Unwritten(essay)
         return real(directory, record)
 
-    monkeypatch.setattr(boardlog, "append", failing)
+    monkeypatch.setattr(journal_files, "append", failing)
     writer.submit("alpha", _declared(0))
     writer.submit("alpha", _declared(1))
     _, _, stopped = _reports(writer, 2)
@@ -448,7 +443,7 @@ def test_the_marker_lands_when_the_reason_for_the_stop_is_itself_too_long_to_log
     assert isinstance(stopped.marker, Written)
     said = _marker(writer, "alpha")
     assert said.reason == essay[: boardsync.MARKER_REASON_CHARS]
-    assert len(boardlog.encode(said)) < boardlog.MAX_RECORD_BYTES // 100
+    assert len(codec.encode(said)) < journal_files.MAX_RECORD_BYTES // 100
 
 
 def test_a_stop_whose_marker_cannot_land_either_is_reported_as_unmarked(
@@ -458,7 +453,7 @@ def test_a_stop_whose_marker_cannot_land_either_is_reported_as_unmarked(
     The disk stays full. The owner is told the log does not say it stopped, and
     the last assertion is the limit the module states: that log restores whole.
     """
-    real = boardlog.append
+    real = journal_files.append
     full = False
 
     def filling(directory: Path, record: Record) -> Written | Unwritten:
@@ -468,7 +463,7 @@ def test_a_stop_whose_marker_cannot_land_either_is_reported_as_unmarked(
             return Unwritten("OSError: [Errno 28] No space left on device")
         return real(directory, record)
 
-    monkeypatch.setattr(boardlog, "append", filling)
+    monkeypatch.setattr(journal_files, "append", filling)
     writer.submit("alpha", _declared(0))
     writer.submit("alpha", _declared(1))
     _, _, stopped = _reports(writer, 2)
@@ -482,14 +477,14 @@ def test_a_stop_whose_marker_cannot_land_either_is_reported_as_unmarked(
 def test_a_marker_whose_append_raises_is_a_value_and_does_not_end_the_worker(
     writer: BoardWriter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real = boardlog.append
+    real = journal_files.append
 
     def raising(directory: Path, record: Record) -> Written | Unwritten:
         if directory.parent.name == "alpha":
             raise RuntimeError("gone")
         return real(directory, record)
 
-    monkeypatch.setattr(boardlog, "append", raising)
+    monkeypatch.setattr(journal_files, "append", raising)
     writer.submit("alpha", _declared(0))
     writer.submit("beta", _declared(1))
     _, stopped, landed = _reports(writer, 2)
@@ -560,7 +555,7 @@ def test_a_log_that_could_not_be_listed_for_one_moment_is_not_taken_for_a_new_on
     assert isinstance(stopped, Stopped) and stopped.marker is None
     assert isinstance(later, Outcome) and not later.kept
     assert sorted(os.listdir(directory)) == before
-    assert not boardlog.restore_log(boardlog.read(directory)).short
+    assert not boardlog.restore_log(journal_files.read(directory, boardlog.KINDS)).short
 
 
 def test_an_adopted_log_is_appended_to_without_asking_what_its_directory_holds(
@@ -570,17 +565,17 @@ def test_an_adopted_log_is_appended_to_without_asking_what_its_directory_holds(
     writer.adopt("resumed")
     asked: list[Path] = []
 
-    def unlistable(directory: Path) -> boardlog.Unlisted:
+    def unlistable(directory: Path) -> journal_files.Unlisted:
         asked.append(directory)
-        return boardlog.Unlisted("nobody may look")
+        return journal_files.Unlisted("nobody may look")
 
-    monkeypatch.setattr(boardlog, "next_ordinal", unlistable)
+    monkeypatch.setattr(journal_files, "next_ordinal", unlistable)
 
     writer.submit("resumed", _declared(7))
 
     assert _settle(writer, 1)[0].kept
     assert asked == []
-    assert len(boardlog.read(directory).records) == 3
+    assert len(journal_files.read(directory, boardlog.KINDS).records) == 3
 
 
 # -- a log nobody restored ---------------------------------------------------------
@@ -589,8 +584,8 @@ def test_an_adopted_log_is_appended_to_without_asking_what_its_directory_holds(
 def _someone_elses_log(root: Path, session_id: str) -> Path:
     directory = sessionfile.board_dir(session_id, root)
     assert directory is not None
-    assert isinstance(boardlog.append(directory, _declared(0)), Written)
-    assert isinstance(boardlog.append(directory, Claimed(1.0, "t0", "builder")), Written)
+    assert isinstance(journal_files.append(directory, _declared(0)), Written)
+    assert isinstance(journal_files.append(directory, Claimed(1.0, "t0", "builder")), Written)
     return directory
 
 
@@ -605,7 +600,7 @@ def test_a_log_this_process_did_not_restore_is_not_appended_to(writer: BoardWrit
 
     assert all(isinstance(o.result, Unwritten) and not o.kept for o in outcomes)
     assert sorted(os.listdir(directory)) == before
-    assert not boardlog.restore_log(boardlog.read(directory)).short
+    assert not boardlog.restore_log(journal_files.read(directory, boardlog.KINDS)).short
 
 
 def test_the_refusal_is_what_keeps_the_restored_board_uncontested(tmp_path: Path) -> None:
@@ -614,10 +609,10 @@ def test_the_refusal_is_what_keeps_the_restored_board_uncontested(tmp_path: Path
     appended behind the log restore as a contest.
     """
     directory = _someone_elses_log(tmp_path, "resumed")
-    boardlog.append(directory, _declared(0))
-    boardlog.append(directory, Claimed(2.0, "t0", "builder-2"))
+    journal_files.append(directory, _declared(0))
+    journal_files.append(directory, Claimed(2.0, "t0", "builder-2"))
 
-    assert boardlog.restore_log(boardlog.read(directory)).contested
+    assert boardlog.restore_log(journal_files.read(directory, boardlog.KINDS)).contested
 
 
 def test_adopting_a_log_is_what_lets_the_writer_append_to_it(writer: BoardWriter) -> None:
@@ -642,14 +637,14 @@ def test_an_adoption_made_while_the_worker_is_listing_the_directory_counts(
     writer: BoardWriter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _someone_elses_log(writer.root, "resumed")
-    real = boardlog.next_ordinal
+    real = journal_files.next_ordinal
 
-    def adopted_meanwhile(directory: Path) -> int | boardlog.Unlisted:
+    def adopted_meanwhile(directory: Path) -> int | journal_files.Unlisted:
         found = real(directory)
         writer.adopt("resumed")
         return found
 
-    monkeypatch.setattr(boardlog, "next_ordinal", adopted_meanwhile)
+    monkeypatch.setattr(journal_files, "next_ordinal", adopted_meanwhile)
     writer.submit("resumed", _declared(7))
 
     (landed,) = _settle(writer, 1)
@@ -668,7 +663,7 @@ def test_loading_a_log_without_adopting_it_admits_nothing(writer: BoardWriter) -
     assert isinstance(stopped, Stopped) and stopped.session_id == "resumed"
     # No marker either: the log is whole, and it is somebody else's.
     assert stopped.marker is None
-    assert len(boardlog.read(directory).records) == 2
+    assert len(journal_files.read(directory, boardlog.KINDS).records) == 2
 
 
 def test_adopting_after_a_record_was_refused_does_not_restart_the_recording(
@@ -688,7 +683,7 @@ def test_adopting_after_a_record_was_refused_does_not_restart_the_recording(
     reports = _reports(writer, 1)
     assert [type(r) for r in reports] == [Outcome], "the break is reported once"
     assert not _outcomes(reports)[0].kept
-    assert len(boardlog.read(directory).records) == 2
+    assert len(journal_files.read(directory, boardlog.KINDS).records) == 2
 
 
 def test_a_session_with_no_record_on_disk_is_one_this_process_starts(writer: BoardWriter) -> None:
@@ -762,7 +757,7 @@ def test_close_gives_up_at_its_bound_and_names_every_record_that_did_not_land(
     writer: BoardWriter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     entered, release = threading.Event(), threading.Event()
-    real = boardlog.append
+    real = journal_files.append
 
     def wedged(directory: Path, record: Record) -> Written | Unwritten:
         if record == _declared(1):
@@ -770,7 +765,7 @@ def test_close_gives_up_at_its_bound_and_names_every_record_that_did_not_land(
             assert release.wait(30)
         return real(directory, record)
 
-    monkeypatch.setattr(boardlog, "append", wedged)
+    monkeypatch.setattr(journal_files, "append", wedged)
 
     writer.submit("alpha", _declared(0))
     writer.submit("alpha", _declared(1))
@@ -966,8 +961,8 @@ def legacy(tmp_path: Path) -> Path:
 def _legacy_log(legacy: Path, session_id: str) -> Path:
     """A log as a build that kept them under ``boards/`` wrote it: ``t0``, held."""
     directory = legacy / session_id
-    assert isinstance(boardlog.append(directory, _declared(0)), Written)
-    assert isinstance(boardlog.append(directory, Claimed(1.0, "t0", "builder")), Written)
+    assert isinstance(journal_files.append(directory, _declared(0)), Written)
+    assert isinstance(journal_files.append(directory, Claimed(1.0, "t0", "builder")), Written)
     return directory
 
 
@@ -1067,9 +1062,9 @@ def test_records_in_both_places_are_two_histories_and_neither_is_appended_to(
     """
     new = sessionfile.board_dir("split", sessions)
     assert new is not None
-    boardlog.append(new, _declared(0))
-    boardlog.append(new, Claimed(1.0, "t0", "builder"))
-    boardlog.append(legacy / "split", Completed(2.0, "t0", "builder", "done"))
+    journal_files.append(new, _declared(0))
+    journal_files.append(new, Claimed(1.0, "t0", "builder"))
+    journal_files.append(legacy / "split", Completed(2.0, "t0", "builder", "done"))
     before = _entries(sessions, legacy)
 
     found = boardsync.find("split", sessions, legacy)
@@ -1183,7 +1178,7 @@ def test_a_log_at_the_legacy_path_alone_is_renamed_and_a_link_is_left_at_the_old
     # One history, appendable, by either name.
     found = boardsync.find("s-1", sessions, legacy)
     assert found == Found(found.board, new) and _tasks(found) == [("t0", "CLAIMED")]
-    assert boardlog.read(old) == boardlog.read(new)
+    assert journal_files.read(old, boardlog.KINDS) == journal_files.read(new, boardlog.KINDS)
 
 
 def test_a_moved_log_is_one_this_build_appends_to_once_it_is_adopted(
@@ -1208,7 +1203,7 @@ def test_a_build_that_still_appends_by_the_old_name_lands_in_the_one_log(
     sessions: Path, legacy: Path
 ) -> None:
     """
-    ``boardlog.append`` as an older build calls it: by ``boards/<id>``. Without the
+    ``journal_files.append`` as an older build calls it: by ``boards/<id>``. Without the
     link it makes that directory again, writes ordinal 0 there and reports
     ``Written``.
     """
@@ -1216,9 +1211,9 @@ def test_a_build_that_still_appends_by_the_old_name_lands_in_the_one_log(
     boardsync.migrate(sessions, legacy)
     new = sessions / "s-1" / "board"
 
-    assert boardlog.next_ordinal(old) == 2
-    written = boardlog.append(old, Completed(2.0, "t0", "builder", "done"))
-    ours = boardlog.append(new, _declared(7))
+    assert journal_files.next_ordinal(old) == 2
+    written = journal_files.append(old, Completed(2.0, "t0", "builder", "done"))
+    ours = journal_files.append(new, _declared(7))
 
     assert isinstance(written, Written) and (written.ordinal, written.gap) == (2, None)
     assert isinstance(ours, Written) and (ours.ordinal, ours.gap) == (3, None)
@@ -1227,7 +1222,7 @@ def test_a_build_that_still_appends_by_the_old_name_lands_in_the_one_log(
     found = boardsync.find("s-1", sessions, legacy)
     assert found.unrecorded is None and found.second is None
     assert _tasks(found) == [("t0", "COMPLETED"), ("t7", "PENDING")]
-    assert boardlog.read(old) == boardlog.read(new)
+    assert journal_files.read(old, boardlog.KINDS) == journal_files.read(new, boardlog.KINDS)
 
 
 def test_a_session_with_a_log_only_at_the_new_path_is_left_alone(
@@ -1247,7 +1242,7 @@ def test_a_session_with_a_log_only_at_the_new_path_is_left_alone(
 def test_a_session_with_a_log_at_both_paths_has_neither_moved(sessions: Path, legacy: Path) -> None:
     new = _someone_elses_log(sessions, "s-1")
     old = legacy / "s-1"
-    boardlog.append(old, Completed(2.0, "t0", "builder", "done"))
+    journal_files.append(old, Completed(2.0, "t0", "builder", "done"))
     files, entries = _files(sessions, legacy), _entries(sessions, legacy)
 
     (left,) = boardsync.migrate(sessions, legacy).entries
@@ -1276,7 +1271,7 @@ def test_an_empty_directory_at_the_new_path_does_not_keep_a_log_at_the_legacy_on
     assert boardsync.migrate(sessions, legacy) == Migration((Moved("s-1", old, new),))
 
     assert before.items() <= _files(sessions, legacy).items()
-    assert len(boardlog.read(new).records) == 2
+    assert len(journal_files.read(new, boardlog.KINDS).records) == 2
 
 
 def test_a_new_path_holding_anything_at_all_is_not_renamed_onto(
@@ -1459,8 +1454,13 @@ def test_the_move_lists_the_legacy_root_once_and_reads_no_record(
 
     monkeypatch.setattr(os, "listdir", listdir)
     monkeypatch.setattr(os, "open", opening)
-    for name in ("read", "next_ordinal", "decode", "restore_log"):
-        monkeypatch.setattr(boardlog, name, lambda *a, **k: pytest.fail("a log was read"))
+    for module, name in (
+        (journal_files, "read"),
+        (journal_files, "next_ordinal"),
+        (codec, "decode"),
+        (boardlog, "restore_log"),
+    ):
+        monkeypatch.setattr(module, name, lambda *a, **k: pytest.fail("a log was read"))
 
     migration = boardsync.migrate(sessions, legacy)
 
@@ -1486,7 +1486,7 @@ def test_an_append_that_remakes_the_old_directory_before_the_link_is_two_histori
     theirs: list[Written | Unwritten] = []
 
     def after_the_other_writer(target: str, source: Path) -> None:
-        theirs.append(boardlog.append(old, Completed(2.0, "t0", "builder", "done")))
+        theirs.append(journal_files.append(old, Completed(2.0, "t0", "builder", "done")))
         real(target, source)
 
     monkeypatch.setattr(os, "symlink", after_the_other_writer)
@@ -1496,7 +1496,10 @@ def test_an_append_that_remakes_the_old_directory_before_the_link_is_two_histori
     assert isinstance(theirs[0], Written) and theirs[0].ordinal == 0, "a fresh log, reported kept"
     assert isinstance(moved, Moved)
     assert moved.unlinked is not None and "FileExistsError" in moved.unlinked
-    assert len(boardlog.read(new).records) == 2 and len(boardlog.read(old).records) == 1
+    assert (
+        len(journal_files.read(new, boardlog.KINDS).records) == 2
+        and len(journal_files.read(old, boardlog.KINDS).records) == 1
+    )
 
     found = boardsync.find("s-1", sessions, legacy)
     assert (found.directory, found.second) == (new, old)
@@ -1507,7 +1510,7 @@ def test_an_append_that_remakes_the_old_directory_before_the_link_is_two_histori
     writer.adopt("s-1")
     writer.submit("s-1", _declared(7))
     assert not any(o.kept for o in _outcomes(writer.close(timeout=10)))
-    assert len(boardlog.read(new).records) == 2
+    assert len(journal_files.read(new, boardlog.KINDS).records) == 2
     # And the next start moves nothing onto either.
     (left,) = boardsync.migrate(sessions, legacy).entries
     assert isinstance(left, Left) and left.twice
@@ -1524,7 +1527,7 @@ def test_a_move_under_a_thread_appending_by_the_old_name_never_leaves_a_short_lo
     append to, or ``find`` says the session is not to be appended to.
     """
     old = legacy / "s-1"
-    assert isinstance(boardlog.append(old, _declared(0)), Written)
+    assert isinstance(journal_files.append(old, _declared(0)), Written)
     told: list[tuple[Declared, Written | Unwritten]] = []
     started, stop = threading.Event(), threading.Event()
 
@@ -1532,7 +1535,7 @@ def test_a_move_under_a_thread_appending_by_the_old_name_never_leaves_a_short_lo
         n = 1
         while not stop.is_set() and n < 4000:
             record = _declared(n)
-            told.append((record, boardlog.append(old, record)))
+            told.append((record, journal_files.append(old, record)))
             n += 1
             if n > 5 + round_:
                 started.set()
@@ -1566,5 +1569,9 @@ def test_a_move_under_a_thread_appending_by_the_old_name_never_leaves_a_short_lo
     # Either way nothing it was told is on disk has gone.
     on_disk = set()
     for place in {sessions / "s-1" / "board", old.resolve()}:
-        on_disk |= {r.task_id for r in boardlog.read(place).records if isinstance(r, Declared)}
+        on_disk |= {
+            r.task_id
+            for r in journal_files.read(place, boardlog.KINDS).records
+            if isinstance(r, Declared)
+        }
     assert {record.task_id for record in kept} <= on_disk

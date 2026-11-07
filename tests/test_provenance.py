@@ -20,6 +20,8 @@ from pptmstr import boardlog, drawable
 from pptmstr.boardfacts import Fact, outcomes
 from pptmstr.boardlog import Clock, RestoredTask
 from pptmstr.intents import AgentSpawned, BoardRestored, Intent, TaskAmended, TaskDeclared
+from pptmstr.journal import codec
+from pptmstr.journal import files as journal_files
 from pptmstr.model import (
     MAX_CHANNEL_CHARS,
     Charter,
@@ -65,9 +67,9 @@ def through_the_disk(tmp_path: Path, facts: list[Fact]) -> boardlog.Board:
     """
     for fact in facts:
         assert fact.session_id == S
-        written = boardlog.append(tmp_path, fact.on_the_wall(_CLOCK))
-        assert isinstance(written, boardlog.Written), written
-    log = boardlog.read(tmp_path)
+        written = journal_files.append(tmp_path, fact.on_the_wall(_CLOCK))
+        assert isinstance(written, journal_files.Written), written
+    log = journal_files.read(tmp_path, boardlog.KINDS)
     assert log.damage is None
     return boardlog.restore_log(log)
 
@@ -384,7 +386,7 @@ def test_the_store_that_wrote_a_provenance_takes_its_log_back_as_the_same_board(
 def test_a_declaration_with_no_provenance_logs_none(tmp_path: Path) -> None:
     _, facts = apply(started(), declared())
 
-    (record,) = [boardlog.decode(boardlog.encode(f.on_the_wall(_CLOCK))) for f in facts]
+    (record,) = [codec.decode(codec.encode(f.on_the_wall(_CLOCK)), boardlog.KINDS) for f in facts]
 
     assert isinstance(record, boardlog.Declared)
     assert (record.channel, record.re, record.inside_charter) == (None, None, None)
@@ -491,5 +493,5 @@ def test_a_mark_is_written_to_the_log_as_its_word(tmp_path: Path) -> None:
     """
     for mark in Charter:
         _, facts = apply(started(), declared(provenance=Provenance("brand", None, mark)))
-        (text,) = [boardlog.encode(f.on_the_wall(_CLOCK)) for f in facts]
+        (text,) = [codec.encode(f.on_the_wall(_CLOCK)) for f in facts]
         assert f'"inside_charter": "{mark.value}"' in text

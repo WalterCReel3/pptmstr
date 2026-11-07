@@ -1,92 +1,131 @@
 """
-B1's condition, measured: logs HEAD writes read back through the proposed journal
-path to the same records, the same damage and the same bytes.
+B1's condition, measured after the build: logs read back through ``pptmstr.journal``
+to what the tree before B1 reads from the same files, and what this build writes is
+byte-for-byte what that tree wrote.
 
 Run from the repository root:
 
     .venv/bin/python planning/2026-11-07-journal-substrate/readback.py
     .venv/bin/python planning/2026-11-07-journal-substrate/readback.py --existing DIR
-    .venv/bin/python planning/2026-11-07-journal-substrate/readback.py --write-golden
+    .venv/bin/python planning/2026-11-07-journal-substrate/readback.py --build-tree DIR
+
+**Two trees, one set of files.** The fixtures are written once, by this build. The
+tree before B1 (``--head-rev``, default ``PRE_B1``) is extracted with ``git archive``
+into ``$TMPDIR`` and each tree reads every fixture in a process of its own, this
+script run as ``--observe`` with that tree first on ``sys.path``. Each observation is
+a ``repr``: every value compared is a frozen dataclass of text, numbers, tuples and
+None, whose ``repr`` names no module, so the two trees' values compare as text.
+
+**Bytes against golden.json**, which holds what the tree at 66af79e wrote for parts 2
+and 5 (``boardlog.py`` and ``channels.py`` did not change between 66af79e and the
+tree before B1, apart from 1460798's move of ``append`` onto ``create_once``, which
+golden.json was checked against at the time). A writer compared with itself would
+pass whatever it wrote.
+
+**Channels read under the board's kind table**, as the addendum of
+``2026-11-07-the-board-log-is-one-journal-of-two.md`` requires, so part 6 and part
+6b expect no difference at all: the design-time version of this script pinned the
+difference the link-only table made, and that table was not built.
 
 Every log this writes is under a fresh directory in ``$TMPDIR``, and
 ``XDG_CONFIG_HOME`` is pointed there before pptmstr is imported, so nothing under
 ``~/.config`` is read or written. ``--existing DIR`` additionally reads, and never
-writes, every log directory under ``DIR`` through both paths; point it at a *copy*
+writes, every log directory under ``DIR`` through both trees; point it at a *copy*
 of the operator's configuration directory.
 
-What "the proposed path" is: ``proto_journal.decode`` and ``proto_journal.read``,
-which take the kind table as a parameter, with a board log read under the board's
-table and a channel log under a table holding only ``RecordingStopped``. Writing is
-not re-implemented: ``append`` and ``encode`` move without a change to their
-bodies, so the writer here is HEAD's, and part 1 checks that the two functions that
-do change differ from HEAD's only as the design says.
+``--build-tree DIR`` measures a tree other than this repository's as the build: a
+copy with a deliberate defect, to show that a check fails.
 
-Exits non-zero if any check that is expected to hold does not. The differences
-between the two paths are pinned as checks that the difference is there: part 6's
-``Unrecognised.text``, and part 6b's, where a board record that does not decode
-under the board's table, in a channel's directory, is damage to HEAD and a newer
-kind to the proposed path, so the proposed sweep appends a close HEAD does not.
-Part 6b's table lists every variant; its pin fails if the proposed path stops
-writing that close.
+Exits non-zero if any check fails.
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
 import dataclasses
-import inspect
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
-import textwrap
 from pathlib import Path
-from typing import Any, get_args, get_type_hints
+from typing import Any
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 
+# The commit B1 was built on: the last tree whose ``boardlog`` reads the disk.
+PRE_B1 = "3d57bb4"
+
+# The bytes HEAD 66af79e wrote for parts 2 and 5: one JSON object, log label to
+# file name to the file's text (every record file is ASCII, since the encoder
+# escapes).
+GOLDEN = HERE / "golden.json"
+
+
+def _parse() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--existing", type=Path)
+    parser.add_argument("--build-tree", type=Path, default=ROOT)
+    parser.add_argument("--head-rev", default=PRE_B1)
+    parser.add_argument("--observe", nargs=2, type=Path, metavar=("MANIFEST", "OUT"))
+    return parser.parse_args()
+
+
+ARGS = _parse()
+TREE = (ARGS.build_tree if ARGS.observe is None else Path(os.environ["READBACK_TREE"])).resolve()
 SCRATCH = Path(tempfile.mkdtemp(prefix="b1-readback-", dir=os.environ.get("TMPDIR") or None))
 os.environ["XDG_CONFIG_HOME"] = str(SCRATCH / "config")
-sys.path[:0] = [str(ROOT), str(HERE)]
+sys.path[:0] = [str(TREE)]
 
 from pptmstr import boardlog, channels, settings  # noqa: E402
 
-import proto_journal as proto  # noqa: E402
-
+assert Path(boardlog.__file__).resolve().is_relative_to(TREE), boardlog.__file__
 assert settings.config_dir().is_relative_to(SCRATCH), settings.config_dir()
 
-FAILURES: list[str] = []
+# The two trees' APIs: after B1 a read is handed the board's table; before, the
+# table was a global of ``boardlog``.
+try:
+    from pptmstr.journal import codec, files
 
-# The bytes HEAD 66af79e wrote for parts 2 and 5, kept so that a later build's
-# writer is compared against HEAD's and not against itself: one JSON object, log
-# label to file name to the file's text (every record file is ASCII, since the
-# encoder escapes). ``--write-golden`` writes it; no other run writes here.
-GOLDEN = HERE / "golden.json"
-WRITE_GOLDEN = False
+    def read_board(directory: Path) -> Any:
+        return files.read(directory, boardlog.KINDS)
+
+    encode: Any = codec.encode
+    append: Any = files.append
+    name: Any = files.name
+    MAX_RECORD_BYTES: int = files.MAX_RECORD_BYTES
+    RecordingStopped: Any = codec.RecordingStopped
+    Unrecognised: Any = codec.Unrecognised
+    Log: Any = codec.Log
+    Written: Any = files.Written
+    ORDINALS: Any = files._ordinals
+except ImportError:
+
+    def read_board(directory: Path) -> Any:
+        return boardlog.read(directory)  # type: ignore[attr-defined]
+
+    encode = boardlog.encode  # type: ignore[attr-defined]
+    append = boardlog.append  # type: ignore[attr-defined]
+    name = boardlog._name  # type: ignore[attr-defined]
+    MAX_RECORD_BYTES = boardlog.MAX_RECORD_BYTES  # type: ignore[attr-defined]
+    RecordingStopped = boardlog.RecordingStopped  # type: ignore[attr-defined]
+    Unrecognised = boardlog.Unrecognised  # type: ignore[attr-defined]
+    Log = boardlog.Log  # type: ignore[attr-defined]
+    Written = boardlog.Written  # type: ignore[attr-defined]
+    ORDINALS = boardlog._ordinals  # type: ignore[attr-defined]
+
+from typing import get_args, get_type_hints  # noqa: E402
+
+Fact = channels.Fact
+FAILURES: list[str] = []
 
 
 def check(label: str, ok: bool, detail: str = "") -> None:
     print(f"  {'ok  ' if ok else 'FAIL'} {label}" + (f" -- {detail}" if detail else ""))
     if not ok:
         FAILURES.append(label)
-
-
-def against_golden(label: str, written: dict[str, bytes]) -> None:
-    stored = json.loads(GOLDEN.read_text("ascii")) if GOLDEN.exists() else {}
-    if WRITE_GOLDEN:
-        assert label not in stored, f"golden {label} is already written"
-        stored[label] = {n: data.decode("ascii") for n, data in written.items()}
-        GOLDEN.write_text(json.dumps(stored, indent=1, sort_keys=True) + "\n", "ascii")
-        print(f"  wrote {len(written)} files as {GOLDEN.name}[{label}]")
-        return
-    want = {n: t.encode("ascii") for n, t in stored.get(label, {}).items()}
-    check(
-        f"what this build wrote is byte-for-byte golden[{label}] (HEAD 66af79e's)",
-        bool(want) and written == want,
-        f"{len(written)} files",
-    )
 
 
 def files_of(directory: Path) -> dict[str, bytes]:
@@ -97,42 +136,66 @@ def files_of(directory: Path) -> dict[str, bytes]:
     }
 
 
-BOARD = proto.kinds(*get_args(boardlog.Known))
-LINKS = proto.kinds()
-Fact = channels.Fact
+# -- the observer: one tree's reading of every fixture ---------------------------------
 
 
-# -- 1. the changed bodies are HEAD's, but for the parameter --------------------------
+def _sweep(base: Path, name_: str, link_id: str) -> dict[str, str]:
+    """
+    Read, judge and ``owes_close`` for one link's log, then relink its name through
+    a real ``ChannelWriter`` and say which files the sweep added. A close is named by
+    its kind and its channel, since the sweep stamps it with the clock.
+    """
+    k = channels.LinkKey(name_, link_id)
+    d = base / name_ / link_id
+    store = channels.FileChannels(base)
+    read = store.read(k)
+    judged = channels.judge(k, read)
+    owed = channels.owes_close(k, read)
+    before = files_of(d)
+    writer = channels.ChannelWriter(store)
+    writer.submit(
+        channels.LinkKey(name_, "later"),
+        channels.LinkCreated(at=10.0, channel_id="later", members=("a", "b"), charter=""),
+    )
+    writer.close(timeout=10.0)
+    after = files_of(d)
+    assert all(before[n] == after[n] for n in before), "a record file was rewritten"
+    added = [
+        f"{p['kind']}({p.get('channel_id')})"
+        for p in (json.loads(after[n]) for n in after if n not in before)
+    ]
+    return {
+        "read": repr(read),
+        "judge": repr(judged),
+        "owes_close": repr(owed),
+        "sweep appended": repr(added),
+    }
 
 
-def _body(fn: Any) -> str:
-    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-    func = tree.body[0]
-    assert isinstance(func, ast.FunctionDef)
-    body = func.body
-    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-        body = body[1:]
-    return "\n".join(ast.unparse(stmt) for stmt in body)
+def observe(manifest: Path, out: Path) -> int:
+    entries = json.loads(manifest.read_text())
+    seen: dict[str, dict[str, str]] = {}
+    for label, entry in entries.items():
+        path = Path(entry["path"])
+        if entry["type"] == "board":
+            seen[label] = {"read": repr(read_board(path))}
+        elif entry["type"] == "channel":
+            k = channels.LinkKey(entry["name"], entry["link_id"])
+            read = channels.FileChannels(path).read(k)
+            seen[label] = {
+                "read": repr(read),
+                "judge": repr(channels.judge(k, read)),
+                "owes_close": repr(channels.owes_close(k, read)),
+            }
+        else:
+            mine = SCRATCH / "sweep" / str(len(seen))
+            shutil.copytree(path, mine, symlinks=True)
+            seen[label] = _sweep(mine, entry["name"], entry["link_id"])
+    out.write_text(json.dumps(seen, indent=1))
+    return 0
 
 
-SUBSTITUTIONS = (
-    ("kinds.by_name.get(", "_KINDS.get("),
-    ("kinds.hints[cls]", "_HINTS[cls]"),
-    ("decode(text, kinds)", "decode(text)"),
-    ("/ name(ordinal)", "/ _name(ordinal)"),
-)
-
-
-def part1() -> None:
-    print("1. proto bodies against HEAD's, after the stated substitutions")
-    for ours, head in ((proto.decode, boardlog.decode), (proto.read, boardlog.read)):
-        text = _body(ours)
-        for new, old in SUBSTITUTIONS:
-            text = text.replace(new, old)
-        check(f"{ours.__name__}: body equals HEAD's", text == _body(head))
-
-
-# -- records: one or more of every kind, over awkward values -------------------------
+# -- the fixtures, written by the build ---------------------------------------------
 
 TEXTS = (
     "",
@@ -169,7 +232,7 @@ def value(hint: Any, i: int) -> Any:
 def board_records() -> list[Any]:
     out: list[Any] = []
     for i in range(6):
-        for cls in (*get_args(boardlog.Known), boardlog.RecordingStopped):
+        for cls in (*get_args(boardlog.Known), RecordingStopped):
             hints = get_type_hints(cls)
             out.append(
                 cls(
@@ -180,7 +243,7 @@ def board_records() -> list[Any]:
                 )
             )
     out.append(
-        boardlog.Unrecognised(
+        Unrecognised(
             at=1.0,
             kind="a-later-kind",
             text='{"kind": "a-later-kind", "at": 1.0, "x": [1, {"y": null}]}',
@@ -189,85 +252,101 @@ def board_records() -> list[Any]:
     return out
 
 
-# -- 2-3. a board log written by HEAD, read both ways ---------------------------------
+class Fixtures:
+    def __init__(self) -> None:
+        self.root = SCRATCH / "fixtures"
+        self.entries: dict[str, dict[str, str]] = {}
+
+    def board(self, label: str) -> Path:
+        d = self.root / "board" / str(len(self.entries))
+        d.mkdir(parents=True)
+        self.entries[label] = {"type": "board", "path": str(d)}
+        return d
+
+    def channel(self, label: str, kind: str, link: channels.LinkKey) -> Path:
+        base = self.root / kind / str(len(self.entries))
+        d = base / link.name / link.link_id
+        d.mkdir(parents=True)
+        self.entries[label] = {
+            "type": kind,
+            "path": str(base),
+            "name": link.name,
+            "link_id": link.link_id,
+        }
+        return d
 
 
-def part2_3() -> None:
-    print("2. a board log HEAD wrote: every kind, awkward values")
+def against_golden(label: str, written: dict[str, bytes]) -> None:
+    stored = json.loads(GOLDEN.read_text("ascii"))
+    want = {n: t.encode("ascii") for n, t in stored.get(label, {}).items()}
+    check(
+        f"what this build wrote is byte-for-byte golden[{label}] (66af79e's)",
+        bool(want) and written == want,
+        f"{len(written)} files",
+    )
+
+
+def part2_3(fx: Fixtures) -> list[Any]:
+    print("2. a board log this build wrote: every kind, awkward values")
     records = board_records()
-    a = SCRATCH / "board-a"
+    a = fx.board("2. every kind")
     for r in records:
-        w = boardlog.append(a, r)
-        assert isinstance(w, boardlog.Written) and w.gap is None, w
+        w = append(a, r)
+        assert isinstance(w, Written) and w.gap is None, w
     before = files_of(a)
     against_golden("board", before)
-    head = boardlog.read(a)
-    ours = proto.read(a, BOARD)
+    ours = read_board(a)
     check(
-        f"HEAD read is whole and returns what was appended ({len(records)} records)",
-        head == boardlog.Log(tuple(records)),
+        f"this build reads back what it appended ({len(records)} records)",
+        ours == Log(tuple(records)),
     )
-    check("proposed read equals HEAD read (records and damage)", ours == head)
-    check("reading changed no file", files_of(a) == before)
-    reencoded = [boardlog.encode(r).encode("utf-8") for r in ours.records]
+    reencoded = [encode(r).encode("utf-8") for r in ours.records]
     check(
         "each record read back re-encodes to its file's bytes", reencoded == list(before.values())
     )
     b = SCRATCH / "board-b"
     for r in ours.records:
-        boardlog.append(b, r)
+        append(b, r)
     check(
-        "a log appended from the proposed read is byte-for-byte HEAD's (names and bytes)",
+        "a log appended from what was read is byte-for-byte the first (names and bytes)",
         files_of(b) == before,
         f"{len(before)} files, {sum(map(len, before.values()))} bytes",
     )
-    kinds_seen = {type(r).__name__ for r in head.records}
+    kinds_seen = {type(r).__name__ for r in ours.records}
     check(
         "every Known kind and RecordingStopped and Unrecognised appear",
         len(kinds_seen) == len(get_args(boardlog.Known)) + 2,
         str(len(kinds_seen)),
     )
 
-    print("3. hand-written files no current append produces (older or foreign writers)")
-    c = SCRATCH / "board-c"
-    c.mkdir()
+    c = fx.board("3. hand-written files no current append produces")
     texts = [
         # keys out of order, spaces, an integer time, an extra key
-        '{ "at" : 1700000000 , "kind" : "task-declared", "task_id": "t1", "title": "T", "declared_by": "lead",'
-        ' "detail": "d", "depends_on": [], "touches": [], "extra": {"a": 1} }\n',
+        '{ "at" : 1700000000 , "kind" : "task-declared", "task_id": "t1", "title": "T",'
+        ' "declared_by": "lead", "detail": "d", "depends_on": [], "touches": [],'
+        ' "extra": {"a": 1} }\n',
         # every defaulted field left out
         '{"kind": "recording-stopped", "at": 2}\n',
         # non-ASCII written raw, not escaped
-        '{"kind": "concern-posted", "at": 3.5, "concern_id": "c1", "sender": "ü", "recipient": "lead",'
-        ' "subject": "s", "body": "b"}\n',
+        '{"kind": "concern-posted", "at": 3.5, "concern_id": "c1", "sender": "ü",'
+        ' "recipient": "lead", "subject": "s", "body": "b"}\n',
         # a kind this build does not define, odd whitespace kept
         '{"kind":"link-created","at":4,"channel_id":"x","members":["a","b"],"charter":""}\n',
     ]
     for i, t in enumerate(texts):
-        (c / boardlog._name(i)).write_bytes(t.encode("utf-8"))
-    head = boardlog.read(c)
-    ours = proto.read(c, BOARD)
-    check(
-        "proposed read equals HEAD read",
-        ours == head,
-        f"HEAD: {len(head.records)} records, damage {head.damage}",
-    )
+        (c / name(i)).write_bytes(t.encode("utf-8"))
+    return records
 
 
-# -- 4. damage: the same break, the same words ----------------------------------------
+def damaged_logs(fx: Fixtures) -> list[Path]:
+    good = encode(RecordingStopped(at=1.0, reason="r")).encode()
+    locked: list[Path] = []
 
-
-def damaged_logs() -> dict[str, Path]:
-    good = boardlog.encode(boardlog.RecordingStopped(at=1.0, reason="r")).encode()
-    cases: dict[str, Path] = {}
-
-    def log(label: str, files: dict[int, bytes | None]) -> Path:
-        d = SCRATCH / "damage" / label
-        d.mkdir(parents=True)
-        for ordinal, data in files.items():
+    def log(label: str, files_: dict[int, bytes | None]) -> Path:
+        d = fx.board(f"4. {label}")
+        for ordinal, data in files_.items():
             if data is not None:
-                (d / boardlog._name(ordinal)).write_bytes(data)
-        cases[label] = d
+                (d / name(ordinal)).write_bytes(data)
         return d
 
     log("torn", {0: good, 1: good[:-1], 2: good})
@@ -284,97 +363,29 @@ def damaged_logs() -> dict[str, Path]:
     log("required field missing", {0: b'{"kind": "task-claimed", "at": 1}\n'})
     log("not utf-8", {0: b'{"kind": "recording-stopped", "at": 1, "reason": "\xff"}\n'})
     log("nested too deep", {0: b"[" * 100_000 + b"]" * 100_000 + b"\n"})
-    log("over the size limit", {0: b" " * (boardlog.MAX_RECORD_BYTES + 1) + b"\n"})
+    log("over the size limit", {0: b" " * (MAX_RECORD_BYTES + 1) + b"\n"})
     d = log("a symlink under a record's name", {0: good})
-    (d / boardlog._name(1)).symlink_to(d / boardlog._name(0))
+    (d / name(1)).symlink_to(d / name(0))
     d = log("a directory under a record's name", {0: good})
-    (d / boardlog._name(1)).mkdir()
+    (d / name(1)).mkdir()
     d = log("a fifo under a record's name", {0: good})
-    os.mkfifo(d / boardlog._name(1))
+    os.mkfifo(d / name(1))
     d = log("temp files and foreign names beside", {0: good, 1: good})
     (d / ".record-abc.tmp").write_bytes(b"half")
     (d / "000000002.json").write_bytes(good)
     (d / "notes.txt").write_bytes(b"x")
     d = log("unlistable", {0: good})
     d.chmod(0)
-    return cases
+    locked.append(d)
+    return locked
 
 
-def part4() -> None:
-    print("4. damaged board logs: the same break and the same words")
-    for label, d in damaged_logs().items():
-        try:
-            head, ours = boardlog.read(d), proto.read(d, BOARD)
-        finally:
-            d.chmod(0o755)
-        check(f"{label}", ours == head, f"damage {head.damage}" if head.damage else "no damage")
-
-
-# -- 5-6. channel logs ---------------------------------------------------------------
-
-
-def proposed_channel_read(base: Path, link: channels.LinkKey) -> channels.Read:
-    """
-    ``FileChannels.read`` with the two substitutions the design makes: the
-    journal's ``read`` under the link table, and its ``name``. The rest is HEAD's
-    body, checked against it below.
-    """
-    directory = base / link.name / link.link_id
-    log = proto.read(directory, LINKS)
-    if log.damage is not None and not log.records and log.damage.ordinal == 0:
-        try:
-            os.listdir(directory)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            return channels.Read(
-                broken=f"its directory cannot be listed: {type(exc).__name__}: {exc}"
-            )
-    facts: list[Fact] = []
-    for position, record in enumerate(log.records):
-        fact = channels.decode(record)
-        if isinstance(fact, channels.Malformed):
-            return channels.Read(
-                tuple(facts),
-                channels._broken(position, fact.reason, channels._withheld_after(position, log)),
-                damaged=True,
-            )
-        facts.append(fact)
-    if log.damage is None:
-        return channels.Read(tuple(facts))
-    damaged = log.damage.reason == "missing" or not channels._cannot_be_read(
-        directory / proto.name(log.damage.ordinal)
-    )
-    return channels.Read(
-        tuple(facts),
-        channels._broken(log.damage.ordinal, log.damage.reason, log.damage.unread),
-        damaged,
-    )
-
-
-def part5_6() -> None:
-    print("5. channel logs HEAD wrote, through FileChannels.append")
-    head_body = _body(channels.FileChannels.read)
-    ours_body = _body(proposed_channel_read)
-    for new, old in (
-        (
-            "directory = base / link.name / link.link_id",
-            "directory = self._directory(link)\nif directory is None:\n    return Read(broken=_NOT_A_KEY)",
-        ),
-        ("proto.read(directory, LINKS)", "boardlog.read(directory)"),
-        ("channels.", ""),
-        ("proto.name(", "boardlog._name("),
-    ):
-        ours_body = ours_body.replace(new, old)
-    check(
-        "proposed channel read body is HEAD's FileChannels.read but for the path",
-        ours_body == head_body,
-    )
-
-    base = SCRATCH / "channels"
-    store = channels.FileChannels(base)
+def part5_6(fx: Fixtures) -> None:
+    print("5. a channel log this build wrote, through FileChannels.append")
     link = channels.LinkKey("ops", "0b3e6c1e-4f0e-4a39-9b0c-6a1d1f1c0001")
-    facts: list[Fact] = []
+    directory = fx.channel("5. every link fact", "channel", link)
+    store = channels.FileChannels(directory.parent.parent)
+    facts: list[Any] = []
     for i, charter in enumerate(TEXTS):
         facts.append(
             channels.LinkCreated(
@@ -385,90 +396,45 @@ def part5_6() -> None:
             )
         )
         facts.append(channels.LinkClosed(at=TIMES[(i + 1) % len(TIMES)], channel_id=f"c{i}"))
-    facts.append(boardlog.RecordingStopped(at=9.0, reason="stopped \udc80"))
+    facts.append(RecordingStopped(at=9.0, reason="stopped \udc80"))
     for f in facts:
         assert isinstance(store.append(link, f), channels.Appended)
-    directory = base / link.name / link.link_id
     before = files_of(directory)
     against_golden("channel", before)
-    head = store.read(link)
-    ours = proposed_channel_read(base, link)
     check(
-        f"HEAD read returns the facts appended ({len(facts)})", head == channels.Read(tuple(facts))
+        f"this build reads back the facts appended ({len(facts)})",
+        store.read(link) == channels.Read(tuple(facts)),
     )
-    check("proposed read equals HEAD read", ours == head)
-    expected = [boardlog.encode(channels.encode(f)).encode() for f in facts]
+    expected = [encode(channels.encode(f)).encode() for f in facts]
     check("each file is the fact's encoding, byte for byte", list(before.values()) == expected)
-    check("reading changed no file", files_of(directory) == before)
-    check(
-        "judge agrees",
-        channels.judge(link, ours) == channels.judge(link, head),
-        str(channels.judge(link, head)),
-    )
 
-    print("   damaged channel logs")
-    cases = {
-        "members not a list": b'{"kind": "link-created", "at": 1, "channel_id": "c", "members": "ab", "charter": ""}\n',
-        "charter missing": b'{"kind": "link-created", "at": 1, "channel_id": "c", "members": ["a", "b"]}\n',
-        "time not a number": b'{"kind": "link-closed", "at": null, "channel_id": "c"}\n',
-        "torn": b'{"kind": "link-closed", "at": 1, "channel_id": "c"}',
-    }
-    good = boardlog.encode(
+    good = encode(
         channels.encode(
             channels.LinkCreated(at=1.0, channel_id="c", members=("a", "b"), charter="")
         )
     ).encode()
+    cases = {
+        "members not a list": b'{"kind": "link-created", "at": 1, "channel_id": "c",'
+        b' "members": "ab", "charter": ""}\n',
+        "charter missing": b'{"kind": "link-created", "at": 1, "channel_id": "c",'
+        b' "members": ["a", "b"]}\n',
+        "time not a number": b'{"kind": "link-closed", "at": null, "channel_id": "c"}\n',
+        "torn": b'{"kind": "link-closed", "at": 1, "channel_id": "c"}',
+    }
     for label, data in cases.items():
         k = channels.LinkKey("dmg", label.replace(" ", "-"))
-        d = base / k.name / k.link_id
-        d.mkdir(parents=True)
-        (d / boardlog._name(0)).write_bytes(good)
-        (d / boardlog._name(1)).write_bytes(data)
-        (d / boardlog._name(2)).write_bytes(good)
-        h, o = store.read(k), proposed_channel_read(base, k)
-        check(label, o == h, h.broken or "")
+        d = fx.channel(f"5. damaged channel log: {label}", "channel", k)
+        (d / name(0)).write_bytes(good)
+        (d / name(1)).write_bytes(data)
+        (d / name(2)).write_bytes(good)
 
-    print("6. board records in a channel's directory (the predicted difference)")
     k = channels.LinkKey("foreign", "board-records")
-    d = base / k.name / k.link_id
-    d.mkdir(parents=True)
-    canonical = boardlog.encode(boardlog.Claimed(at=1.0, task_id="t", by="b")).encode()
-    noncanonical = b'{"at": 2, "kind": "task-claimed", "task_id": "t", "by": "b", "extra": 1}\n'
-    (d / boardlog._name(0)).write_bytes(good)
-    (d / boardlog._name(1)).write_bytes(canonical)
-    (d / boardlog._name(2)).write_bytes(noncanonical)
-    h, o = store.read(k), proposed_channel_read(base, k)
-    same_kind_and_at = [(type(x).__name__, x.at, getattr(x, "kind", None)) for x in h.facts] == [
-        (type(x).__name__, x.at, getattr(x, "kind", None)) for x in o.facts
-    ]
-    check("same facts by type, kind and time", same_kind_and_at)
-    check("judge agrees", channels.judge(k, o) == channels.judge(k, h), str(channels.judge(k, h)))
-    on_disk = [(d / boardlog._name(i)).read_bytes()[:-1].decode() for i in range(3)]
-    check(
-        "proposed: each board record is carried as the file's own text",
-        [x.text for x in o.facts[1:]] == on_disk[1:],
+    d = fx.channel("6. board records in a channel's directory", "channel", k)
+    (d / name(0)).write_bytes(good)
+    (d / name(1)).write_bytes(encode(boardlog.Claimed(at=1.0, task_id="t", by="b")).encode())
+    (d / name(2)).write_bytes(
+        b'{"at": 2, "kind": "task-claimed", "task_id": "t", "by": "b", "extra": 1}\n'
     )
-    check(
-        "HEAD: the non-canonical one is carried re-encoded, not as written (the predicted difference)",
-        h.facts[2].text != on_disk[2] and h.facts[1].text == on_disk[1],
-    )
-    for i, (x, y) in enumerate(zip(h.facts, o.facts)):
-        if x != y:
-            print(f"  diff fact {i}: HEAD Unrecognised.text={x.text!r}")
-            print(f"  {'':>11}proposed      text={y.text!r}")
-            print(
-                f"  {'':>11}file bytes          ={(d / boardlog._name(i)).read_bytes()[:-1].decode()!r}"
-            )
-
-
-# -- 6b. a malformed board record in a channel's directory, through the sweep ---------
-
-
-class ProposedChannels(channels.FileChannels):
-    """HEAD's ``FileChannels`` but for ``read``, which is the proposed path."""
-
-    def read(self, link: channels.LinkKey) -> channels.Read:
-        return proposed_channel_read(self.root, link)
 
 
 def _bare(cls: type[Any]) -> bytes:
@@ -500,22 +466,20 @@ def _wrong_shape(cls: type[Any]) -> bytes | None:
 def _whole(cls: type[Any]) -> bytes:
     hints = get_type_hints(cls)
     record = cls(**{f.name: value(hints[f.name], 1) for f in dataclasses.fields(cls)})
-    return boardlog.encode(record).encode()
+    return encode(record).encode()
 
 
-def part6b() -> None:
-    print("6b. a malformed board record in a channel's directory: read, judge, owes_close, sweep")
-    name = "sweep"
+def part6b(fx: Fixtures) -> int:
     link_id = "earlier"
-    k = channels.LinkKey(name, link_id)
+    k = channels.LinkKey("sweep", link_id)
 
-    def fact(f: Fact) -> bytes:
-        return boardlog.encode(channels.encode(f)).encode()
+    def fact(f: Any) -> bytes:
+        return encode(channels.encode(f)).encode()
 
     created = fact(channels.LinkCreated(at=1.0, channel_id=link_id, members=("a", "b"), charter=""))
     closed = fact(channels.LinkClosed(at=2.0, channel_id=link_id))
     unpaired = fact(channels.LinkCreated(at=1.0, channel_id=link_id, members=("a",), charter=""))
-    stopped = boardlog.encode(boardlog.RecordingStopped(at=3.0, reason="r")).encode()
+    stopped = encode(RecordingStopped(at=3.0, reason="r")).encode()
     skeptic = b'{"kind":"task-claimed","at":1}\n'
 
     cases: dict[str, list[bytes]] = {
@@ -539,104 +503,123 @@ def part6b() -> None:
         if wrong is not None:
             cases[f"created, {cls.KIND} with a field of the wrong shape"] = [created, wrong]
         cases[f"created, well-formed {cls.KIND}"] = [created, _whole(cls)]
-
-    differ: list[str] = []
-    wrote: list[str] = []
-    for label, files in cases.items():
-        result = {}
-        for side, store_cls in (("head", channels.FileChannels), ("ours", ProposedChannels)):
-            base = SCRATCH / "sweep" / side / label.replace(" ", "_").replace("'", "")
-            d = base / k.name / k.link_id
-            d.mkdir(parents=True)
-            for i, data in enumerate(files):
-                (d / boardlog._name(i)).write_bytes(data)
-            store = store_cls(base)
-            read = store.read(k)
-            judged = channels.judge(k, read)
-            owed = channels.owes_close(k, read)
-            before = files_of(d)
-            writer = channels.ChannelWriter(store)
-            writer.submit(
-                channels.LinkKey(name, "later"),
-                channels.LinkCreated(at=10.0, channel_id="later", members=("a", "b"), charter=""),
-            )
-            reports = writer.close(timeout=10.0)
-            after = files_of(d)
-            # The sweep stamps its close with the clock, so a close is compared by
-            # what it is and whom it names, not by its time.
-            added = [
-                f"{p['kind']}({p.get('channel_id')})"
-                for p in (json.loads(after[n]) for n in after if n not in before)
-            ]
-            result[side] = (read, judged, owed, added, reports)
-            assert all(before[n] == after[n] for n in before), "a record file was rewritten"
-        h, o = result["head"], result["ours"]
-        same_owed = h[2] == o[2]
-        same_writes = h[3] == o[3]
-        same_state = type(h[1]) is type(o[1])
-        same_damage = (h[0].broken is None) == (o[0].broken is None) and h[0].damaged == o[0].damaged
-        mark = "WRITE" if not same_writes else "owed " if not same_owed else "read " if not (same_state and same_damage) else "same "
-        print(f"  {mark} {label}")
-        if mark != "same ":
-            for side, (read, judged, owed, added, _) in (("HEAD", h), ("proposed", o)):
-                print(
-                    f"        {side:>8}: damaged={read.damaged!s:<5} owes_close={owed!s:<5}"
-                    f" sweep appended={added}  judge={type(judged).__name__}"
-                )
-        if not same_owed or not same_writes:
-            differ.append(label)
-        if h[3] != o[3]:
-            wrote.append(label)
-
-    print(f"  {len(differ)} of {len(cases)} variants differ in owes_close or in what the sweep writes")
-    print(f"  {len(wrote)} of {len(cases)} variants: the sweep appends a file under one path only")
-    for label in wrote:
-        print(f"    - {label}")
-    check(
-        "the skeptic's case: created, then {kind: task-claimed, at: 1} -- the proposed sweep"
-        " appends a LinkClosed where HEAD's appends nothing (CONFIRMED when ok)",
-        "created, then the skeptic's record" in wrote,
-    )
+    for label, data in cases.items():
+        d = fx.channel(f"6b. {label}", "sweep", k)
+        for i, each in enumerate(data):
+            (d / name(i)).write_bytes(each)
+    return len(cases)
 
 
 # -- --existing: every log under a directory, read only --------------------------------
 
 
-def existing(top: Path) -> None:
-    print(f"7. existing logs under {top} (read only)")
-    n = 0
-    for here, dirs, names in os.walk(top, followlinks=False):
-        if not boardlog._ordinals(names):
+def existing(fx: Fixtures, top: Path) -> None:
+    for here, _dirs, names in os.walk(top, followlinks=False):
+        if not ORDINALS(names):
             continue
         d = Path(here)
-        n += 1
-        before = files_of(d)
-        if "channels" in d.relative_to(top).parts and len(d.relative_to(top).parts) >= 3:
-            k = channels.LinkKey(d.parent.name, d.name)
-            base = d.parent.parent
-            h, o = channels.FileChannels(base).read(k), proposed_channel_read(base, k)
+        rel = d.relative_to(top)
+        label = f"7. {rel}"
+        if "channels" in rel.parts and len(rel.parts) >= 3:
+            fx.entries[label] = {
+                "type": "channel",
+                "path": str(d.parent.parent),
+                "name": d.parent.name,
+                "link_id": d.name,
+            }
         else:
-            h, o = boardlog.read(d), proto.read(d, BOARD)
-        check(str(d.relative_to(top)), o == h and files_of(d) == before)
-    print(f"  {n} log directories")
+            fx.entries[label] = {"type": "board", "path": str(d)}
+
+
+# -- the two trees -----------------------------------------------------------------
+
+
+def head_tree(rev: str) -> Path:
+    out = SCRATCH / f"tree-{rev}"
+    out.mkdir()
+    archive = subprocess.run(
+        ["git", "-C", str(ROOT), "archive", rev, "pptmstr"], check=True, capture_output=True
+    ).stdout
+    subprocess.run(["tar", "-x", "-C", str(out)], input=archive, check=True)
+    return out
+
+
+def run_observer(tree: Path, manifest: Path, side: str) -> dict[str, dict[str, str]]:
+    out = SCRATCH / f"observed-{side}.json"
+    env = {**os.environ, "READBACK_TREE": str(tree), "PYTHONPATH": ""}
+    subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), "--observe", str(manifest), str(out)],
+        env=env,
+        check=True,
+        cwd=SCRATCH,
+    )
+    observed: dict[str, dict[str, str]] = json.loads(out.read_text())
+    return observed
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--existing", type=Path)
-    parser.add_argument("--write-golden", action="store_true")
-    args = parser.parse_args()
-    global WRITE_GOLDEN
-    WRITE_GOLDEN = args.write_golden
+    if ARGS.observe is not None:
+        return observe(*ARGS.observe)
     print(f"scratch: {SCRATCH}")
     print(f"python {sys.version.split()[0]}")
-    part1()
-    part2_3()
-    part4()
-    part5_6()
-    part6b()
-    if args.existing is not None:
-        existing(args.existing.resolve())
+    print(f"build: {TREE}; before B1: {ARGS.head_rev}")
+    fx = Fixtures()
+    part2_3(fx)
+    locked = damaged_logs(fx)
+    part5_6(fx)
+    variants = part6b(fx)
+    if ARGS.existing is not None:
+        existing(fx, ARGS.existing.resolve())
+    manifest = SCRATCH / "manifest.json"
+    manifest.write_text(json.dumps(fx.entries, indent=1))
+    before = {
+        label: files_of(Path(e["path"]))
+        for label, e in fx.entries.items()
+        if e["type"] == "board" and Path(e["path"]) not in locked
+    }
+
+    try:
+        head = run_observer(head_tree(ARGS.head_rev), manifest, "head")
+        ours = run_observer(TREE, manifest, "build")
+    finally:
+        for d in locked:
+            d.chmod(0o755)
+
+    print("2-7. every fixture, read by both trees")
+    section = ""
+    differ_6b: list[str] = []
+    for label in fx.entries:
+        now = label.split(" ", 1)[0]
+        if now != section and now != "6b.":
+            section = now
+            print(f" {section}")
+        h, o = head[label], ours[label]
+        same = h == o
+        if label.startswith("6b."):
+            if not same:
+                differ_6b.append(label)
+            continue
+        detail = (
+            ""
+            if same
+            else "; ".join(f"{key}: {h[key]} vs {o[key]}" for key in h if h[key] != o.get(key))
+        )
+        check(label, same, detail[:400])
+    print(f" 6b. {variants} variants: read, judge, owes_close, and what the sweep appends")
+    for label in differ_6b:
+        h, o = head[label], ours[label]
+        print(f"    differs: {label}")
+        for key in h:
+            if h[key] != o.get(key):
+                print(f"      {key}: before B1 {h[key]}  build {o.get(key)}")
+    check(
+        f"no 6b variant differs between the trees ({len(differ_6b)} of {variants})",
+        not differ_6b,
+    )
+    check(
+        "reading changed no board fixture",
+        all(files_of(Path(fx.entries[label]["path"])) == files for label, files in before.items()),
+    )
     print(f"\n{len(FAILURES)} failed" + (": " + "; ".join(FAILURES) if FAILURES else ""))
     return 1 if FAILURES else 0
 

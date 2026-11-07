@@ -264,12 +264,12 @@ _MAX_DIGEST_LINE_CHARS = 200
 # -- what a call may carry ---------------------------------------------------------
 #
 # Every text an agent sends is bounded where it is accepted, because the board log
-# refuses a record over ``boardlog.MAX_RECORD_BYTES`` (1,048,576) and the first
+# refuses a record over ``journal.files.MAX_RECORD_BYTES`` (1,048,576) and the first
 # record that does not land stops that session's log for the rest of the process
 # (``boardsync``). An unbounded argument is therefore a way for one call to end the
 # record of a whole session.
 #
-# The arithmetic. ``boardlog.encode`` escapes to ASCII, and the most a character
+# The arithmetic. ``journal.codec.encode`` escapes to ASCII, and the most a character
 # costs there is twelve bytes: one outside the Basic Multilingual Plane is written
 # as two ``\uXXXX`` escapes. The records the bus can cause, at their largest:
 #
@@ -281,7 +281,7 @@ _MAX_DIGEST_LINE_CHARS = 200
 #
 # so the largest is about two thirds of the bound, and the rest is room for the
 # keys, the addresses and the punctuation. tests/test_bus.py encodes each of these
-# with ``boardlog.encode`` and fails when one stops fitting.
+# with ``journal.codec.encode`` and fails when one stops fitting.
 #
 # Each limit is several times anything this project has seen an agent write: the
 # longest specification on a measured board was about 6,000 characters and the

@@ -38,9 +38,10 @@ from claude_agent_sdk import project_key_for_directory
 from imgui_bundle import imgui
 
 from .. import board as board_mod
-from .. import boardlog, boardsync, sessionfile
+from .. import boardsync, sessionfile
 from .. import brief as brief_mod
 from ..approval import Policy
+from ..journal import files
 from ..model import (
     AgentRecord,
     AgentState,
@@ -261,13 +262,13 @@ def _session_files(session_id: str) -> Looked:
     board = sessionfile.board_dir(session_id)
     if directory is None or file is None or board is None:
         return Looked(files_read=True)
-    legacy: Path | None = boardlog.session_dir(boardsync.legacy_root(), session_id)
+    legacy: Path | None = files.session_dir(boardsync.legacy_root(), session_id)
     if legacy is not None:
         try:
             same = os.path.samefile(legacy, board)
         except OSError:
             same = False
-        if same or boardlog.next_ordinal(legacy) == 0:
+        if same or files.next_ordinal(legacy) == 0:
             legacy = None
     return Looked(
         files_read=True,
@@ -276,7 +277,7 @@ def _session_files(session_id: str) -> Looked:
         session_file_there=file.is_file(),
         board_dir=str(board),
         board_legacy=None if legacy is None else str(legacy),
-        board_split=legacy is not None and boardlog.next_ordinal(board) != 0,
+        board_split=legacy is not None and files.next_ordinal(board) != 0,
     )
 
 

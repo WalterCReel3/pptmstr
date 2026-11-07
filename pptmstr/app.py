@@ -95,6 +95,8 @@ from .intents import (
     SessionDetached,
     SessionSettled,
 )
+from .journal import codec
+from .journal import files as journal_files
 from .log import LOG
 from .model import (
     MAX_COMMAND_REFUSAL_CHARS,
@@ -1925,7 +1927,7 @@ def _settle_restore(
 def _stop_recording_everything(state: AppState, writer: boardsync.BoardWriter, reason: str) -> None:
     """
     End the recording of every session being recorded, and queue the record
-    that makes each log say so (``boardlog.RecordingStopped``).
+    that makes each log say so (``codec.RecordingStopped``).
 
     ``marked`` starts False and is corrected when the marker's own outcome is
     read: until then nothing on disk says the log ends early.
@@ -1938,20 +1940,18 @@ def _stop_recording_everything(state: AppState, writer: boardsync.BoardWriter, r
         )
         writer.submit(
             session_id,
-            boardlog.RecordingStopped(
-                at=time.time(), reason=reason[: boardsync.MARKER_REASON_CHARS]
-            ),
+            codec.RecordingStopped(at=time.time(), reason=reason[: boardsync.MARKER_REASON_CHARS]),
         )
 
 
-def _landed(result: boardlog.Written | boardlog.Unwritten | None) -> bool | None:
+def _landed(result: journal_files.Written | journal_files.Unwritten | None) -> bool | None:
     """
     Whether a stop marker is on disk where a restore will read it, or None when
     none was attempted.
     """
     if result is None:
         return None
-    return isinstance(result, boardlog.Written) and result.gap is None
+    return isinstance(result, journal_files.Written) and result.gap is None
 
 
 def _read_board_reports(state: AppState, reports: tuple[boardsync.Report, ...]) -> None:
@@ -1982,7 +1982,7 @@ def _read_board_reports(state: AppState, reports: tuple[boardsync.Report, ...]) 
             case boardsync.Outcome(record=record, result=result):
                 if entry is None:
                     continue
-                if isinstance(record, boardlog.RecordingStopped):
+                if isinstance(record, codec.RecordingStopped):
                     # The shell's own marker (``_stop_recording_everything``).
                     state.board_logs[report.session_id] = dataclasses.replace(
                         entry, marked=_landed(result)
@@ -5249,7 +5249,7 @@ def _close_board_log(state: AppState) -> None:
         if isinstance(report, boardsync.Outcome) and not report.kept:
             reason = (
                 report.result.reason
-                if isinstance(report.result, boardlog.Unwritten)
+                if isinstance(report.result, journal_files.Unwritten)
                 else "written behind a break in the log"
             )
             lost.setdefault(report.session_id, []).append(reason)

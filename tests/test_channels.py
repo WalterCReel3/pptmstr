@@ -18,7 +18,6 @@ from typing import get_args
 import pytest
 
 from pptmstr import boardlog, channels
-from pptmstr.boardlog import RecordingStopped, Unlisted, Unrecognised
 from pptmstr.channels import (
     Appended,
     ChannelLog,
@@ -36,6 +35,10 @@ from pptmstr.channels import (
     Whole,
 )
 from pptmstr.intents import AgentSpawned, ChannelClosed, ChannelLinked, Intent
+from pptmstr.journal import codec
+from pptmstr.journal import files as journal_files
+from pptmstr.journal.codec import RecordingStopped, Unrecognised
+from pptmstr.journal.files import Unlisted
 from pptmstr.model import Snapshot
 from pptmstr.store import Store
 from pptmstr.store import _apply as store_apply
@@ -222,7 +225,7 @@ def test_a_record_of_a_kind_this_build_does_not_define_makes_the_log_short(
 
 
 def test_a_board_record_in_a_links_directory_is_of_no_kind_a_link_has(tmp_path: Path) -> None:
-    boardlog.append(tmp_path / "brand" / "k1", boardlog.Claimed(at=1.0, task_id="t", by="w"))
+    journal_files.append(tmp_path / "brand" / "k1", boardlog.Claimed(at=1.0, task_id="t", by="w"))
 
     facts = FileChannels(tmp_path).read(K1).facts
 
@@ -285,7 +288,7 @@ def test_a_missing_ordinal_ends_the_read_and_says_what_is_withheld(tmp_path: Pat
 )
 def test_a_close_behind_damage_cannot_leave_the_link_live(tmp_path: Path, damage: str) -> None:
     """
-    A link, a damaged record, then a close. ``boardlog.append`` sees no gap
+    A link, a damaged record, then a close. ``journal_files.append`` sees no gap
     behind a record that is present and does not decode, so the close is
     reported appended, and no read reaches it. The link must still not come
     back live: the log is short, so the link is withheld from the store.
@@ -362,8 +365,8 @@ def test_the_longest_charter_of_the_costliest_characters_still_fits_a_record(
     """``CHARTER_CHARS``' reason: what ``app.link_leads`` lets through always lands."""
     for costly in ("\U0001f600", "\udc80", "\x00", '"', "\\"):
         charter = costly * channels.CHARTER_CHARS
-        size = len(boardlog.encode(channels.encode(_created(charter=charter))).encode("utf-8"))
-        assert size < boardlog.MAX_RECORD_BYTES // 4, costly
+        size = len(codec.encode(channels.encode(_created(charter=charter))).encode("utf-8"))
+        assert size < journal_files.MAX_RECORD_BYTES // 4, costly
         assert (
             FileChannels(tmp_path).append(
                 LinkKey("brand", f"k{ord(costly)}"), _created(f"k{ord(costly)}", charter=charter)

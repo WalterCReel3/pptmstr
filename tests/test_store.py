@@ -104,6 +104,7 @@ from pptmstr.intents import (
     TopicChanged,
     UsageAccrued,
 )
+from pptmstr.journal import codec
 from pptmstr.model import (
     ALL_WRITERS,
     AWAITING_TOPIC,
@@ -3551,9 +3552,9 @@ def test_what_the_log_could_not_give_is_carried_and_ends_adoption() -> None:
     second_claim = boardlog.Claimed(
         at=_wall(2.0), task_id="t1", by="builder", by_id=("sess-1", "b")
     )
-    log = boardlog.Log(
+    log = codec.Log(
         records=(*_records_of_one_claimed(), stray, second_claim),
-        damage=boardlog.Damage(ordinal=4, reason="missing", unread=3),
+        damage=codec.Damage(ordinal=4, reason="missing", unread=3),
     )
     store = Store()
 
@@ -3584,7 +3585,7 @@ def test_shortness_is_the_boards_own_answer_and_not_a_recount_of_it() -> None:
     store = Store()
     _restore(store, Short(tasks=_one_claimed().tasks))
     stopped = Store()
-    marker = boardlog.RecordingStopped(at=_wall(1.0), reason="disk full")
+    marker = codec.RecordingStopped(at=_wall(1.0), reason="disk full")
     _restore(stopped, _logged(*_records_of_one_claimed(), marker))
     halted = stopped.snapshot().restores["sess-1"]
     assert (halted.log_stopped, halted.log_short, halted.adoptable) == (1, True, False)

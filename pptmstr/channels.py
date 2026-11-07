@@ -37,14 +37,16 @@ the startup read of every log -- needs it from any backend, and it answers
 contract test that every implementation must pass; ``FileChannels`` is the only
 one today.
 
-**The file implementation is boardlog's directory, unchanged.** One record per
-file, *linked* into place: ``os.link`` refuses a name that exists, atomically,
-and the writer that lost the race takes the next ordinal, so two windows
-appending to one link lose no fact. ``boardlog.read`` gives the readable prefix
-and where it broke. A link fact is a kind ``boardlog`` does not define, so it
-crosses that layer as ``boardlog.Unrecognised``, whose text is written and read
-back byte for byte, and is decoded here. ``boardlog.RecordingStopped`` is
-shared: it means the same thing in either log.
+**The file implementation is a journal, as a board log is** (``pptmstr.journal``).
+One record per file, *linked* into place: ``os.link`` refuses a name that exists,
+atomically, and the writer that lost the race takes the next ordinal, so two
+windows appending to one link lose no fact. ``files.read`` gives the readable
+prefix and where it broke. It reads under the board's kind table
+(``boardlog.KINDS``), so a board record misplaced here decodes as the board would
+decode it, and one that does not is damage. A link fact is a kind the board does
+not define, so it crosses that layer as ``codec.Unrecognised``, whose text is
+written and read back byte for byte, and is decoded here.
+``codec.RecordingStopped`` is shared: it means the same thing in either log.
 
 **The log holds outcomes, as a board log does.** ``outcomes`` derives the facts
 from what the store did with an operator's act, never from the act, so a refused
@@ -78,10 +80,6 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol, assert_never, get_args, get_type_hints
 
 from . import boardlog, settings
-from .boardlog import RecordingStopped, Unrecognised
-
-# Re-exported: the seam's "could not look", which the shell matches on.
-from .boardlog import Unlisted as Unlisted
 from .intents import (
     AgentFinished,
     AgentRemoved,
@@ -142,6 +140,11 @@ from .intents import (
     UsageAccrued,
     WakeChainReleased,
 )
+from .journal import codec, files
+from .journal.codec import RecordingStopped, Unrecognised
+
+# Re-exported: the seam's "could not look", which the shell matches on.
+from .journal.files import Unlisted as Unlisted
 from .model import LINK_MEMBERS, Channel, ChannelId, Snapshot, is_channel_name
 
 # How long ``ChannelWriter.close`` waits for queued facts unless told otherwise.
@@ -153,7 +156,7 @@ MARKER_REASON_CHARS = 400
 # The longest charter a link is made with, in characters (``app.link_leads``).
 # A character costs at most twelve bytes in a record -- an astral one is two
 # ``\\uXXXX`` escapes -- so a charter this long is under a tenth of
-# ``boardlog.MAX_RECORD_BYTES``, and its link's first fact always fits.
+# ``files.MAX_RECORD_BYTES``, and its link's first fact always fits.
 CHARTER_CHARS = 8192
 
 
@@ -225,7 +228,7 @@ Fact = Known | RecordingStopped | Unrecognised
 
 _KINDS: dict[str, type[Any]] = {cls.KIND: cls for cls in get_args(Known)}
 _HINTS: dict[type[Any], dict[str, Any]] = {cls: get_type_hints(cls) for cls in _KINDS.values()}
-# A board kind of the same name would be decoded by ``boardlog`` before it reached
+# A board kind of the same name would be decoded under ``boardlog.KINDS`` before it reached
 # the decoder here, and a link fact would read as a board record.
 assert not set(_KINDS) & {cls.KIND for cls in get_args(boardlog.Known)}, "a kind is shared"
 assert RecordingStopped.KIND not in _KINDS
@@ -240,11 +243,11 @@ class Malformed:
 
 def encode(fact: Fact) -> boardlog.Record:
     """
-    ``fact`` as the record ``boardlog`` writes: its own text, carried as
+    ``fact`` as the record ``files.append`` writes: its own text, carried as
     ``Unrecognised``, for a link fact; itself for the other two.
 
-    Raises ``ValueError`` for a time that is not finite, as ``boardlog.encode``
-    does; ``boardlog.append`` turns that into a value.
+    Raises ``ValueError`` for a time that is not finite, as ``codec.encode``
+    does; ``files.append`` turns that into a value.
     """
     if isinstance(fact, RecordingStopped | Unrecognised):
         return fact
@@ -267,7 +270,7 @@ def decode(record: boardlog.Record) -> Fact | Malformed:
     if isinstance(record, RecordingStopped):
         return record
     if not isinstance(record, Unrecognised):
-        return Unrecognised(at=record.at, kind=record.KIND, text=boardlog.encode(record)[:-1])
+        return Unrecognised(at=record.at, kind=record.KIND, text=codec.encode(record)[:-1])
     cls = _KINDS.get(record.kind)
     if cls is None:
         return record
@@ -290,7 +293,7 @@ def decode(record: boardlog.Record) -> Fact | Malformed:
 def _as(value: Any, hint: Any) -> Any:
     """
     ``value`` as the field type ``hint`` -- a finite time, text, or a list of
-    text -- or ``Malformed``. Strict as ``boardlog``'s codec is: ``true`` is not a
+    text -- or ``Malformed``. Strict as ``codec``'s is: ``true`` is not a
     time and a missing field is not an empty one.
     """
     if hint is float:
@@ -518,11 +521,11 @@ class ChannelLog(Protocol):
 _NOT_A_KEY = "not a link's name and id, so it has no log"
 
 
-def _withheld_after(position: int, log: boardlog.Log) -> int:
+def _withheld_after(position: int, log: codec.Log[boardlog.Record]) -> int:
     """
     How many record files follow the one at ``position`` in ``log``: the
     readable ones, then whatever ``log.damage`` withheld. A break that is a
-    missing ordinal (``boardlog.read`` calls it ``"missing"``) is no file; one
+    missing ordinal (``files.read`` calls it ``"missing"``) is no file; one
     that does not decode is a file of its own as well as its ``unread``.
     """
     after = len(log.records) - position - 1
@@ -534,7 +537,7 @@ def _withheld_after(position: int, log: boardlog.Log) -> int:
 class FileChannels:
     """
     ``ChannelLog`` as one directory per link, at ``root / <name> / <link-id>``,
-    laid out as ``boardlog`` lays out a board. ``base`` None is ``root()``,
+    laid out as a board log is (``journal.files``). ``base`` None is ``root()``,
     asked when this is built.
     """
 
@@ -592,8 +595,8 @@ class FileChannels:
         directory = self._directory(link)
         if directory is None:
             return NotAppended(_NOT_A_KEY)
-        written = boardlog.append(directory, encode(fact))
-        if isinstance(written, boardlog.Unwritten):
+        written = files.append(directory, encode(fact))
+        if isinstance(written, files.Unwritten):
             return NotAppended(written.reason)
         if written.gap is not None:
             return NotAppended(
@@ -605,9 +608,9 @@ class FileChannels:
         directory = self._directory(link)
         if directory is None:
             return Read(broken=_NOT_A_KEY)
-        log = boardlog.read(directory)
+        log = files.read(directory, boardlog.KINDS)
         if log.damage is not None and not log.records and log.damage.ordinal == 0:
-            # ``boardlog.read`` says a directory it cannot list and a first
+            # ``files.read`` says a directory it cannot list and a first
             # record it cannot read alike; asked again, the listing tells them
             # apart.
             try:
@@ -629,7 +632,7 @@ class FileChannels:
         if log.damage is None:
             return Read(tuple(facts))
         damaged = log.damage.reason == "missing" or not _cannot_be_read(
-            directory / boardlog._name(log.damage.ordinal)
+            directory / files.name(log.damage.ordinal)
         )
         return Read(
             tuple(facts),
@@ -646,7 +649,7 @@ def _cannot_be_read(path: Path) -> bool:
     Whether the record file at ``path`` cannot be opened or read now -- which a
     later read may get past -- as against read and found not to be a record.
 
-    ``boardlog.read`` says both as one damage, in words. Opened without
+    ``files.read`` says both as one damage, in words. Opened without
     blocking for its reason (``ondisk.read_regular``): a FIFO under a record's
     name is not a regular file, which no later read gets past either.
     """
@@ -657,7 +660,7 @@ def _cannot_be_read(path: Path) -> bool:
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return False
-        os.read(fd, boardlog.MAX_RECORD_BYTES + 1)
+        os.read(fd, files.MAX_RECORD_BYTES + 1)
     except OSError:
         return True
     finally:

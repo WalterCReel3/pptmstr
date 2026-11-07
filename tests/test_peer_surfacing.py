@@ -60,6 +60,7 @@ from pptmstr.intents import (
     PeerWakeSent,
     SessionSettled,
 )
+from pptmstr.journal import codec
 from pptmstr.model import (
     EVERY_CHANNEL,
     WITHDRAW_PEER_TOOL,
@@ -239,8 +240,8 @@ def _logged(*intents: Intent) -> boardlog.Board:
         after, _ = _apply(snap, intent, 5.0)
         for fact in outcomes(snap, intent, after, 5.0):
             if fact.session_id == S:
-                record = boardlog.decode(boardlog.encode(fact.record))
-                assert not isinstance(record, boardlog.Malformed)
+                record = codec.decode(codec.encode(fact.record), boardlog.KINDS)
+                assert not isinstance(record, codec.Malformed)
                 records.append(record)
         snap = after
     return boardlog.restore(records)
@@ -1168,8 +1169,8 @@ def _both_logs(*intents: Intent) -> dict[str, boardlog.Board]:
     for intent in intents:
         after, _ = _apply(snap, intent, 5.0)
         for fact in outcomes(snap, intent, after, 5.0):
-            record = boardlog.decode(boardlog.encode(fact.record))
-            assert not isinstance(record, boardlog.Malformed)
+            record = codec.decode(codec.encode(fact.record), boardlog.KINDS)
+            assert not isinstance(record, codec.Malformed)
             records.setdefault(fact.session_id, []).append(record)
         snap = after
     return {sid: boardlog.restore(rs) for sid, rs in records.items()}

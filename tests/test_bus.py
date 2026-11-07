@@ -37,6 +37,8 @@ from pptmstr.intents import (
     TaskDeclared,
     TaskReleased,
 )
+from pptmstr.journal import codec
+from pptmstr.journal import files as journal_files
 from pptmstr.model import (
     BEFORE_RESTART,
     MAX_CHANNEL_CHARS,
@@ -5581,12 +5583,12 @@ def test_the_largest_record_any_accepted_call_can_cause_fits_the_log_with_room()
             by_id=party,
         ),
     }
-    sizes = {kind: len(boardlog.encode(record).encode()) for kind, record in records.items()}
+    sizes = {kind: len(codec.encode(record).encode()) for kind, record in records.items()}
 
-    assert len(boardlog.encode(boardlog.Released(at=1.0, task_id=_ASTRAL, by="b")).encode()) > 12
+    assert len(codec.encode(boardlog.Released(at=1.0, task_id=_ASTRAL, by="b")).encode()) > 12
     assert max(sizes, key=lambda kind: sizes[kind]) == "declaration"
     # Room, not only a fit: three quarters of the bound at the very worst.
-    assert max(sizes.values()) < boardlog.MAX_RECORD_BYTES * 3 // 4, sizes
+    assert max(sizes.values()) < journal_files.MAX_RECORD_BYTES * 3 // 4, sizes
     # And the stated figures are the encoder's, to within the keys and addresses.
     assert 684_000 < sizes["declaration"] < 684_000 + 16_000
     assert 578_400 < sizes["completion"] < 578_400 + 8_000

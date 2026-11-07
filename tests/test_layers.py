@@ -571,9 +571,8 @@ def store_disk_edges(
 # planning/2026-09-01-the-gates-measurement-outlives-the-approval.md:55-57 ("store.py
 # imports board, effects, intents and model and does not import the shell module that
 # reads disk"), and it does not hold: every edge below is eager and predates this test.
-# B1 is planning/2026-11-07-the-board-log-is-one-journal-of-two.md, which takes the disk
-# out of boardlog; B5 is planning/2026-11-07-board-and-gate-packages.md, which deletes
-# approval for gate/ and leaves the store importing only its pure modules.
+# B5 is planning/2026-11-07-board-and-gate-packages.md, which deletes approval for gate/
+# and leaves the store importing only its pure modules.
 STORE_DISK_EXCEPTIONS: dict[tuple[str, str], str] = {
     # store.py:35, for Policy, Summary, peer_channel and summary_of.
     ("pptmstr.approval", STORE): "approval's render_diff reads the file a write targets"
@@ -588,14 +587,6 @@ STORE_DISK_EXCEPTIONS: dict[tuple[str, str], str] = {
     # approval.py:29, for config_dir, which approval's records reach resolves.
     ("pptmstr.settings", "pptmstr.approval"): "settings reads and saves settings.json;"
     " B5 removes it with approval",
-    # store.py:37, for Board, Party, RestoredConcern, RestoredDecision, RestoredTask.
-    ("pptmstr.boardlog", STORE): "the restored-board records sit beside the board log's"
-    " reads and appends; B1 removes it",
-    # intents.py:33, for Board and Clock.
-    ("pptmstr.boardlog", "pptmstr.intents"): "BoardRestored carries a Board; B1 removes it",
-    # boardlog.py:131, for read_regular.
-    ("pptmstr.ondisk", "pptmstr.boardlog"): "the board log reads its files through ondisk;"
-    " B1 removes it",
 }
 
 
@@ -603,12 +594,18 @@ def test_the_disk_scan_sees_a_reader_and_a_pure_module() -> None:
     readers = disk_readers()
     assert "pptmstr.sessionfile" in readers
     assert "pptmstr.model" not in readers
-    # ondisk's only read is ``os.open``; boardlog reaches it only by a relative
-    # ``from .ondisk import read_regular``, which the import scan resolves.
+    # ondisk's only read is ``os.open``; journal.files reaches it only by a relative
+    # ``from .. import ondisk``, which the import scan resolves.
     assert "pptmstr.ondisk" in readers
     assert any(
-        edge.source == "pptmstr.boardlog" and edge.target == "pptmstr.ondisk" for edge in imports()
+        edge.source == "pptmstr.journal.files" and edge.target == "pptmstr.ondisk"
+        for edge in imports()
     )
+    # The journal's two halves: the disk half reads, and the board log, which holds
+    # the store's restore records, and the codec beneath it do not.
+    assert "pptmstr.journal.files" in readers
+    assert "pptmstr.journal.codec" not in readers
+    assert "pptmstr.boardlog" not in readers
 
 
 @pytest.mark.parametrize(
@@ -782,6 +779,12 @@ PURE: dict[str, Claim] = {
     ),
     # jsonfields.py:4
     "pptmstr.jsonfields": Claim("pptmstr/jsonfields.py", "Pure: no IO, no clock, no state"),
+    # journal/codec.py:2
+    "pptmstr.journal.codec": Claim("pptmstr/journal/codec.py", "Pure: no IO, no clock"),
+    # boardlog.py:97
+    "pptmstr.boardlog": Claim(
+        "pptmstr/boardlog.py", "**Pure: no IO, no clock, and nothing here is in the snapshot.**"
+    ),
     # ui/clip.py:4
     "pptmstr.ui.clip": Claim("pptmstr/ui/clip.py", "Pure: one function of a string and a limit"),
     # figures/__init__.py:4

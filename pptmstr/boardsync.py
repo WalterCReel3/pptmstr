@@ -1,10 +1,10 @@
 """
-The shell around ``boardlog``: where the logs live, and the one thread that appends.
+The shell around the board log: where the logs live, and the one thread that appends.
 
 **Where files go.** A session's records are the files of
 ``sessionfile.board_dir(<session id>)`` -- ``sessions/<session id>/board/`` under
 pptmstr's own configuration directory, not ``~/.claude`` -- one per record, as
-``boardlog`` lays them out, beside the session's ``session.json``. ``find`` reads
+``journal.files`` lays them out, beside the session's ``session.json``. ``find`` reads
 there and ``BoardWriter`` appends there and nowhere else.
 
 **The legacy path** is ``legacy_root() / <session id>``: ``boards/<session id>/``
@@ -17,7 +17,7 @@ each entry it answers with a value:
 
 - a directory whose session has nothing at the new path is renamed there
   (``Moved``), and a relative symbolic link to it is left at the old name. The
-  link is what keeps one history: ``boardlog.append`` makes the directory it is
+  link is what keeps one history: ``files.append`` makes the directory it is
   given, so a pptmstr that still appends by the old name -- an older build left
   running, or one started later -- would otherwise make a second directory and
   report every record written. Through the link its listing, its temp file and
@@ -64,7 +64,7 @@ the order they were submitted**, across every session the writer serves, because
 nothing else in the process appends.
 
 **The limit of that guarantee is the process.** Two pptmstr processes writing one
-session id are two queues. ``boardlog.append`` still loses neither's records, and
+session id are two queues. ``files.append`` still loses neither's records, and
 ``boardlog.restore`` reads the result as the ``contested`` case its docstring
 describes. Two ``BoardWriter`` objects in one process are the same two queues, so a
 process holds one.
@@ -85,13 +85,13 @@ waiting. ``drain`` takes a lock held only around list operations, never around I
 so it is safe to call every frame.
 
 **The first record that does not land ends the recording of its session.** Records
-are facts about each other, and ``boardlog`` numbers them by what is on disk. A
+are facts about each other, and ``files.append`` numbers them by what is on disk. A
 completion that failed to write, followed by records that succeed, is a log with
 contiguous ordinals that reads back whole, with no damage, as a board on which the
 task was never finished. So once one record for a session is ``Unwritten`` --
 whatever the cause, a full disk for one moment included -- nothing further is
 appended for that session by this writer: the log on disk stays a true prefix of
-the board, which is what ``boardlog.read`` promises of it. The break is reported
+the board, which is what ``files.read`` promises of it. The break is reported
 once as a ``Stopped``, and each later submission as an ``Outcome`` that names it.
 ``Written`` with a ``gap`` is not this case: the break is already on disk, a reader
 already stops at it, and appending behind it hides nothing.
@@ -99,7 +99,7 @@ already stops at it, and appending behind it hides nothing.
 **A prefix has to say that it is one.** A log that ends at its last good record
 reads back whole: the task whose completion did not land is held, what was declared
 afterwards never existed, and nothing on disk disagrees. So at the stop the worker
-appends one ``boardlog.RecordingStopped`` with the reason, and a board restored
+appends one ``codec.RecordingStopped`` with the reason, and a board restored
 from that log is ``short`` and says why. It is attempted once, only for a log this
 writer was admitted to, and ``Stopped.marker`` is what became of it.
 
@@ -113,7 +113,7 @@ than of an unclean one, which the format does not have.
 
 **A record too long to log is such a stop, and no call an agent makes can cause
 one.** The bus bounds every text where it accepts it, sized so that the largest
-record a call can produce is about two thirds of ``boardlog.MAX_RECORD_BYTES``
+record a call can produce is about two thirds of ``files.MAX_RECORD_BYTES``
 in the characters that take the most bytes (``bus.MAX_TEXT_CHARS`` and its
 neighbours, where the arithmetic is), and an argument the operator rewrote in
 review reaches the same handler and the same bound. What is not bounded is what
@@ -152,7 +152,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import boardlog, sessionfile, settings
-from .boardlog import Board, Record, Unwritten, Written
+from .boardlog import Board, Record
+from .journal import codec, files
+from .journal.files import Unwritten, Written
 
 # The most of a failure's reason a ``RecordingStopped`` carries. A reason is an
 # exception's text and has no bound of its own, and the marker has to land in the
@@ -191,7 +193,7 @@ def _places(root: Path | None, legacy: Path | None) -> tuple[Path, Path | None]:
 class NoLog:
     """
     There is no board to restore for a session, and why: its id names no directory,
-    or the directory holds nothing ``boardlog.read`` could report.
+    or the directory holds nothing ``files.read`` could report.
 
     Not a ``Board`` with nothing on it, so that "nothing was logged" and "a log was
     restored and it is empty-handed because it is damaged" cannot be confused.
@@ -240,7 +242,7 @@ def _elsewhere(session_id: str, directory: Path, legacy: Path | None) -> Path | 
     """
     if legacy is None:
         return None
-    old = boardlog.session_dir(legacy, session_id)
+    old = files.session_dir(legacy, session_id)
     if old is None:
         return None
     try:
@@ -249,7 +251,7 @@ def _elsewhere(session_id: str, directory: Path, legacy: Path | None) -> Path | 
     except OSError:
         # One of the two is not there, which next_ordinal answers for the old one.
         pass
-    return None if boardlog.next_ordinal(old) == 0 else old
+    return None if files.next_ordinal(old) == 0 else old
 
 
 def _refusal(directory: Path, old: Path, held: bool) -> str:
@@ -270,7 +272,7 @@ def _refusal(directory: Path, old: Path, held: bool) -> str:
     )
 
 
-def _board(log: boardlog.Log) -> Board | NoLog:
+def _board(log: codec.Log[Record]) -> Board | NoLog:
     if not log.records and log.damage is None:
         return NoLog("nothing is logged for this session")
     return boardlog.restore_log(log)
@@ -298,14 +300,16 @@ def find(session_id: str, root: Path | None = None, legacy: Path | None = None) 
     directory = sessionfile.board_dir(session_id, sessions)
     if directory is None:
         return Found(NoLog(_NOT_A_NAME), None, unrecorded=_NOT_A_NAME)
-    log = boardlog.read(directory)
+    log = files.read(directory, boardlog.KINDS)
     held = bool(log.records) or log.damage is not None
     old = _elsewhere(session_id, directory, old_root)
     if old is None:
         return Found(_board(log), directory)
     if held:
         return Found(_board(log), directory, old, _refusal(directory, old, True))
-    return Found(_board(boardlog.read(old)), old, unrecorded=_refusal(directory, old, False))
+    return Found(
+        _board(files.read(old, boardlog.KINDS)), old, unrecorded=_refusal(directory, old, False)
+    )
 
 
 def load(session_id: str, root: Path | None = None, legacy: Path | None = None) -> Board | NoLog:
@@ -471,7 +475,7 @@ class Outcome:
     """
     What became of one submitted record.
 
-    ``result`` is ``boardlog.append``'s own answer where the append ran. Where it
+    ``result`` is ``files.append``'s own answer where the append ran. Where it
     did not -- the session id names no directory, the session has records under
     the legacy root, the log was not adopted, the session's recording had stopped,
     the writer was closed, the append raised -- it is an ``Unwritten`` saying which.
@@ -488,7 +492,7 @@ class Outcome:
         tell: it is on disk and its own listing showed no break below it.
 
         False is what the operator is owed a line for. ``Written`` with a ``gap``
-        is False: the bytes are there and ``boardlog.read`` stops before them.
+        is False: the bytes are there and ``files.read`` stops before them.
         """
         return isinstance(self.result, Written) and self.result.gap is None
 
@@ -701,9 +705,9 @@ class BoardWriter:
             admitted = session_id in self._admitted
         if directory is None or not admitted or session_id in self._split:
             return None
-        marker = boardlog.RecordingStopped(at=time.time(), reason=reason[:MARKER_REASON_CHARS])
+        marker = codec.RecordingStopped(at=time.time(), reason=reason[:MARKER_REASON_CHARS])
         try:
-            return boardlog.append(directory, marker)
+            return files.append(directory, marker)
         except Exception as exc:
             return Unwritten(f"{type(exc).__name__}: {exc}")
 
@@ -717,7 +721,7 @@ class BoardWriter:
             old = _elsewhere(session_id, directory, self.legacy)
             if old is not None:
                 self._split.add(session_id)
-                held = boardlog.next_ordinal(directory) != 0
+                held = files.next_ordinal(directory) != 0
                 return Unwritten(f"not appended: {_refusal(directory, old, held)}")
             self._whole.add(session_id)
         with self._changed:
@@ -726,14 +730,14 @@ class BoardWriter:
             # No record in the listing is "this process is starting the log": a
             # directory that is missing, empty, or holds only another append's
             # temp file has no history to write behind.
-            found = boardlog.next_ordinal(directory)
+            found = files.next_ordinal(directory)
             with self._changed:
                 # ``adopt`` may have been called while the listing ran.
                 admitted = found == 0 or session_id in self._admitted
                 if admitted:
                     self._admitted.add(session_id)
         if not admitted:
-            if isinstance(found, boardlog.Unlisted):
+            if isinstance(found, files.Unlisted):
                 return Unwritten(
                     "this session's board log could not be listed, so whether it holds"
                     f" records this process did not adopt is not known ({found.reason})"
@@ -742,4 +746,4 @@ class BoardWriter:
                 "this session has a board log this process did not adopt;"
                 " appending would put a second history behind it"
             )
-        return boardlog.append(directory, record)
+        return files.append(directory, record)

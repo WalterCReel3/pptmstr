@@ -28,6 +28,7 @@ from pptmstr.intents import (
     StateChanged,
     UsageAccrued,
 )
+from pptmstr.journal import files as journal_files
 from pptmstr.model import (
     AgentState,
     ContextSnapshot,
@@ -992,7 +993,7 @@ def test_a_session_that_leaves_the_store_takes_its_modal_with_it(
 def _record(session_id: str, where: Path) -> None:
     """One board record on disk for ``session_id`` under ``where``."""
     declared = boardlog.Declared(at=1.0, task_id="t0", title="task", declared_by="lead")
-    assert isinstance(boardlog.append(where, declared), boardlog.Written)
+    assert isinstance(journal_files.append(where, declared), journal_files.Written)
 
 
 def test_the_look_says_where_the_sessions_own_files_are_and_whether_the_file_is_there() -> None:
@@ -1042,7 +1043,7 @@ def test_the_legacy_board_log_is_named_exactly_when_the_board_logs_own_reader_fi
     it: the second directory it reports, or the legacy one it read from.
     """
     board = sessionfile.board_dir("s1")
-    old = boardlog.session_dir(boardsync.legacy_root(), "s1")
+    old = journal_files.session_dir(boardsync.legacy_root(), "s1")
     assert board is not None and old is not None
     if own:
         _record("s1", board)
@@ -1358,7 +1359,7 @@ def test_the_close_button_is_on_the_display_when_the_rows_are_taller_than_it(
     display, and it closes.
     """
     monkeypatch.setattr(brief, "legacy_root", lambda: tmp_path / "projects")
-    old = boardlog.session_dir(boardsync.legacy_root(), "s1")
+    old = journal_files.session_dir(boardsync.legacy_root(), "s1")
     assert old is not None
     _record("s1", old)
     with _Modal(monkeypatch, _closed()) as modal:
@@ -1382,7 +1383,7 @@ def test_the_modal_for_a_closed_session_reads_its_files_once_and_copies_its_gate
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(brief, "legacy_root", lambda: tmp_path / "projects")
-    old = boardlog.session_dir(boardsync.legacy_root(), "s1")
+    old = journal_files.session_dir(boardsync.legacy_root(), "s1")
     assert old is not None
     _record("s1", old)
     with _Modal(monkeypatch, _closed()) as modal:

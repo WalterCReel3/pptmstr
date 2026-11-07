@@ -45,7 +45,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import boardlog, settings
+from . import settings
+from .journal import files
 from .ondisk import create_once
 
 # The first entry, and the only one that is not an amendment. Named rather than
@@ -138,13 +139,13 @@ def default_root() -> Path:
 def session_dir(session_id: str, root: Path | None = None) -> Path | None:
     """
     Where a session's brief is written: ``<root>/<session id>/``, or None for an id
-    that is not one directory name (``boardlog.session_dir`` has the rule).
+    that is not one directory name (``files.session_dir`` has the rule).
 
     Only a default -- ``LaunchSpec.brief`` carries whatever path the operator gave,
     which is what lets a fork inherit its parent's brief instead of deriving an
     empty one.
     """
-    return boardlog.session_dir(default_root() if root is None else root, session_id)
+    return files.session_dir(default_root() if root is None else root, session_id)
 
 
 def legacy_root() -> Path:

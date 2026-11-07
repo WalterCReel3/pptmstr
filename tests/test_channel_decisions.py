@@ -32,6 +32,7 @@ from pptmstr.intents import (
     DecisionWithdrawn,
     Intent,
 )
+from pptmstr.journal import codec
 from pptmstr.model import (
     Channel,
     Decision,
@@ -296,7 +297,7 @@ def _logged_board() -> boardlog.Board:
     after, _ = _apply(before, intent, 5.0)
     facts = list(outcomes(before, intent, after, 5.0))
     assert [f.session_id for f in facts] == [S]
-    records = [boardlog.decode(boardlog.encode(f.record)) for f in facts]
+    records = [codec.decode(codec.encode(f.record), boardlog.KINDS) for f in facts]
     assert all(isinstance(r, boardlog.Raised) for r in records)
     return boardlog.restore(r for r in records if isinstance(r, boardlog.Raised))
 

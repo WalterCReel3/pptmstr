@@ -593,7 +593,7 @@ def _records(session_id: str | None, names: tuple[str, ...] = _RECORD_ROOTS) -> 
     A session's own directory is ``<root>/<session id>`` only when that is a real
     entry of the root under that exact name. An id that is not one directory name
     -- empty, ``..``, one with a separator -- has no directory, which is
-    ``boardlog.session_dir``'s rule reached by resolving rather than by listing
+    ``journal.files.session_dir``'s rule reached by resolving rather than by listing
     the spellings. A symlink at that name is not the caller's either: what it
     leads to is judged as wherever it leads, which is what makes the link
     ``boardsync.migrate`` leaves at ``boards/<id>`` readable for the session it

@@ -49,6 +49,7 @@ from pptmstr.intents import (
     TaskCompleted,
     TaskDeclared,
 )
+from pptmstr.journal import codec
 from pptmstr.model import (
     AgentState,
     Concern,
@@ -147,11 +148,11 @@ def board_texts(snap: Snapshot) -> list[str]:
 
 def saved(facts: list[Fact]) -> list[str]:
     """The log ``facts`` are written to, a line to a record."""
-    return [boardlog.encode(fact.on_the_wall(CLOCK)) for fact in facts]
+    return [codec.encode(fact.on_the_wall(CLOCK)) for fact in facts]
 
 
 def read_back(lines: list[str]) -> boardlog.Board:
-    records = [boardlog.decode(line) for line in lines]
+    records = [codec.decode(line, boardlog.KINDS) for line in lines]
     assert all(isinstance(r, boardlog.Record) for r in records), records
     return boardlog.restore(records)  # type: ignore[arg-type]
 
@@ -171,8 +172,8 @@ def test_a_board_restored_from_its_log_holds_the_text_the_store_wrote_it_from(
     assert board_texts(resumed) == board_texts(wrote)
     # And the board it would write is the board it read: the log of what it holds is
     # the log it was restored from, line for line.
-    assert [boardlog.encode(f) for f in _as_logged(resumed)] == [
-        boardlog.encode(f) for f in _as_logged(wrote)
+    assert [codec.encode(f) for f in _as_logged(resumed)] == [
+        codec.encode(f) for f in _as_logged(wrote)
     ]
 
 

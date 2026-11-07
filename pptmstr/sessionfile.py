@@ -66,8 +66,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import boardlog, jsonfields, settings
+from . import jsonfields, settings
 from .approval import Policy
+from .journal import files
 from .ondisk import create_once, read_regular, replace
 
 # The format this build writes, and the newest it will write over.
@@ -197,7 +198,7 @@ class Unwritten:
     """
     Nothing was written, the file is as it was, and why.
 
-    A value rather than an exception for the reason ``boardlog.Unwritten`` is one:
+    A value rather than an exception for the reason ``files.Unwritten`` is one:
     the operator has to be shown it, and a fleet that silently stopped being kept
     is discovered at the next start, by its absence.
     """
@@ -341,9 +342,9 @@ def root() -> Path:
 def session_dir(session_id: str, root: Path | None = None) -> Path | None:
     """
     Where pptmstr keeps what it knows about one session, or None for an id that
-    is not exactly one directory name (``boardlog.session_dir`` has the rule).
+    is not exactly one directory name (``files.session_dir`` has the rule).
     """
-    return boardlog.session_dir(_under(root), session_id)
+    return files.session_dir(_under(root), session_id)
 
 
 def file_path(session_id: str, root: Path | None = None) -> Path | None:
@@ -430,7 +431,7 @@ def listing(root: Path | None = None) -> Listing:
             with contextlib.suppress(OSError):
                 if (
                     entry.is_dir(follow_symlinks=False)
-                    and boardlog.session_dir(base, entry.name) is not None
+                    and files.session_dir(base, entry.name) is not None
                 ):
                     ids.append(entry.name)
     except FileNotFoundError:

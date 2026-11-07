@@ -19,9 +19,11 @@ import pytest
 
 from pptmstr import boardlog
 from pptmstr.boardfacts import outcomes
-from pptmstr.boardlog import Clock, Delivered, PeerPosted, Unrecognised
+from pptmstr.boardlog import Clock, Delivered, PeerPosted
 from pptmstr.effects import InboxDelivered
 from pptmstr.intents import AgentSpawned, BoardRestored, ConcernPosted, InboxRead, Intent
+from pptmstr.journal import codec
+from pptmstr.journal.codec import Unrecognised
 from pptmstr.model import EVERY_CHANNEL, Concern, ConcernState, NodeId, Snapshot
 from pptmstr.store import _apply
 
@@ -36,7 +38,7 @@ _SHIFT = (_READ.monotonic - _READ.wall) - (_WROTE.monotonic - _WROTE.wall)
 
 # Every kind a build before peer messages decodes. A peer message filed under any
 # of these is read by such a build as whatever that kind means there. Written out
-# rather than read off ``boardlog._KINDS``, which ``peer-posted`` has joined: a
+# rather than read off ``boardlog.KINDS``, which ``peer-posted`` has joined: a
 # set derived from it would let the pin pass with the kind in it.
 PRE_PEER_KINDS = frozenset(
     {
@@ -122,7 +124,7 @@ def test_a_concern_with_a_channel_is_filed_under_a_kind_no_older_build_knows() -
     """
     _, records = apply(started(), ConcernPosted(LEAD, peer()))
 
-    kinds = [json.loads(boardlog.encode(record))["kind"] for record in records]
+    kinds = [json.loads(codec.encode(record))["kind"] for record in records]
 
     assert kinds == ["peer-posted"]
     assert kinds[0] not in PRE_PEER_KINDS
@@ -131,7 +133,7 @@ def test_a_concern_with_a_channel_is_filed_under_a_kind_no_older_build_knows() -
 def test_a_concern_without_a_channel_is_still_filed_as_it_always_was() -> None:
     _, records = apply(started(), ConcernPosted(BUILDER, team("c-1", BUILDER, LEAD, 3.0)))
 
-    assert [json.loads(boardlog.encode(record))["kind"] for record in records] == ["concern-posted"]
+    assert [json.loads(codec.encode(record))["kind"] for record in records] == ["concern-posted"]
 
 
 def test_the_frozen_list_is_still_decoded_and_never_held_peer_posted() -> None:
@@ -142,8 +144,8 @@ def test_the_frozen_list_is_still_decoded_and_never_held_peer_posted() -> None:
     without this failing. What must hold is that every frozen kind is still
     decoded, and that ``peer-posted`` is one of the kinds beyond it.
     """
-    assert PRE_PEER_KINDS <= set(boardlog._KINDS)
-    assert "peer-posted" in set(boardlog._KINDS) - PRE_PEER_KINDS
+    assert PRE_PEER_KINDS <= set(boardlog.KINDS.by_name)
+    assert "peer-posted" in set(boardlog.KINDS.by_name) - PRE_PEER_KINDS
 
 
 # -- (b) the end-to-end round trip -------------------------------------------------
@@ -171,9 +173,9 @@ def test_a_peer_message_restored_into_another_process_keeps_every_field() -> Non
     first, records = apply(started(), ConcernPosted(LEAD, waiting), ConcernPosted(LEAD, handed))
     assert [type(r) for r in records] == [PeerPosted, PeerPosted, Delivered]
 
-    read = [boardlog.decode(boardlog.encode(record)) for record in records]
-    assert not any(isinstance(r, boardlog.Malformed) for r in read)
-    board = boardlog.restore(r for r in read if not isinstance(r, boardlog.Malformed))
+    read = [codec.decode(codec.encode(record), boardlog.KINDS) for record in records]
+    assert not any(isinstance(r, codec.Malformed) for r in read)
+    board = boardlog.restore(r for r in read if not isinstance(r, codec.Malformed))
     assert not board.short
 
     snap, effects = _apply(Snapshot.empty(), BoardRestored(S, board, _READ), _READ.monotonic)
@@ -293,9 +295,7 @@ def test_a_team_read_hands_over_no_peer_message_and_files_no_delivery_for_one() 
 # -- (d) a build that predates peer messages -----------------------------------------
 
 
-def test_a_build_that_predates_peer_messages_reads_one_as_unrecognised_and_short(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_build_that_predates_peer_messages_reads_one_as_unrecognised_and_short() -> None:
     """
     This build with ``peer-posted`` taken out of the decoder stands in for an
     older one. The message is not placed, the board says it is short, and the
@@ -305,16 +305,16 @@ def test_a_build_that_predates_peer_messages_reads_one_as_unrecognised_and_short
         started(),
         ConcernPosted(LEAD, peer("c-1", state=ConcernState.DELIVERED, delivered_at=4.0)),
     )
-    texts = [boardlog.encode(record) for record in records]
-    older = {kind: cls for kind, cls in boardlog._KINDS.items() if kind != "peer-posted"}
-    assert len(older) == len(boardlog._KINDS) - 1
-    monkeypatch.setattr(boardlog, "_KINDS", older)
+    texts = [codec.encode(record) for record in records]
+    by_name = {kind: cls for kind, cls in boardlog.KINDS.by_name.items() if kind != "peer-posted"}
+    assert len(by_name) == len(boardlog.KINDS.by_name) - 1
+    older = codec.Kinds(by_name, boardlog.KINDS.hints)
 
-    read = [boardlog.decode(text) for text in texts]
+    read = [codec.decode(text, older) for text in texts]
 
     assert [type(r) for r in read] == [Unrecognised, Delivered]
     assert isinstance(read[0], Unrecognised) and read[0].kind == "peer-posted"
-    board = boardlog.restore(r for r in read if not isinstance(r, boardlog.Malformed))
+    board = boardlog.restore(r for r in read if not isinstance(r, codec.Malformed))
     assert board.short
     assert board.concerns == ()
     assert [r.kind for r in board.unrecognised] == ["peer-posted"]

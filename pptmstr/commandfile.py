@@ -156,7 +156,7 @@ class Unwritten:
     """
     Nothing was written, whatever was there is as it was, and why.
 
-    A value rather than an exception for the reason ``boardlog.Unwritten`` is
+    A value rather than an exception for the reason ``journal.files.Unwritten`` is
     one. ``reason`` is ``ALREADY_RECORDED`` exactly when the name was taken.
     """
 

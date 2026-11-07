@@ -2872,17 +2872,17 @@ def test_no_log_io_runs_on_the_thread_that_applies_the_frame(
     thread it ran on. None is the thread that calls ``apply_intents`` -- here the
     test's own -- and the read is not on the bridge's loop either.
     """
-    from pptmstr import boardlog
+    from pptmstr.journal import files as journal_files
 
     seen: list[tuple[str, threading.Thread]] = []
     for name in ("append", "read", "next_ordinal"):
-        real = getattr(boardlog, name)
+        real = getattr(journal_files, name)
 
         def noting(*args: object, _real=real, _name=name, **kwargs: object):  # type: ignore[no-untyped-def]
             seen.append((_name, threading.current_thread()))
             return _real(*args, **kwargs)
 
-        monkeypatch.setattr(boardlog, name, noting)
+        monkeypatch.setattr(journal_files, name, noting)
 
     session_id, _ = _first_run(tmp_path)
     with _Process(tmp_path, _one_more_task()) as second:
@@ -2908,9 +2908,10 @@ def test_a_record_reaches_the_log_on_the_wall_clock_and_not_the_stores(
     import time
 
     from pptmstr import boardlog
+    from pptmstr.journal import files as journal_files
 
     session_id, _ = _first_run(tmp_path)
-    log = boardlog.read(tmp_path / session_id / "board")
+    log = journal_files.read(tmp_path / session_id / "board", boardlog.KINDS)
     assert len(log.records) >= 6
     now = time.time()
     # Not a vacuous comparison on a machine that booted less than a minute
@@ -3176,19 +3177,19 @@ def test_a_record_that_does_not_land_stops_the_session_and_is_kept_as_state(
     shell keeps it: frames later the entry still says stopped, why, and how many
     records are not in the log.
     """
-    from pptmstr import boardlog
+    from pptmstr.journal import files as journal_files
     from pptmstr.ui import board_pane
 
-    real = boardlog.append
+    real = journal_files.append
     calls = [0]
 
     def failing(directory: Path, record: object, **kwargs: object):  # type: ignore[no-untyped-def]
         calls[0] += 1
         if calls[0] == 3:
-            return boardlog.Unwritten("no space left on device")
+            return journal_files.Unwritten("no space left on device")
         return real(directory, record, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(boardlog, "append", failing)
+    monkeypatch.setattr(journal_files, "append", failing)
     with _Process(tmp_path, _a_working_team) as run:
         run.launch()
         run.frame()
@@ -3722,16 +3723,20 @@ def test_a_session_whose_board_log_could_not_be_opened_is_reported_as_running(
 def test_quitting_closes_the_writer_before_the_pool_and_logs_what_did_not_land(
     tmp_path: Path,
 ) -> None:
-    from pptmstr import app, boardlog, boardsync
+    from pptmstr import app, boardsync
+    from pptmstr.journal import codec
+    from pptmstr.journal import files as journal_files
 
     order: list[str] = []
-    record = boardlog.RecordingStopped(at=0.0, reason="x")
+    record = codec.RecordingStopped(at=0.0, reason="x")
 
     class _Writer:
         def close(self) -> tuple[boardsync.Report, ...]:
             order.append("writer")
             return (
-                boardsync.Outcome("s-1", record, boardlog.Unwritten("still queued; not written")),
+                boardsync.Outcome(
+                    "s-1", record, journal_files.Unwritten("still queued; not written")
+                ),
             )
 
     class _Pool:
@@ -3784,10 +3789,13 @@ def test_a_session_minted_by_this_launch_is_adopted_and_not_left_to_a_listing(
     it. The writer would otherwise decide by listing the directory, and a listing
     that fails for one moment refuses the session for the life of the process.
     """
-    from pptmstr import boardlog, boardsync
+    from pptmstr import boardsync
+    from pptmstr.journal import files as journal_files
 
     monkeypatch.setattr(
-        boardlog, "next_ordinal", lambda directory: boardlog.Unlisted("EIO for one moment")
+        journal_files,
+        "next_ordinal",
+        lambda directory: journal_files.Unlisted("EIO for one moment"),
     )
     with _Process(tmp_path, _a_working_team) as run:
         run.launch()
@@ -3805,10 +3813,12 @@ def test_relaunching_a_session_whose_recording_stopped_does_not_call_it_recorded
     The writer never restarts a stopped session, so an entry rebuilt at the
     relaunch would say "recorded" over a log nothing is being added to.
     """
-    from pptmstr import boardlog
+    from pptmstr.journal import files as journal_files
 
     monkeypatch.setattr(
-        boardlog, "append", lambda directory, record, **kw: boardlog.Unwritten("disk full")
+        journal_files,
+        "append",
+        lambda directory, record, **kw: journal_files.Unwritten("disk full"),
     )
     said = iter([_a_working_team, _one_more_task()])
     with _Process(tmp_path, lambda session: next(said)(session)) as run:
@@ -4440,7 +4450,8 @@ def test_a_session_run_here_comes_back_after_a_restart_as_a_closed_card_and_noth
     session file byte for byte what the first process left -- a recall is not an
     end, and a card that rewrote its own file would read "just now" at every start.
     """
-    from pptmstr import boardlog, boardsync, sessionfile
+    from pptmstr import boardsync, sessionfile
+    from pptmstr.journal import files as journal_files
     from pptmstr.model import AgentState, EndedHow, TranscriptPresence
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
@@ -4454,9 +4465,9 @@ def test_a_session_run_here_comes_back_after_a_restart_as_a_closed_card_and_noth
     def unread(*a: object, **k: object) -> object:
         raise AssertionError("a closed card's board log was read")
 
-    for module, name in ((boardsync, "find"), (boardsync, "load"), (boardlog, "read")):
+    for module, name in ((boardsync, "find"), (boardsync, "load"), (journal_files, "read")):
         monkeypatch.setattr(module, name, unread)
-    monkeypatch.setattr(boardlog, "next_ordinal", unread)
+    monkeypatch.setattr(journal_files, "next_ordinal", unread)
 
     state = _started(monkeypatch, lambda: [_row(session_id)])
     _frames(state, 3)
@@ -10420,11 +10431,12 @@ def test_an_earlier_link_the_sweep_cannot_close_is_named_apart_from_the_new_one(
     close and that fails too. The notice is about E, says so by when E was
     made, and says it may read live at the next start.
     """
-    from pptmstr import app, boardlog, channels
+    from pptmstr import app, channels
+    from pptmstr.journal import codec
 
     class Unmarkable(_FailingCloses):
         def append(self, link: Any, fact: Any) -> Any:
-            if isinstance(fact, boardlog.RecordingStopped):
+            if isinstance(fact, codec.RecordingStopped):
                 return channels.NotAppended("read-only file system")
             return super().append(link, fact)
 
