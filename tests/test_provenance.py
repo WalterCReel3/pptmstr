@@ -65,7 +65,7 @@ def through_the_disk(tmp_path: Path, facts: list[Fact]) -> boardlog.Board:
     """
     for fact in facts:
         assert fact.session_id == S
-        written = boardlog.append(tmp_path, fact.on_the_wall(_CLOCK), durable=False)
+        written = boardlog.append(tmp_path, fact.on_the_wall(_CLOCK))
         assert isinstance(written, boardlog.Written), written
     log = boardlog.read(tmp_path)
     assert log.damage is None

@@ -69,6 +69,7 @@ from pptmstr.model import (
     TaskState,
     withdrawal_label,
 )
+from pptmstr.ondisk import TEMP_PREFIX
 
 # -- generated records ------------------------------------------------------------
 
@@ -277,9 +278,7 @@ def sequence(seed: int, length: int = 40) -> tuple[Record, ...]:
 
 def write(directory: Path, records: tuple[Record, ...]) -> None:
     for record in records:
-        # Not durable: the flush to the device is the one line here that does not
-        # change what a reader sees, and it is most of the suite's runtime.
-        written = boardlog.append(directory, record, durable=False)
+        written = boardlog.append(directory, record)
         assert isinstance(written, Written), written
 
 
@@ -751,9 +750,7 @@ def test_threads_appending_at_once_lose_nothing_and_leave_no_gap(tmp_path: Path)
     def run(who: int) -> None:
         start.wait()
         for n in range(each):
-            written = boardlog.append(
-                tmp_path, Claimed(at=float(n), task_id="t", by=f"w{who}"), durable=False
-            )
+            written = boardlog.append(tmp_path, Claimed(at=float(n), task_id="t", by=f"w{who}"))
             if not isinstance(written, Written):
                 failures.append(written)
                 return
@@ -781,7 +778,7 @@ from pptmstr import boardlog
 who, directory, each = sys.argv[1], Path(sys.argv[2]), int(sys.argv[3])
 for n in range(each):
     record = boardlog.Claimed(at=float(n), task_id="t", by=who)
-    w = boardlog.append(directory, record, durable=False)
+    w = boardlog.append(directory, record)
     assert isinstance(w, boardlog.Written), w
 """
 
@@ -828,7 +825,6 @@ def test_an_append_cannot_be_told_where_to_start(tmp_path: Path) -> None:
     assert list(inspect.signature(boardlog.append).parameters) == [
         "directory",
         "record",
-        "durable",
     ]
     write(tmp_path, (A, B, A))
     (tmp_path / "00000001.json").unlink()
@@ -860,8 +856,8 @@ def test_no_append_lands_in_the_place_of_a_missing_record(
     before = boardlog.read(tmp_path)
     assert before.records == records[:readable] and before.damage is not None
 
-    first = boardlog.append(tmp_path, B, durable=False)
-    second = boardlog.append(tmp_path, A, durable=False)
+    first = boardlog.append(tmp_path, B)
+    second = boardlog.append(tmp_path, A)
 
     assert isinstance(first, Written) and (first.ordinal, first.gap) == (5, gap)
     assert isinstance(second, Written) and (second.ordinal, second.gap) == (6, gap)
@@ -891,9 +887,8 @@ def test_a_record_too_long_to_be_read_back_is_not_written(
     assert boardlog.read(tmp_path) == boardlog.Log(records=(at_the_bound,))
 
 
-@pytest.mark.parametrize("durable", [True, False])
-def test_a_record_is_flushed_to_the_device_before_it_is_named_only_when_asked(
-    durable: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_record_is_flushed_to_the_device_before_it_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
     Before, not merely at some point: a name over text the device does not hold is
@@ -910,12 +905,9 @@ def test_a_record_is_flushed_to_the_device_before_it_is_named_only_when_asked(
 
     monkeypatch.setattr(os, "fsync", fsync)
 
-    if durable:
-        assert isinstance(boardlog.append(tmp_path, A), Written)
-    else:
-        assert isinstance(boardlog.append(tmp_path, A, durable=False), Written)
+    assert isinstance(boardlog.append(tmp_path, A), Written)
 
-    assert synced == ([(True, whole)] if durable else [])
+    assert synced == [(True, whole)]
     assert boardlog.read(tmp_path).records == (A,)
 
 
@@ -1017,7 +1009,7 @@ def test_the_next_ordinal_is_past_the_highest_name_and_past_the_padding(tmp_path
 
     (tmp_path / "00000009.json").write_text("")
     (tmp_path / "00000010.json").write_text("")
-    (tmp_path / ".record-abc.tmp").write_text("")
+    (tmp_path / f"{TEMP_PREFIX}abc.tmp").write_text("")
     (tmp_path / "99999999999.txt").write_text("")
     assert boardlog.next_ordinal(tmp_path) == 11
 
@@ -1121,7 +1113,7 @@ def test_names_that_are_not_records_are_not_read(tmp_path: Path) -> None:
     """
     write(tmp_path, (A, B))
     half = boardlog.encode(A)[:10]
-    (tmp_path / ".record-x7.tmp").write_text(half)
+    (tmp_path / f"{TEMP_PREFIX}x7.tmp").write_text(half)
     (tmp_path / "notes.md").write_text("not ours")
     (tmp_path / "0000000002.json").write_text(boardlog.encode(A))  # not the canonical name
     (tmp_path / "2.json").write_text(boardlog.encode(A))

@@ -14,16 +14,13 @@ agent* -- and restoring is a fold over facts that cannot be refused.
 
 **One file per record, no index.** ``brief.py`` makes the argument and it transfers
 whole: a write above ``PIPE_BUF`` is not atomic, a document rewritten per event is a
-corruption path, and the directory listing is the consistent prefix. What does not
-transfer is ``brief.write_entry``. It reads every entry to find the next ordinal,
-it has three digits, and it guards with ``exists()`` before ``os.replace`` -- a
-check-then-act that a second writer wins by destroying a record with nothing
-raised. Two windows resuming one session id are two writers, so a record here is
-*linked* into place: ``os.link`` refuses an existing name atomically, and the
-writer that lost takes the next ordinal. Every append lists the directory first
-and starts past the highest name there, because a writer told where to start can be
-sent into the place of a missing record, and a record read back ahead of ones
-written before it is a fact restored out of order.
+corruption path, and the directory listing is the consistent prefix. Two windows
+resuming one session id are two writers, so a record here is *linked* into place
+by ``ondisk.create_once``, as a brief entry is: ``os.link`` refuses an existing
+name atomically, and the writer that lost takes the next ordinal. Every append
+lists the directory first and starts past the highest name there, because a writer
+told where to start can be sent into the place of a missing record, and a record
+read back ahead of ones written before it is a fact restored out of order.
 
 **Two writers lose no record, and their records are not one history.** Each window
 has its own store, so each reducer grants what the other would refuse, and a record
@@ -105,13 +102,12 @@ value enters the store belongs to whoever wires this.
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
+import itertools
 import json
 import math
 import os
 import re
-import tempfile
 import types
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -128,7 +124,7 @@ from .model import (
     withdrawal_result,
 )
 from .naming import ROOT_NAMES
-from .ondisk import read_regular
+from .ondisk import create_once, read_regular
 
 # `00000042.json`. The name is the ordinal and nothing else: a kind in the name
 # would let two writers link two different names for one ordinal, and exclusivity
@@ -958,15 +954,16 @@ class Unwritten:
     reason: str
 
 
-def append(directory: Path, record: Record, *, durable: bool = True) -> Written | Unwritten:
+def append(directory: Path, record: Record) -> Written | Unwritten:
     """
     Append one record. Never overwrites one, whoever else is writing.
 
-    The text goes to a temp file in the same directory and is then *linked* to its
-    ordinal's name. A name therefore appears complete or not at all, and ``os.link``
-    fails on a name that exists -- atomically, in the kernel, which is the guarantee
-    a check before a rename cannot give. The writer that lost the name takes the
-    next one, so two writers interleave and neither loses a record.
+    The text is staged in the same directory, flushed to the device, and then
+    *linked* to its ordinal's name by ``ondisk.create_once``. A name therefore
+    appears complete or not at all, and ``os.link`` fails on a name that exists --
+    atomically, in the kernel, which is the guarantee a check before a rename cannot
+    give. The writer that lost the name takes the next one, so two writers
+    interleave and neither loses a record.
 
     **Never fills a missing ordinal.** The first name tried is one past the highest
     in a listing taken here, and a collision only moves up, so a record never lands
@@ -981,19 +978,16 @@ def append(directory: Path, record: Record, *, durable: bool = True) -> Written 
     A record whose text is over ``MAX_RECORD_BYTES`` is refused, since ``read``
     would take it for damage and withhold everything after it.
 
-    ``durable`` flushes the record to the device before it is named, which is the
-    difference between surviving this process and surviving the machine, and costs
-    milliseconds per record on the thread that calls it. Without it a power loss
-    can leave a name over a short file; ``read`` reports that as damage and never
-    as a record, but it withholds whatever was written after. The directory entry
-    is not flushed either way: losing the newest names shortens the log to a
-    consistent prefix and tears nothing.
+    The flush before the link is the difference between surviving this process and
+    surviving the machine, and costs milliseconds per record on the thread that
+    calls this. The directory entry is not flushed: losing the newest names
+    shortens the log to a consistent prefix and tears nothing.
 
-    **A process killed inside this leaves its temp file, and nothing removes it.**
-    A ``.record-*.tmp`` name is never a record to ``read`` or to the next
-    ordinal, so one left behind costs its bytes and nothing else. Removing them
-    is not safe from here: another writer's append in flight is a file of exactly
-    that name, and unlinking it before its link would lose that record.
+    **A process killed inside this leaves its staged file, and nothing removes
+    it.** An ``ondisk.TEMP_PREFIX`` name is never a record to ``read`` or to the
+    next ordinal, so one left behind costs its bytes and nothing else. Removing
+    them is not safe from here: another writer's append in flight is a file of
+    exactly that shape, and unlinking it before its link would lose that record.
     """
     try:
         data = encode(record).encode("utf-8")
@@ -1003,28 +997,11 @@ def append(directory: Path, record: Record, *, durable: bool = True) -> Written 
             )
         directory.mkdir(parents=True, exist_ok=True)
         present = _ordinals(os.listdir(directory))
-        ordinal = present[-1] + 1 if present else 0
-        gap = _first_gap(present)
-        fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=".record-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                if durable:
-                    handle.flush()
-                    os.fsync(handle.fileno())
-            while True:
-                target = directory / _name(ordinal)
-                try:
-                    os.link(tmp, target)
-                    break
-                except FileExistsError:
-                    ordinal += 1
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
+        start = present[-1] + 1 if present else 0
+        linked = create_once(directory, (_name(n) for n in itertools.count(start)), data)
     except (OSError, ValueError) as exc:
         return Unwritten(reason=f"{type(exc).__name__}: {exc}")
-    return Written(ordinal=ordinal, path=target, gap=gap)
+    return Written(ordinal=start + linked.passed, path=linked.path, gap=_first_gap(present))
 
 
 @dataclass(frozen=True, slots=True)

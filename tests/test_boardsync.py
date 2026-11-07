@@ -41,6 +41,7 @@ from pptmstr.boardsync import (
     Report,
     Stopped,
 )
+from pptmstr.ondisk import TEMP_PREFIX
 
 
 @pytest.fixture
@@ -695,7 +696,7 @@ def test_a_session_with_no_record_on_disk_is_one_this_process_starts(writer: Boa
     empty = writer.directory("empty")
     assert empty is not None
     empty.mkdir(parents=True)
-    (empty / ".record-abc.tmp").write_text("{")
+    (empty / f"{TEMP_PREFIX}abc.tmp").write_text("{")
 
     writer.submit("missing", _declared(0))
     writer.submit("empty", _declared(1))
@@ -1099,7 +1100,7 @@ def test_a_legacy_directory_that_holds_no_record_is_not_a_second_history(
     if left_behind != "no directory":
         (legacy / "resumed").mkdir(parents=True)
     if left_behind == "a temp file":
-        (legacy / "resumed" / ".record-abc.tmp").write_text("{")
+        (legacy / "resumed" / f"{TEMP_PREFIX}abc.tmp").write_text("{")
     before = _entries(legacy)
 
     found = boardsync.find("resumed", sessions, legacy)
@@ -1288,7 +1289,7 @@ def test_a_new_path_holding_anything_at_all_is_not_renamed_onto(
     old = _legacy_log(legacy, "s-1")
     new = sessions / "s-1" / "board"
     new.mkdir(parents=True)
-    (new / ".record-abc.tmp").write_text("{")
+    (new / f"{TEMP_PREFIX}abc.tmp").write_text("{")
     files, entries = _files(sessions, legacy), _entries(sessions, legacy)
 
     (left,) = boardsync.migrate(sessions, legacy).entries
@@ -1531,7 +1532,7 @@ def test_a_move_under_a_thread_appending_by_the_old_name_never_leaves_a_short_lo
         n = 1
         while not stop.is_set() and n < 4000:
             record = _declared(n)
-            told.append((record, boardlog.append(old, record, durable=False)))
+            told.append((record, boardlog.append(old, record)))
             n += 1
             if n > 5 + round_:
                 started.set()
