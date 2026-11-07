@@ -395,6 +395,85 @@ What landed, and where it differs from the proposals above:
 - **A4 is deferred.** Two builders declined it because the premises file holds no operator
   entry for code edits, only the relayed approval. It waits for that entry; nothing depends on it.
 
+## Round 3: designs and their verdicts (2026-11-07)
+
+A4 is built: one `_allowance` tail is shared by decision and command refusals. It is pinned by
+34 tests and survived 7 mutations. The eight designs and the skeptic's verdicts (task
+`r3-design-review`; read, not run) are:
+
+| | Design | Verdict | Revision owed before building |
+|---|---|---|---|
+| B1 | [the board log is one journal of two](2026-11-07-the-board-log-is-one-journal-of-two.md) | build | `readback.py` part 6 must include a malformed board-kind record in a channel directory. The read, `judge` and `owes_close` must match HEAD, or the sweep would write a `LinkClosed` where HEAD writes nothing. Its measurement so far: 42 checks, all equal. |
+| B2 | [an atomic write is create-once or replace](2026-11-07-an-atomic-write-is-create-once-or-replace.md) | build | P5 cannot work as written: `test_layers._aliases` skips relative imports. |
+| B3 | [two journals share one serial worker](2026-11-07-two-journals-share-one-serial-worker.md) | build | Drop the false reason (B1 proposes no third writer). |
+| B4 | [commands say what they record](2026-11-07-commands-say-what-they-record-like-the-other-journals.md) | build | Correct the intent count to 57. |
+| B5 | [board and gate packages](2026-11-07-board-and-gate-packages.md) | build | The two `gate/` steps go last. |
+| B6 | [channels and ids have one owner each](2026-11-07-channels-and-ids-have-one-owner-each.md) | revise | Its "channel reducer" reaches `approval.summary_of`, so it is not channel-only. Its reducer step moves into B9. Turning Snapshot methods into functions (~250 sites) waits for H+ → P. |
+| B7 | [the bus is a table of tools](2026-11-07-the-bus-is-a-table-of-tools.md) | build | Its text modules follow the layout ruling below. |
+| B9 | [apply dispatches from one table](2026-11-07-apply-dispatches-from-one-table.md) | revise | `Draft`/`Step` go in a leaf `store/step.py`, not `store/__init__`. Build stage 1 (move the helpers). Stage 2 (one-line arms) waits for a decision. |
+
+**Layout ruling.** Everything that produces the next Snapshot (arms, helpers, the tail run after
+every arm) lives in B9's `store/` package. Domain packages (`board/`, `channels/`) own records,
+projections, text and logs. The reasons:
+- `_apply` is the audit point.
+- A reducer module outside `store/` would cycle through `store/__init__`.
+- B6's helper set reaches approvals and concerns.
+
+This is not the refuted global core/shell split: it is one package for one function.
+
+**D-c, clarified.** D-c holds for every `outcomes` that matches on the intent. B4's snapshot diff
+over `commands` meets D-c's purpose (no arm can change a persisted record unseen) by
+construction. Its one open edge is the `isinstance(intent, CommandsRestored)` test, and a test
+pins it.
+
+**D-d (operator, 2026-11-07).** Keep the functional style, and enforce its purity and
+exhaustiveness claims by test rather than prose:
+- `test_layers` follows imports transitively;
+- the open matches are closed or pinned;
+- the large files split along the measured seams, keeping the `match`;
+- every duplicated shell copy is merged or pinned.
+
+**Build order (Round 4).** The operator confirmed it on 2026-11-07, recorded in the session's
+premises as `002-build-the-designs.md`:
+1. Widen `test_layers` transitively, keyed by the disk reader reached (today approval, boardlog,
+   ondisk, settings), store submodules included. It is its own commit, and a hard prerequisite
+   for B1, B5's last step and B9's package move.
+2. B2 steps 0-5.
+3. B4.
+4. B2 step 6 (boardlog).
+5. B1.
+6. B3.
+7. B2 step 7 (settings).
+8. B6: pins, then `ids.py`.
+9. B6: the rename to `channels/log.py`, then the records module.
+10. B5 steps 1-2.
+11. B7: pins, then the text modules, then the tool table.
+12. B9 stages 0-1, taking over B6's reducer step.
+13. B6's remaining steps.
+14. B5's two `gate/` steps, last.
+
+Deferred: B9 stage 2 and B6's methods-to-functions step.
+
+**Decisions owed to the operator, raised by the designs.** Each is asked before its step starts:
+- B2: should the UI-thread saves (`settings`, `sessions`) fsync before renaming?
+- B2: should `replace` keep the file's original mode? Every rename-based save now leaves 0600.
+- B2: should `create_once` drop its `durable` flag, which only tests set?
+- B9: should `_peer_waking` and `_moved` close their open `case _`, or be pinned as deliberate?
+- B9: should stage 2 (one-line arms) be built?
+
+**Records corrected.**
+- `001-build-rounds.md` says Round 2 was committed "including the deferred A4". It meant the
+  authority covered A4; A4 is committed in Round 3.
+- Commits 6fd7798 and 7165768 carry exact late-evening times earlier than the branch's creation.
+  That was the operator's instruction at the time. From Round 2 on, commits use real timestamps.
+
+**Defects the designs found** (all reproduced by probes, not yet fixed):
+- `brief.write_entry` can give two entries the same number when an existing entry cannot be read.
+- One non-UTF-8 entry blocks every later brief write.
+- Rename-based saves leave files at mode 0600.
+- `test_board_pane.py:3289` cites `store._restore`, which does not exist.
+- `effects.py:622` cites `bus.wake_lines`, which does not exist.
+
 ## Defects found on the way
 
 These are not refactor scope. Round 1 takes the first four.

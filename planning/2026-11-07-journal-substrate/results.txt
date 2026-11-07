@@ -1,0 +1,56 @@
+scratch: /tmp/claude-1000/b1-readback-2vt25xgk
+python 3.11.2
+1. proto bodies against HEAD's, after the stated substitutions
+  ok   decode: body equals HEAD's
+  ok   read: body equals HEAD's
+2. a board log HEAD wrote: every kind, awkward values
+  ok   what this build wrote is byte-for-byte golden[board] (HEAD 66af79e's) -- 133 files
+  ok   HEAD read is whole and returns what was appended (133 records)
+  ok   proposed read equals HEAD read (records and damage)
+  ok   reading changed no file
+  ok   each record read back re-encodes to its file's bytes
+  ok   a log appended from the proposed read is byte-for-byte HEAD's (names and bytes) -- 133 files, 23538 bytes
+  ok   every Known kind and RecordingStopped and Unrecognised appear -- 23
+3. hand-written files no current append produces (older or foreign writers)
+  ok   proposed read equals HEAD read -- HEAD: 4 records, damage None
+4. damaged board logs: the same break and the same words
+  ok   torn -- damage Damage(ordinal=1, reason='no terminator: the write did not finish', unread=1)
+  ok   missing ordinal -- damage Damage(ordinal=1, reason='missing', unread=2)
+  ok   not json -- damage Damage(ordinal=1, reason='not JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)', unread=0)
+  ok   not an object -- damage Damage(ordinal=0, reason='not a JSON object', unread=0)
+  ok   no kind -- damage Damage(ordinal=0, reason='no kind', unread=0)
+  ok   time not a number -- damage Damage(ordinal=0, reason='at: not a number', unread=0)
+  ok   time too large -- damage Damage(ordinal=0, reason='at: too large to be a time', unread=0)
+  ok   field of the wrong shape -- damage Damage(ordinal=0, reason='task-claimed.task_id: not text', unread=0)
+  ok   required field missing -- damage Damage(ordinal=0, reason='task-claimed: no task_id', unread=0)
+  ok   not utf-8 -- damage Damage(ordinal=0, reason="UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 50: invalid start byte", unread=0)
+  ok   nested too deep -- damage Damage(ordinal=0, reason='not JSON: nested too deeply to parse', unread=0)
+  ok   over the size limit -- damage Damage(ordinal=0, reason='OSError: over the 1048576 bytes it may be', unread=0)
+  ok   a symlink under a record's name -- damage Damage(ordinal=1, reason='OSError: [Errno 40] Too many levels of symbolic links: "/tmp/claude-1000/b1-readback-2vt25xgk/damage/a symlink under a record\'s name/00000001.json"', unread=0)
+  ok   a directory under a record's name -- damage Damage(ordinal=1, reason='OSError: not a regular file', unread=0)
+  ok   a fifo under a record's name -- damage Damage(ordinal=1, reason='OSError: not a regular file', unread=0)
+  ok   temp files and foreign names beside -- no damage
+  ok   unlistable -- damage Damage(ordinal=0, reason="PermissionError: [Errno 13] Permission denied: '/tmp/claude-1000/b1-readback-2vt25xgk/damage/unlistable'", unread=0)
+5. channel logs HEAD wrote, through FileChannels.append
+  ok   proposed channel read body is HEAD's FileChannels.read but for the path
+  ok   what this build wrote is byte-for-byte golden[channel] (HEAD 66af79e's) -- 19 files
+  ok   HEAD read returns the facts appended (19)
+  ok   proposed read equals HEAD read
+  ok   each file is the fact's encoding, byte for byte
+  ok   reading changed no file
+  ok   judge agrees -- Short(reason='18 record(s) about a link the log never created; its writer stopped: stopped \udc80')
+   damaged channel logs
+  ok   members not a list -- record 1 cannot be read: link-created.members: not a list of text, and 1 after it are withheld
+  ok   charter missing -- record 1 cannot be read: link-created.charter: not text, and 1 after it are withheld
+  ok   time not a number -- record 1 cannot be read: at: not a number, and 1 after it are withheld
+  ok   torn -- record 1 cannot be read: no terminator: the write did not finish, and 1 after it are withheld
+6. board records in a channel's directory (the predicted difference)
+  ok   same facts by type, kind and time
+  ok   judge agrees -- Short(reason='2 record(s) of a kind this build does not define (task-claimed); 1 record(s) about a link the log never created')
+  ok   proposed: each board record is carried as the file's own text
+  ok   HEAD: the non-canonical one is carried re-encoded, not as written (the predicted difference)
+  diff fact 2: HEAD Unrecognised.text='{"kind": "task-claimed", "at": 2.0, "task_id": "t", "by": "b", "by_id": []}'
+             proposed      text='{"at": 2, "kind": "task-claimed", "task_id": "t", "by": "b", "extra": 1}'
+             file bytes          ='{"at": 2, "kind": "task-claimed", "task_id": "t", "by": "b", "extra": 1}'
+
+0 failed
