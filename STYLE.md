@@ -99,8 +99,19 @@ deliberate exceptions, and each one has a reason attached in its own module:
 | `Transcript` | Append-only and internally synchronised (I7). Routing a token stream through the reducer would put one queue item per token on the frame path. |
 | `Bridge` | It *is* the thread boundary. Purity here would fight the threading model I5 exists to protect. |
 
-No `Result`/`Either`. The core is not failure-heavy, and exceptions at the boundary
-are fine.
+No `Result`/`Either` — no generic wrapper type. The core is not failure-heavy, and
+exceptions at the boundary are fine. Where a shell function can fail, what its
+caller has to do about it picks the shape:
+
+- **The caller must act on a refusal:** return a union named for the domain.
+  `boardlog.append` returns `Written | Unwritten`; `sessionfile.read` returns
+  `Found`, whose `Unreadable` is never written over.
+- **The failure only needs showing:** raise. `brief.write_entry` raises `OSError`,
+  because premises that fail to persist are invisible until a worker acts on their
+  absence.
+- **The failure costs only a preference:** swallow it and say so in the docstring.
+  `settings.save` swallows a failed write; a theme that does not persist must not
+  take down a frame.
 
 ---
 
