@@ -1488,7 +1488,7 @@ class AgentSession:
 
         An agent of an earlier run that has not started in this one is
         ``builder, from an earlier run``, as the board names it
-        (``board.rows.role_name``), and that is deliberately not a name anything
+        (``addresses.role_name``), and that is deliberately not a name anything
         routes: a reply to it is answered by ``role_status``, which says why.
         None for a node this session has no name for at all, which includes a
         party the log knew by address and not by id.

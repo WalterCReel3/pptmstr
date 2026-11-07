@@ -73,6 +73,7 @@ from typing import TYPE_CHECKING, Any, Protocol, assert_never
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from . import brief, drawable, ids
+from .addresses import role_name
 from .board import graph
 from .board.digest import (
     EARLIER_INCIDENTS,
@@ -101,7 +102,6 @@ from .board.rows import (
     all_writers_label,
     ended_label,
     foreign_wait_label,
-    role_name,
     stale_label,
     version_label,
 )
@@ -1308,8 +1308,8 @@ def _delimited_task(row: BoardTask) -> BoardTask:
     reader of the field tells there is none.
 
     The owner is only made one line. A role name is the address the bus routes
-    to and the board's own words for a holder it cannot name (``board.rows.UNKNOWN``,
-    ``board.rows.FOREIGN``); between quotes those would read as something an agent
+    to and the board's own words for a holder it cannot name (``addresses.UNKNOWN``,
+    ``addresses.FOREIGN``); between quotes those would read as something an agent
     wrote.
     """
 

@@ -3183,7 +3183,7 @@ class Task:
 
 
 # What an agent of an earlier run of its session is called on every surface, after
-# its address (``Snapshot.of_earlier_run``). ``board.rows.FOREIGN`` is the same
+# its address (``Snapshot.of_earlier_run``). ``addresses.FOREIGN`` is the same
 # qualifier in space; this one is in time.
 #
 # It says "run" and not "restart" because two things end a run and only one of

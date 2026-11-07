@@ -75,6 +75,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import assert_never
 
+from ..addresses import role_name
 from ..command import CommandState
 from ..model import (
     CLOSED_BY_OPERATOR,
@@ -95,7 +96,6 @@ from .rows import (
     BoardTask,
     board_tasks,
     incidents,
-    role_name,
     unrun_ledger,
 )
 from .words import basis_label, not_run_label
@@ -141,7 +141,7 @@ class TaskChange:
     kind: ChangeKind
     task_id: TaskId
     title: str
-    # Who finished it, or who replaced its specification (``rows.OPERATOR`` when
+    # Who finished it, or who replaced its specification (``addresses.OPERATOR`` when
     # no agent did), under the name the board gives them. None for a declaration
     # and for a release: the record keeps the set of agents that ever gave a task
     # back and not which of them did so last, so naming one would be a guess.

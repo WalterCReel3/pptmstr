@@ -7,8 +7,8 @@ agents both read them, one module per requirement.
   ``incident_marker``. Each takes a value, not a snapshot, so it imports nothing
   from pptmstr at runtime.
 - ``rows``: the task and concern rows -- ``board_tasks``, ``board_concerns``,
-  ``unrun_ledger``, ``incidents`` -- and the names a board gives its participants
-  (``role_name``). Reads a ``Snapshot``.
+  ``unrun_ledger``, ``incidents``. Reads a ``Snapshot``. The names a board gives
+  its participants (``role_name``) are ``addresses``', which the board log shares.
 - ``graph``: the dependency graph's questions over the rows -- ``why_blocked``,
   ``ready``, ``open_tasks``, ``dry_run_declare``.
 - ``digest``: one round as a digest over the rows and words -- ``digest``,

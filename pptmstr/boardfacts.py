@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from typing import TypeVar, assert_never
 
 from . import boardlog
-from .board.rows import address_in_session
+from .addresses import address_in_session
 from .boardlog import Clock, Record
 from .intents import (
     AgentFinished,
@@ -672,7 +672,7 @@ def _address(snap: Snapshot, node: NodeId | None) -> str:
     What ``node``'s own session calls it, or the empty string when nothing there
     answers to it.
 
-    The address alone (``board.rows.address_in_session``), so the answer never
+    The address alone (``addresses.address_in_session``), so the answer never
     carries a qualifier a board puts after a name -- for another session's
     agent, for one of an earlier run -- nor the board's word for a node with no
     record: each is something a board says about a node, and written as an

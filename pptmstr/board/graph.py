@@ -26,7 +26,8 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from pptmstr.board.rows import BoardTask, board_tasks, role_name
+from pptmstr.addresses import role_name
+from pptmstr.board.rows import BoardTask, board_tasks
 from pptmstr.effects import TaskWriteSettled
 from pptmstr.intents import TaskDeclared
 from pptmstr.model import (
@@ -109,7 +110,7 @@ class Hop:
     One task on a path from the task asked about to a root.
 
     ``state`` and ``holder`` are None for an id this board has no task for.
-    ``holder`` is the name a reader can address (``rows.role_name``), never a
+    ``holder`` is the name a reader can address (``addresses.role_name``), never a
     NodeId. ``edge`` is the wait that led here from the hop before it.
     """
 

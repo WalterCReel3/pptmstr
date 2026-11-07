@@ -2796,7 +2796,7 @@ def _addresses_of(board: boardlog.Board, session_id: str) -> dict[str, str | Non
     be handed that address back, and nothing else may take it either.
 
     Built by ``naming.reserved``, as the board's own copy of this table is from
-    the ``Restore.parties`` the store makes of the same log (``board.rows._addresses``):
+    the ``Restore.parties`` the store makes of the same log (``addresses._addresses``):
     the driver allocates from this one and the board names agents from that one,
     so they have to be one table.
     """

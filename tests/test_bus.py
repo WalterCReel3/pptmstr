@@ -2458,7 +2458,7 @@ def test_rows_survive_a_board_whose_structure_alone_exceeds_the_ceiling() -> Non
 def _team(store: Store) -> None:
     """
     The records a role name is derived from. Without them every owner and sender
-    renders as ``board.rows.UNKNOWN``, which is honest and says nothing about whether a
+    renders as ``addresses.UNKNOWN``, which is honest and says nothing about whether a
     row names the right agent.
     """
     from pptmstr.intents import AgentSpawned

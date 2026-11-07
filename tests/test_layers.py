@@ -15,7 +15,8 @@ for-what-they-require.md``, T3, T7 and A7). Ten are checked here:
 4. A module the docstrings or ``STYLE.md`` call pure calls no clock.
 5. ``bus`` and ``commandbus`` import nothing of each other (A6).
 6. ``naming`` imports nothing from pptmstr, so it reaches neither ``board`` nor
-   ``ui`` (A1).
+   ``ui``, and no name ``naming`` or ``addresses`` holds is imported through
+   ``board`` (A1).
 7. ``serialworker`` imports nothing from pptmstr (B3).
 8. ``ids`` imports nothing from pptmstr and calls no clock, and it is the one
    module that imports ``uuid`` or ``secrets`` (B6).
@@ -346,6 +347,8 @@ class Claim:
 NO_IMGUI: dict[str, Claim] = {
     # approval.py:4
     "pptmstr.approval": Claim("pptmstr/approval.py", "No SDK and no UI"),
+    # addresses.py:16
+    "pptmstr.addresses": Claim("pptmstr/addresses.py", "Imports no imgui"),
     # board/rows.py:24
     "pptmstr.board.rows": Claim("pptmstr/board/rows.py", "Imports no imgui"),
     # board/digest.py:67
@@ -765,6 +768,11 @@ PURE: dict[str, Claim] = {
     "pptmstr.effects": Claim("pptmstr/effects.py", "``_apply`` is a pure function"),
     # boardfacts.py:2
     "pptmstr.boardfacts": Claim("pptmstr/boardfacts.py", "Pure: two snapshots and the intent"),
+    # addresses.py:15
+    "pptmstr.addresses": Claim(
+        "pptmstr/addresses.py",
+        "Pure: every function here reads one ``Snapshot`` and nothing else -- no clock, no IO",
+    ),
     # board/graph.py:5
     "pptmstr.board.graph": Claim(
         "pptmstr/board/graph.py", "Every function here is pure over one ``Snapshot``"
@@ -884,21 +892,45 @@ def _is_board(target: str) -> bool:
     return target == BOARD or target.startswith(BOARD + ".")
 
 
+# The names that left ``board`` for the module that holds them, by that module.
+MOVED_OUT_OF_BOARD: dict[str, frozenset[str]] = {
+    "pptmstr.naming": frozenset({"LEAD", "ROOT_NAMES", "address_for", "reserved"}),
+    "pptmstr.addresses": frozenset(
+        {
+            "role_name",
+            "_role_within_session",
+            "address_in_session",
+            "restored_table",
+            "_addresses",
+            "UNKNOWN",
+            "FOREIGN",
+            "OPERATOR",
+        }
+    ),
+}
+
+
 def test_nothing_reaches_a_moved_name_through_board() -> None:
     """
-    No shim: a name ``naming`` holds is imported from it, never from the ``board``
-    package or any module in it.
+    No shim: a name ``naming`` or ``addresses`` holds is imported from it, never
+    from the ``board`` package or any module in it. Each name is checked to be
+    defined where the table says, so a rename there cannot leave this vacuous.
     """
-    moved = {"LEAD", "ROOT_NAMES", "address_for", "reserved"}
+    for home, names in MOVED_OUT_OF_BOARD.items():
+        assert names <= _defined_at_top(
+            home
+        ), f"{home} no longer defines {names - _defined_at_top(home)}"
     found = [
-        f"{module} line {node.lineno}"
+        f"{module} line {node.lineno}: {alias.name} (held by {home})"
         for module in modules()
         for node in ast.walk(tree_of(module))
         if isinstance(node, ast.ImportFrom)
         and _is_board(_from(module, modules()[module].name == "__init__.py", node))
-        and any(alias.name in moved for alias in node.names)
+        for alias in node.names
+        for home, names in MOVED_OUT_OF_BOARD.items()
+        if alias.name in names
     ]
-    assert not found, "imports a naming name through board: " + ", ".join(found)
+    assert not found, "imports a moved name through board: " + ", ".join(found)
 
 
 # -- 7. serialworker imports nothing of pptmstr ------------------------------------

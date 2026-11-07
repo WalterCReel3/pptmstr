@@ -3439,8 +3439,7 @@ def _named_alike(run: _Process, session_id: str) -> dict[tuple[str, str | None],
     checked that the driver, the board and the log's record agree on it and that
     the address routes back to the node.
     """
-    from pptmstr import boardfacts
-    from pptmstr.board import rows
+    from pptmstr import addresses, boardfacts
 
     session = run.sessions[(session_id, None)]
     snap = run.state.store.snapshot()
@@ -3449,7 +3448,7 @@ def _named_alike(run: _Process, session_id: str) -> dict[tuple[str, str | None],
         node = record.node_id
         routed = session.role_of(node)
         assert routed is not None
-        assert rows.role_name(snap, node, session_id) == routed
+        assert addresses.role_name(snap, node, session_id) == routed
         assert boardfacts._address(snap, node) == routed
         assert session.resolve_role(routed) == node
         names[node] = routed
@@ -3480,7 +3479,7 @@ def test_an_agent_has_one_name_on_every_surface_across_two_restarts(tmp_path: Pa
     process is told two agents answered to ``builder`` and reserves the name of
     neither's successor.
     """
-    from pptmstr.board import rows
+    from pptmstr import addresses
 
     session_id, _ = _first_run(tmp_path)
     old = (session_id, _BUILDER)
@@ -3492,7 +3491,7 @@ def test_an_agent_has_one_name_on_every_surface_across_two_restarts(tmp_path: Pa
         _claims(second, new, "t-4")
         assert _named_alike(second, session_id) == {new: "builder-2"}
         snap = second.state.store.snapshot()
-        assert rows.role_name(snap, old, session_id) == f"builder, {BEFORE_RESTART}"
+        assert addresses.role_name(snap, old, session_id) == f"builder, {BEFORE_RESTART}"
 
     with _Process(tmp_path) as third:
         third.launch(resume=session_id)
@@ -3502,8 +3501,8 @@ def test_an_agent_has_one_name_on_every_surface_across_two_restarts(tmp_path: Pa
         newest = _start_builder(third, session_id, "agent-new-2")
         assert _named_alike(third, session_id) == {newest: "builder-3"}
         snap = third.state.store.snapshot()
-        assert rows.role_name(snap, new, session_id) == f"builder-2, {BEFORE_RESTART}"
-        assert rows.role_name(snap, old, session_id) == f"builder, {BEFORE_RESTART}"
+        assert addresses.role_name(snap, new, session_id) == f"builder-2, {BEFORE_RESTART}"
+        assert addresses.role_name(snap, old, session_id) == f"builder, {BEFORE_RESTART}"
 
 
 def _logged_team():  # type: ignore[no-untyped-def]
@@ -3554,8 +3553,7 @@ def test_the_driver_the_board_and_the_log_name_every_agent_alike_in_any_start_or
     """
     import asyncio
 
-    from pptmstr import app, boardfacts, boardlog
-    from pptmstr.board import rows
+    from pptmstr import addresses, app, boardfacts, boardlog
     from pptmstr.intents import BoardRestored
     from pptmstr.templates import FEATURE
 
@@ -3574,7 +3572,7 @@ def test_the_driver_the_board_and_the_log_name_every_agent_alike_in_any_start_or
         store.apply(intent)
     clock = boardlog.Clock(wall=5_000.0, monotonic=100.0)
     store.apply(BoardRestored(sid, logged, clock), now=clock.monotonic)
-    assert rows.restored_table(store.snapshot(), sid) == session._restored
+    assert addresses.restored_table(store.snapshot(), sid) == session._restored
     assert session._restored == {"builder": "old-1", "builder-2": "old-2", "reviewer": None}
 
     for agent_id, agent_type in order:
@@ -3587,7 +3585,7 @@ def test_the_driver_the_board_and_the_log_name_every_agent_alike_in_any_start_or
         for record in snap.subagents_of((sid, None)):
             node = record.node_id
             names[node[1]] = session.role_of(node)
-            assert rows.role_name(snap, node, sid) == names[node[1]]
+            assert addresses.role_name(snap, node, sid) == names[node[1]]
             assert boardfacts._address(snap, node) == names[node[1]]
             assert session.resolve_role(names[node[1]] or "") == node
         assert len(set(names.values())) == len(names)
@@ -3596,7 +3594,11 @@ def test_the_driver_the_board_and_the_log_name_every_agent_alike_in_any_start_or
             assert names["old-2"] == "builder-2"
         # The agent that has not come back is named alike too, and unroutably.
         gone = f"builder, {BEFORE_RESTART}"
-        assert session.role_of((sid, "old-1")) == rows.role_name(snap, (sid, "old-1"), sid) == gone
+        assert (
+            session.role_of((sid, "old-1"))
+            == addresses.role_name(snap, (sid, "old-1"), sid)
+            == gone
+        )
         assert session.resolve_role(gone) is None and session.resolve_role("builder") is None
 
     assert set(names.values()) == {"builder-2", "builder-3", "builder-4", "reviewer-2"}
@@ -3630,7 +3632,7 @@ def test_a_session_relaunched_in_the_same_window_carries_on_from_its_own_table(
     -- the earlier agent's name -- while the board called the new one
     ``builder-2``.
     """
-    from pptmstr.board import rows
+    from pptmstr import addresses
     from pptmstr.model import AgentState
 
     with _Process(tmp_path) as run:
@@ -3646,7 +3648,7 @@ def test_a_session_relaunched_in_the_same_window_carries_on_from_its_own_table(
         assert ended.nodes[first].state is AgentState.CANCELLED
         # Ended, and still of the run the store has for the session: nothing is
         # of an earlier run until the session is announced again.
-        assert rows.role_name(ended, first, session_id) == "builder"
+        assert addresses.role_name(ended, first, session_id) == "builder"
 
         run.launch(resume=session_id)
         run.frame()
@@ -3656,11 +3658,15 @@ def test_a_session_relaunched_in_the_same_window_carries_on_from_its_own_table(
         second = _start_builder(run, session_id, "agent-b")
         snap = run.state.store.snapshot()
 
-        assert relaunched.role_of(second) == rows.role_name(snap, second, session_id) == "builder-2"
+        assert (
+            relaunched.role_of(second)
+            == addresses.role_name(snap, second, session_id)
+            == "builder-2"
+        )
         assert relaunched.resolve_role("builder-2") == second
         gone = f"builder, {BEFORE_RESTART}"
         assert snap.of_earlier_run(first) and not snap.of_earlier_run(second)
-        assert relaunched.role_of(first) == rows.role_name(snap, first, session_id) == gone
+        assert relaunched.role_of(first) == addresses.role_name(snap, first, session_id) == gone
         assert relaunched.resolve_role("builder") is None and relaunched.resolve_role(gone) is None
 
         # Woken by the relaunched run under the id it had: the same name again,

@@ -39,8 +39,8 @@ from imgui_bundle import imgui
 
 from .. import boardsync, sessionfile
 from .. import brief as brief_mod
+from ..addresses import role_name
 from ..approval import Policy
-from ..board.rows import role_name
 from ..journal import files
 from ..model import (
     AgentRecord,

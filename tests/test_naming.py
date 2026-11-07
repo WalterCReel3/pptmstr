@@ -7,8 +7,7 @@ from __future__ import annotations
 import inspect
 import itertools
 
-from pptmstr import driver
-from pptmstr.board import rows
+from pptmstr import addresses, driver
 from pptmstr.naming import ROOT_NAMES, address_for, reserved
 
 
@@ -60,4 +59,4 @@ def test_the_driver_and_the_board_share_the_root_names_and_the_allocator() -> No
     assert driver.address_for is address_for
     source = inspect.getsource(driver.AgentSession._address_for)
     assert "return address_for(" in source and "while" not in source
-    assert "address_for(" in inspect.getsource(rows._addresses)
+    assert "address_for(" in inspect.getsource(addresses._addresses)

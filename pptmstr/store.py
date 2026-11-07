@@ -32,9 +32,10 @@ from types import MappingProxyType
 from typing import Literal, assert_never
 
 from . import drawable
+from .addresses import role_name
 from .approval import Policy, Summary, peer_channel, summary_of
 from .board.digest import digest
-from .board.rows import board_concerns, board_tasks, role_name
+from .board.rows import board_concerns, board_tasks
 from .boardlog import Board, Party, RestoredConcern, RestoredDecision, RestoredTask
 from .channels.records import (
     EVERY_CHANNEL,
@@ -3876,7 +3877,7 @@ def _owing_decisions(world: Snapshot) -> Snapshot:
 
     A second step over a built snapshot and not a branch of ``_needs_you``,
     because a decision's row names its asker's role and the tasks it blocks, and
-    both are projections of a whole snapshot (``board.rows.role_name``,
+    both are projections of a whole snapshot (``addresses.role_name``,
     ``Task.belongs_to``). The common case -- no decision open -- returns
     ``world`` itself.
 

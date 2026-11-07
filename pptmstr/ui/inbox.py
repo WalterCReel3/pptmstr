@@ -44,8 +44,8 @@ from typing import Any, assert_never
 from imgui_bundle import imgui
 
 from .. import approval
+from ..addresses import role_name
 from ..approval import DiffText, command_shown, diff_line_kind, edited_provenance
-from ..board.rows import role_name
 from ..bridge import Bridge
 from ..command import (
     COMMAND_TAG,
