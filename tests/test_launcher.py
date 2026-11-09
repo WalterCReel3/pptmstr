@@ -23,7 +23,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pptmstr import cli_version, sandbox, templates
+from pptmstr import cli_version, templates
+from pptmstr.gate import sandbox
 from pptmstr.gate.policy import Policy
 from pptmstr.model import LaunchSpec
 from pptmstr.model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
@@ -1682,7 +1683,7 @@ def test_the_mode_is_refused_for_pptmstrs_own_source_tree() -> None:
 
     Under this mode the sandbox's writable region *is* the session's cwd, and its
     protected paths do not cover ordinary project source -- so a session launched here
-    could rewrite the ``approval.py`` that gates the next one.
+    could rewrite the ``pptmstr/gate/`` that gates the next one.
     """
     assert launcher.refusal_for(INSIDE_THE_CHECKOUT) is not None
 
@@ -1818,7 +1819,7 @@ def test_the_dial_does_not_understate_what_the_top_rung_grants(
     the rung adds is behind its question mark, derived from the classifier by
     ``widgets.gate_adds`` rather than written out, which is what stops it
     understating a rung that later grows: the former hand-written label could be
-    widened by an edit to ``approval.py`` alone.
+    widened by an edit to ``gate/tools.py`` alone.
     """
     lines, behind = _explained(
         monkeypatch,

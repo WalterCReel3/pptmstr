@@ -417,3 +417,38 @@ above is `approval.py`'s when the text was written.
 | `approval._FileState` | `gate.diff._FileState` |
 | `approval._edit_refusal` | `gate.diff._edit_refusal` |
 | `approval._unified` | `gate.diff._unified` |
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py` and `sandbox.py`. B5's last
+step (`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what
+was left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`,
+`park`) and deleted it, and moved `sandbox.py` to `pptmstr/gate/sandbox.py`
+unchanged. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `_READS_ONLY_ITS_OPERANDS` (in `approval.py`) | `gate.reach._READS_ONLY_ITS_OPERANDS` |
+| `_RECORD_ROOTS` (in `approval.py`) | `gate.reach._RECORD_ROOTS` |
+| `_SUBJECT_KEPT` (in `approval.py`) | `gate.rows._SUBJECT_KEPT` |
+| `_WRITE_ONLY_ROOTS` (in `approval.py`) | `gate.reach._WRITE_ONLY_ROOTS` |
+| `_named_places` (in `approval.py`) | `gate.reach._named_places` |
+| `_permissive_admits` (in `approval.py`) | `gate.classify._permissive_admits` |
+| `_policy_admits` (in `approval.py`) | `gate.classify._policy_admits` |
+| `_row_provenance` (in `approval.py`) | `gate.rows._row_provenance` |
+| `_shell_places` (in `approval.py`) | `gate.reach._shell_places` |
+| `_shipped_skill` (in `approval.py`) | `gate.classify._shipped_skill` |
+| `approval._configuration` | `gate.reach._configuration` |
+| `approval.py` | deleted; its parts are `pptmstr/gate/rows.py`, `reach.py`, `classify.py` and `park.py`, beside the leaves |
+| `approval.summarize` | `gate.park.summarize` |
+| `approval.summary_of` | `gate.park.summary_of`, which leads with the records mark and composes the rest with the pure `gate.rows.compose` |
+| `command_shown` (in `approval.py`) | `gate.rows.command_shown` |
+| `declared_provenance` (in `approval.py`) | `gate.rows.declared_provenance` |
+| `diff_texts` (in `approval.py`) | `gate.park.diff_texts` |
+| `edited_provenance` (in `approval.py`) | `gate.rows.edited_provenance` |
+| `records_read` (in `approval.py`) | `gate.reach.records_read` |
+| `records_written` (in `approval.py`) | `gate.reach.records_written` |
+| `render_diff` (in `approval.py`) | `gate.park.render_diff` |
+| `sandbox.denied_record_writes` | `gate.sandbox.denied_record_writes` |
+| `sandbox.py` | `gate/sandbox.py` |

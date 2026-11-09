@@ -592,3 +592,16 @@ above is `approval.py`'s when the text was written.
 | Cited as | Now |
 |---|---|
 | `approval.requires_containment` | `gate.policy.requires_containment` |
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py`. B5's last step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what was
+left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`, `park`)
+and deleted it. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.py` | deleted; its parts are `pptmstr/gate/rows.py`, `reach.py`, `classify.py` and `park.py`, beside the leaves |
+| `approval.summary_of` | `gate.park.summary_of`, which leads with the records mark and composes the rest with the pure `gate.rows.compose` |

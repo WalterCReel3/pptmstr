@@ -123,7 +123,7 @@ def _channel_refusal(name: str) -> str | None:
     No whitespace, so a name is one word in the sentences that print it. That
     does not stop a name from imitating the mark -- "ops.inside_charter-yes"
     passes -- and nothing here tries to: what keeps the queue row honest is that
-    the row puts the mark before the channel (``approval.summarize``), so a
+    the row puts the mark before the channel (``gate.park.summarize``), so a
     name can only follow it.
     The name is not repeated: a refusal is not a place to print it back.
     """

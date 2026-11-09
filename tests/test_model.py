@@ -9,7 +9,7 @@ function it constrains. The ``LaunchSpec`` tests at the end are here for the sam
 reason: what ``from_record`` declines to carry is a permission decision, and a
 decision expressed only by an absence needs a test that fails when the absence ends.
 
-The last test reaches past this module into ``approval`` and ``driver``, which is why
+The last test reaches past this module into ``gate.classify`` and ``driver``, which is why
 those imports are here: the default policy is declared in three modules and the whole
 value of pinning it is that no one of them can drift alone.
 """
@@ -21,9 +21,10 @@ import inspect
 from collections.abc import Callable
 from typing import Any
 
-from pptmstr.approval import classify
 from pptmstr.driver import AgentSession
+from pptmstr.gate.classify import classify
 from pptmstr.gate.policy import Policy
+from pptmstr.gate.sandbox import containment_settings
 from pptmstr.model import (
     BEFORE_RESTART,
     CLOSED_BY_OPERATOR,
@@ -42,7 +43,6 @@ from pptmstr.model import (
     restored_party,
     written_path,
 )
-from pptmstr.sandbox import containment_settings
 
 
 def test_a_padded_declaration_cannot_miss_the_overlap_check() -> None:
@@ -239,7 +239,7 @@ def test_a_policy_that_defaults_in_a_signature_or_a_field_defaults_to_strict() -
     """
     Four independent spellings of the safe direction, tied together here.
 
-    ``approval.classify``, ``AgentSession.__init__``, ``AgentRecord.policy`` and
+    ``gate.classify.classify``, ``AgentSession.__init__``, ``AgentRecord.policy`` and
     ``LaunchSpec.policy`` each declare what a caller that names no policy is measured
     against, and nothing else makes them agree. The store supplies the keyword on every
     path it owns, so the record's field default is load-bearing only for a hand-built
@@ -263,7 +263,7 @@ def test_a_policy_that_defaults_in_a_signature_or_a_field_defaults_to_strict() -
         return next(f.default for f in dataclasses.fields(record) if f.name == "policy")
 
     defaults = {
-        "approval.classify": declared(classify),
+        "gate.classify.classify": declared(classify),
         "AgentSession.__init__": declared(AgentSession.__init__),
         "AgentRecord.policy": field_default(AgentRecord),
         "LaunchSpec.policy": field_default(LaunchSpec),

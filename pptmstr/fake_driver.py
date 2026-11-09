@@ -32,9 +32,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import brief
-from .approval import diff_texts, summarize
 from .bridge import Bridge
 from .gate.diff import render_texts
+from .gate.park import diff_texts, summarize
 from .intents import (
     AgentFinished,
     AgentSpawned,

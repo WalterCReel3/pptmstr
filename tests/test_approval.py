@@ -15,17 +15,27 @@ from typing import Any
 
 import pytest
 
-from pptmstr import approval
-from pptmstr.approval import (
-    classify,
-    declared_provenance,
-    edited_provenance,
-    render_diff,
-    summarize,
-)
+from pptmstr.channels.records import WITHDRAW_PEER_TOOL
+from pptmstr.gate import classify as gate_classify
+from pptmstr.gate import park as gate_park
+from pptmstr.gate import reach as gate_reach
+from pptmstr.gate import rows as gate_rows
+from pptmstr.gate.classify import classify
 from pptmstr.gate.diff import diff_line_kind
+from pptmstr.gate.park import render_diff, summarize
 from pptmstr.gate.policy import Disposition, Policy, requires_containment
-from pptmstr.gate.tools import AUTO, BUS_AUTO, PEER_MESSAGE_TOOL, REVIEW
+from pptmstr.gate.rows import declared_provenance, edited_provenance
+from pptmstr.gate.tools import (
+    AUTO,
+    AUTONOMOUS_AUTO,
+    BUS_AUTO,
+    FILE_READS,
+    PEER_DECISION_TOOL,
+    PEER_MESSAGE_TOOL,
+    REVIEW,
+    TREE_READS,
+    peer_channel,
+)
 from pptmstr.model import WRITING_TOOLS, written_path
 from pptmstr.shellscan import is_read_only
 
@@ -82,7 +92,7 @@ _UNKNOWN_TOOLS = ("SomeFutureTool", "mcp__server__do_thing", "", "bash", "Bash "
 
 def _known_tools() -> list[str]:
     """
-    Every tool name ``approval`` classifies by name.
+    Every tool name ``gate.classify`` classifies by name.
 
     Read off ``gate.tools``' own sets rather than written out here, so a tool added
     to ``gate/tools.py`` is swept by the policy tests below without anyone
@@ -278,7 +288,7 @@ def test_the_schema_loader_is_auto_approved_at_every_policy() -> None:
     assert classify("WebFetch", {}, Policy.STRICT) is Disposition.REQUIRE_APPROVAL
 
 
-# Tool names this harness offers, written out rather than read off ``approval``.
+# Tool names this harness offers, written out rather than read off ``gate.tools``.
 #
 # The point is the independence. ``_known_tools()`` above is ``AUTO | REVIEW |
 # BUS_AUTO``, so the suite is closed over the module under test and a tool the
@@ -363,7 +373,7 @@ def test_no_tool_this_harness_offers_waits_for_an_operator_under_autonomy(tool: 
 # -- the classification corpus -------------------------------------------------
 
 # Every tool this build classifies, with the disposition it gives today, spelled
-# out by hand rather than derived from `approval`'s frozensets -- a table
+# out by hand rather than derived from `gate.tools`' frozensets -- a table
 # computed from the thing it pins cannot notice that thing moving.
 #
 # This is the whole of the OFF-path evidence for `classify`'s `policy` parameter
@@ -635,7 +645,7 @@ def test_permissive_admits_no_tool_name_the_standing_lists_have_not_heard_of() -
     """
     probe = {"command": "ls -la", "url": "https://example.invalid/", "query": "ruff"}
     candidates = AUTO | REVIEW | BUS_AUTO | {"SomeFutureTool", "mcp__server__do_thing", "", "Bash "}
-    admitted = {tool for tool in candidates if approval._permissive_admits(tool, probe)}
+    admitted = {tool for tool in candidates if gate_classify._permissive_admits(tool, probe)}
     assert admitted == {"Bash"}
     assert admitted <= REVIEW
 
@@ -901,7 +911,7 @@ def test_the_default_policy_is_strict() -> None:
     default from a default someone flipped -- and a flipped default relaxes
     every call site at once, including the two outside the app.
     """
-    default = inspect.signature(approval.classify).parameters["policy"].default
+    default = inspect.signature(gate_classify.classify).parameters["policy"].default
     assert default is Policy.STRICT
 
 
@@ -917,7 +927,7 @@ def test_no_preset_can_admit_a_tool_the_review_list_already_caught() -> None:
     nothing may yield `AUTO_APPROVE`, and the last statement is the bare
     `REQUIRE_APPROVAL` every unrecognised tool falls to.
     """
-    module = ast.parse(Path(approval.__file__).read_text(encoding="utf-8"))
+    module = ast.parse(Path(gate_classify.__file__).read_text(encoding="utf-8"))
     func = next(
         node
         for node in module.body
@@ -1001,12 +1011,12 @@ def test_only_a_bash_command_is_drawn_as_a_command() -> None:
     pane share, and it answers for exactly one argument of one tool: a Write's
     ``content`` is a file and keeps its line breaks as they are.
     """
-    assert approval.command_shown("Bash", "command", "a\nb") == "a\\n\nb"
-    assert approval.command_shown("Bash", "command", "ls") == "ls"
-    assert approval.command_shown("Bash", "description", "a\nb") is None
-    assert approval.command_shown("Write", "content", "a\nb") is None
-    assert approval.command_shown("Write", "command", "a\nb") is None
-    assert approval.command_shown("Bash", "command", ["a"]) is None
+    assert gate_rows.command_shown("Bash", "command", "a\nb") == "a\\n\nb"
+    assert gate_rows.command_shown("Bash", "command", "ls") == "ls"
+    assert gate_rows.command_shown("Bash", "description", "a\nb") is None
+    assert gate_rows.command_shown("Write", "content", "a\nb") is None
+    assert gate_rows.command_shown("Write", "command", "a\nb") is None
+    assert gate_rows.command_shown("Bash", "command", ["a"]) is None
     assert summarize("Bash", {}) == ""
 
 
@@ -1206,7 +1216,7 @@ def test_a_rows_peer_span_is_the_description_it_took_through_the_clip(
     text = {"send_to_peer": "subject", "raise_decision": "question"}.get(tool, "reason")
     called = {**args, text: "x" * subject}
 
-    row = approval.summary_of(
+    row = gate_park.summary_of(
         PEER_MESSAGE_TOOL if tool == "send_to_peer" else f"mcp__pptmstr__{tool}",
         called,
         reaches=_PEER_FORMS,
@@ -1229,29 +1239,60 @@ def test_a_rows_peer_span_is_the_description_it_took_through_the_clip(
 
 def test_a_row_that_reaches_nobody_has_no_peer_span() -> None:
     for reaches in ("it reaches no lead now", None, ()):
-        row = approval.summary_of(
+        row = gate_park.summary_of(
             PEER_MESSAGE_TOOL, {"channel": "brand", "subject": "s"}, reaches=reaches
         )
         assert row.peer is None
-    assert approval.summary_of("Bash", {"command": "ls"}).peer is None
+    assert gate_park.summary_of("Bash", {"command": "ls"}).peer is None
+
+
+# The calls whose row the store composes again (``store.approvals._peer_row``): one
+# that names a peer channel, and a withdrawal of a message to a peer.
+_STORE_RECOMPOSES = (PEER_MESSAGE_TOOL, PEER_DECISION_TOOL, WITHDRAW_PEER_TOOL)
+
+
+def test_the_store_composes_rows_only_for_calls_that_carry_no_records_mark() -> None:
+    """
+    The store composes these rows with no mark (``gate.rows.compose``), where the
+    driver led the same row with the mark ``gate.park`` measured on the disk. The
+    two agree only while neither records check measures a peer tool, and each
+    decides that by the tool's name before it reads an argument: ``records_read``
+    measures the reading tools and ``Bash``, and ``records_written`` a tool
+    ``model.written_path`` names a file of. A peer tool that becomes either fails
+    here, and the store would then have to take the mark from the parked record.
+    """
+    every_name = (
+        AUTO | REVIEW | BUS_AUTO | AUTONOMOUS_AUTO | FILE_READS.keys() | TREE_READS | WRITING_TOOLS
+    )
+    channelled = {"channel": "brand", "question": "q", "subject": "s"}
+    assert {
+        name for name in every_name | {"Bash"} if peer_channel(name, channelled) is not None
+    } | {WITHDRAW_PEER_TOOL} == set(_STORE_RECOMPOSES)
+    for name in _STORE_RECOMPOSES:
+        assert name not in FILE_READS and name not in TREE_READS and name != "Bash", name
+        assert name not in WRITING_TOOLS, name
+        assert written_path(name, {"file_path": "/x", "notebook_path": "/x"}) is None, name
+        for args in ({}, channelled, {"file_path": "/x", "path": "/", "command": "ls"}):
+            for session_id in (None, "s1"):
+                parked = gate_park.summary_of(name, args, session_id=session_id, cwd="/")
+                assert parked == gate_rows.compose(name, args), (name, args, session_id)
 
 
 def test_the_reducers_writing_tool_set_matches_summarizes_own_branch() -> None:
     """
     ``model.WRITING_TOOLS`` is a deliberate copy of the tuple ``summarize`` branches
-    on: the reducer's module graph stops at ``model`` and ``approval`` reads the
-    disk, so the set cannot be imported from here. Deliberate duplication is only
-    safe while something fails when the two drift, and this is that something.
+    on: ``gate.rows`` imports ``model``, so the set cannot be imported from there.
+    Deliberate duplication is only safe while something fails when the two drift,
+    and this is that something.
 
     A tool added to ``summarize`` and not to ``WRITING_TOOLS`` writes a file that is
     measured as no write at all -- silently, and in the direction that makes an
     agent look compliant.
     """
-    tree = ast.parse(Path(approval.__file__).read_text(), filename=approval.__file__)
-    # ``summarize`` is ``summary_of``'s text, and the branches are summary_of's.
-    fn = next(
-        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "summary_of"
-    )
+    tree = ast.parse(Path(gate_rows.__file__).read_text(), filename=gate_rows.__file__)
+    # ``summarize`` is ``gate.park.summary_of``'s text, and the branches are those of
+    # the ``gate.rows.compose`` it calls.
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "compose")
     branches = [
         {e.value for e in cmp.comparators[0].elts if isinstance(e, ast.Constant)}
         for cmp in ast.walk(fn)
@@ -1635,7 +1676,7 @@ def test_what_an_edit_is_said_to_keep_is_what_the_bus_keeps() -> None:
 
 def test_a_draft_the_gate_would_not_call_an_edit_says_nothing() -> None:
     """
-    The gate stamps an edit by ``approval.is_edit``, so a draft that only
+    The gate stamps an edit by ``gate.rows.is_edit``, so a draft that only
     reorders or reformats keeps the mark, and so does the line. Nothing is said
     where the board keeps what is drawn, nor for another tool.
     """
@@ -1690,8 +1731,8 @@ def test_an_edit_is_any_change_in_what_is_sent_as_json(
     an edit, and a change of type is, where Python's equality calls ``1``,
     ``1.0`` and ``True`` one value.
     """
-    assert approval.is_edit(sent, parked) is edited
-    assert approval.is_edit(parked, sent) is edited
+    assert gate_rows.is_edit(sent, parked) is edited
+    assert gate_rows.is_edit(parked, sent) is edited
 
 
 def test_a_change_of_type_alone_is_said_to_change_a_declarations_provenance() -> None:
@@ -1857,7 +1898,7 @@ def test_a_command_for_the_operator_is_never_parked_in_front_of_the_operator(
 
     assert classify(tool, asked, policy) is Disposition.AUTO_APPROVE
     assert tool in BUS_AUTO and tool not in REVIEW
-    assert not approval._permissive_admits(tool, asked)
+    assert not gate_classify._permissive_admits(tool, asked)
 
 
 def test_a_command_tool_has_no_queue_row_of_its_own_wording() -> None:
@@ -1922,13 +1963,13 @@ def _gate(
 
 def test_the_record_roots_are_the_two_the_writers_use() -> None:
     """
-    `approval` spells the two directory names rather than importing the modules
-    that own them, which would close an import cycle. This is what holds the
-    spelling to them.
+    `gate.reach` spells the two directory names rather than importing the modules
+    that own them (the comment above ``_RECORD_ROOTS`` says why). This is what
+    holds the spelling to them.
     """
     from pptmstr import boardsync, sessionfile, settings
 
-    assert tuple(settings.config_dir() / name for name in approval._RECORD_ROOTS) == (
+    assert tuple(settings.config_dir() / name for name in gate_reach._RECORD_ROOTS) == (
         sessionfile.root(),
         boardsync.legacy_root(),
     )
@@ -2176,7 +2217,7 @@ def test_ordinary_reads_are_admitted_as_they_were(tmp_path: Path) -> None:
     beside = _records_root().parent / "sessions-notes" / "x.md"
     for tool, tool_input in [
         ("Read", {"file_path": "/etc/hostname"}),
-        ("Read", {"file_path": "pptmstr/approval.py"}),
+        ("Read", {"file_path": "pptmstr/gate/classify.py"}),
         ("Read", {"file_path": str(beside)}),
         ("Read", {"file_path": str(_records_root().parent / "settings.json")}),
         ("NotebookRead", {"notebook_path": "nb.ipynb"}),
@@ -2403,7 +2444,9 @@ def test_the_admitted_corpus_is_still_admitted_where_no_records_are(
     do with the records: the rule must cost a session that is not near them
     nothing, apart from the commands that name a directory above them.
     """
-    above = approval.records_read("Bash", {"command": command}, session_id=MINE, cwd=str(tmp_path))
+    above = gate_reach.records_read(
+        "Bash", {"command": command}, session_id=MINE, cwd=str(tmp_path)
+    )
 
     got = _gate("Bash", {"command": command}, Policy.PERMISSIVE, cwd=tmp_path)
 
@@ -2430,9 +2473,9 @@ def test_the_reason_says_whose_records_and_where_the_callers_are(tmp_path: Path)
     _my_log()
     read = {"file_path": str(log)}
 
-    known = approval.records_read("Read", read, session_id=MINE, cwd=str(tmp_path))
-    unknown = approval.records_read("Read", read, cwd=str(tmp_path))
-    above = approval.records_read(
+    known = gate_reach.records_read("Read", read, session_id=MINE, cwd=str(tmp_path))
+    unknown = gate_reach.records_read("Read", read, cwd=str(tmp_path))
+    above = gate_reach.records_read(
         "Grep", {"pattern": "x", "path": str(_records_root().parent)}, session_id=MINE
     )
 
@@ -2442,8 +2485,8 @@ def test_the_reason_says_whose_records_and_where_the_callers_are(tmp_path: Path)
     assert "another session's" not in unknown and "a session's records" in unknown
     assert "not known to the gate" in unknown
     assert f"everything under {_records_root().parent}" in above
-    assert approval.records_read("Read", {"file_path": "/etc/hostname"}) is None
-    assert approval.records_read("Write", {"file_path": str(log)}) is None
+    assert gate_reach.records_read("Read", {"file_path": "/etc/hostname"}) is None
+    assert gate_reach.records_read("Write", {"file_path": str(log)}) is None
 
 
 def test_the_queue_row_leads_with_whose_records_a_read_reaches(tmp_path: Path) -> None:
@@ -2494,7 +2537,7 @@ def test_a_command_the_shell_table_refuses_is_not_read_for_paths() -> None:
     """
     command = {"command": f"cat $X {_their_log()}"}
 
-    assert approval.records_read("Bash", command, session_id=MINE) is None
+    assert gate_reach.records_read("Bash", command, session_id=MINE) is None
     assert classify("Bash", command, Policy.PERMISSIVE) is Disposition.REQUIRE_APPROVAL
 
 
@@ -2639,7 +2682,7 @@ def test_the_write_only_root_is_where_briefs_are_written() -> None:
     """
     from pptmstr import brief, settings
 
-    assert tuple(settings.config_dir() / name for name in approval._WRITE_ONLY_ROOTS) == (
+    assert tuple(settings.config_dir() / name for name in gate_reach._WRITE_ONLY_ROOTS) == (
         brief.default_root(),
     )
 
@@ -2674,7 +2717,7 @@ def test_a_brief_is_read_like_any_file_its_parents_by_a_fork_included(tmp_path: 
         ("Glob", {"pattern": "*.md", "path": str(theirs)}),
         ("Grep", {"pattern": "x", "path": str(theirs)}),
     ]:
-        assert approval.records_read(tool, tool_input, session_id=MINE) is None, tool
+        assert gate_reach.records_read(tool, tool_input, session_id=MINE) is None, tool
         assert _gate(tool, tool_input, Policy.AUTONOMOUS, cwd=tmp_path) is (
             Disposition.AUTO_APPROVE
         ), tool
@@ -2687,12 +2730,12 @@ def test_records_written_answers_for_the_write_tools_alone(tmp_path: Path) -> No
     """
     own = str(_my_log())
 
-    assert approval.records_written("Read", {"file_path": own}) is None
-    assert approval.records_written("Bash", {"command": f"echo > {own}"}) is None
+    assert gate_reach.records_written("Read", {"file_path": own}) is None
+    assert gate_reach.records_written("Bash", {"command": f"echo > {own}"}) is None
     assert _gate("Read", {"file_path": own}, Policy.AUTONOMOUS, cwd=tmp_path) is (
         Disposition.AUTO_APPROVE
     )
-    said = approval.records_written("Write", {"file_path": own}, cwd=str(tmp_path))
+    said = gate_reach.records_written("Write", {"file_path": own}, cwd=str(tmp_path))
     assert said is not None
     assert "pptmstr's own records" in said and own in said and str(_records_root()) in said
 
@@ -2769,7 +2812,7 @@ def test_a_parked_call_to_a_peer_names_the_session_it_reaches() -> None:
     RV5 1(c): the store finishes the row with the session at the other end of
     the link (``store.approvals._peer_row``); the channel alone does not say whom.
     """
-    from pptmstr.approval import summarize
+    from pptmstr.gate.park import summarize
     from pptmstr.gate.tools import peer_channel
 
     assert summarize(
@@ -2787,7 +2830,7 @@ def test_a_parked_call_to_a_peer_names_the_session_it_reaches() -> None:
 
 
 def test_a_parked_message_to_a_peer_reads_as_a_message_on_its_channel() -> None:
-    from pptmstr.approval import summarize
+    from pptmstr.gate.park import summarize
 
     assert (
         summarize(
@@ -2856,7 +2899,7 @@ def test_a_withdrawal_names_no_channel_so_the_gate_never_makes_one_up() -> None:
 
 
 def test_a_parked_withdrawal_reads_as_its_message_its_link_and_the_reason_it_sends() -> None:
-    from pptmstr.approval import summarize
+    from pptmstr.gate.park import summarize
 
     args = {"message_id": "c-0123456789ab", "reason": "I asked the wrong lead"}
     assert summarize(_WITHDRAW_PEER, args, reaches="session z", across="brand") == (
@@ -2903,9 +2946,9 @@ def test_a_row_to_a_peer_with_a_long_card_title_keeps_its_subject_whole(
     The subject is what is being sent, so the description of whom gives way
     first: the longest of ``peer_forms`` that leaves the subject whole.
     """
-    from pptmstr.approval import summarize
     from pptmstr.channels.records import PeerIdentity
     from pptmstr.effects import peer_forms, peer_text
+    from pptmstr.gate.park import summarize
 
     peer = PeerIdentity(
         session="0123456789abcdef", title=_LONG_CARD_TITLE, project="brand", held=True
@@ -2950,9 +2993,10 @@ def test_a_row_whose_subject_cannot_fit_beside_any_description_still_keeps_some_
     Past every shortening, the head alone, and the subject keeps
     ``_SUBJECT_KEPT`` characters even where that takes the row past its width.
     """
-    from pptmstr.approval import _SUBJECT_KEPT, summarize
     from pptmstr.channels.records import PeerIdentity
     from pptmstr.effects import peer_forms
+    from pptmstr.gate.park import summarize
+    from pptmstr.gate.rows import _SUBJECT_KEPT
 
     channel = "a" * 30
     subject = "s" * 200

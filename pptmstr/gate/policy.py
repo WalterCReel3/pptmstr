@@ -1,7 +1,7 @@
 """
 The gate's rungs, and what each one asks of a session.
 
-``Disposition`` is what ``approval.classify`` answers; ``Policy`` is the rung it
+``Disposition`` is what ``gate.classify.classify`` answers; ``Policy`` is the rung it
 answers under. ``requires_containment`` and ``inherits_to_subagents`` are
 properties of a rung, so they sit beside it, each a ``match`` closed by
 ``assert_never``.
@@ -68,7 +68,7 @@ class Policy(enum.Enum):
     # judgement rather than a claim that containment buys nothing. What the
     # sandbox bounds is writes and network, which this rung already refuses
     # syntactically. On the read axis it adds exactly one thing: a deny at
-    # `sandbox.DENIED_CREDENTIAL_FILES`' four prefixes, since upstream's sandbox
+    # `gate.sandbox.DENIED_CREDENTIAL_FILES`' four prefixes, since upstream's sandbox
     # read policy is the rest of the computer. Four paths against a rung whose
     # read reach is the filesystem, and whether that key is honoured at all is
     # unmeasured -- 2026-09-03 §11 U1's residue, with
@@ -122,7 +122,7 @@ def requires_containment(policy: Policy) -> bool:
     judgement rather than on containment being free of value. What the sandbox bounds
     is writes and network, which that rung already refuses syntactically. Reads are
     the axis it opens, and containment bounds those only at
-    ``sandbox.DENIED_CREDENTIAL_FILES``' four prefixes -- narrow but not nothing, and
+    ``gate.sandbox.DENIED_CREDENTIAL_FILES``' four prefixes -- narrow but not nothing, and
     itself unmeasured (2026-09-03 §11 U1). Set against an X server connection and a
     venv interpreter that stop working under the sandbox, the rung declines the trade
     and states its cost rather than claiming there is none.

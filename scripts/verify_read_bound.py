@@ -52,7 +52,7 @@ CLI's normal permission flow.
 sandboxed.** `Read` and `Grep` run in the CLI process, which the sandbox does not
 contain, so enabling it on those arms would add a variable that cannot move the
 result. `Bash` is the opposite case: the sandbox is the only thing that ever bounded
-it, so the S-arms apply `sandbox.containment_settings()` -- the configuration that
+it, so the S-arms apply `gate.sandbox.containment_settings()` -- the configuration that
 ships, not a hand-written block -- and pair each with an unsandboxed control.
 
 **Why part two exists at all.** `read-bound-probe` established that a deny rule beats
@@ -72,7 +72,7 @@ it might not be:
     reason to take it.
 
 **Why the credential leg plants a decoy instead of reading a key.** The four paths in
-`sandbox.DENIED_CREDENTIAL_FILES` are real credential locations, and the question is
+`gate.sandbox.DENIED_CREDENTIAL_FILES` are real credential locations, and the question is
 whether a denial at one of them is enforced -- which a file this script wrote and this
 script recognises answers exactly as well as a private key would, and can be answered
 without ever putting a secret on the wire. The decoy is created under `~/.ssh`,
@@ -118,7 +118,7 @@ The arms, and what each one is for:
       The hole is `AUTO` as a frozenset, not one tool. A fix that closes `Read` and
       leaves `Grep` returning the same bytes would look complete and not be.
 
-Part two, every arm a `Bash cat` and every S-arm under `sandbox.containment_settings()`:
+Part two, every arm a `Bash cat` and every S-arm under `gate.sandbox.containment_settings()`:
 
   S0  outside canary, no sandbox, hook allows
       The control. `cat` works and the file is readable; without this an S-arm denial
@@ -223,7 +223,7 @@ from claude_agent_sdk import (  # noqa: E402
 )
 
 from pptmstr.cli_version import read_cli_version, resolve_cli_path  # noqa: E402
-from pptmstr.sandbox import DENIED_CREDENTIAL_FILES, containment_settings  # noqa: E402
+from pptmstr.gate.sandbox import DENIED_CREDENTIAL_FILES, containment_settings  # noqa: E402
 
 # Named so that a stray one after a killed run is obviously this script's and
 # obviously not a key. It is removed in a `finally`; this is the belt to that brace.
@@ -786,7 +786,7 @@ def _verdict_is_denying_it_useful(arms: dict[str, ArmResult]) -> None:
     elif outcome("K1") in DENIALS:
         creds = (
             "ENFORCED -- the ~/.ssh decoy read unsandboxed (K0) and was denied under "
-            "`sandbox.containment_settings()` (K1), while a $HOME decoy on no "
+            "`gate.sandbox.containment_settings()` (K1), while a $HOME decoy on no "
             "credential path read fine under the same settings (K2). So the sandbox is "
             "masking the four named paths specifically rather than withholding the home "
             "directory, which is what §11 U1 was left asking. `credentials.files` is a "
@@ -797,7 +797,7 @@ def _verdict_is_denying_it_useful(arms: dict[str, ArmResult]) -> None:
         creds = (
             "NOT ENFORCED -- the decoy came back under the shipped containment. "
             "`sandbox.credentials.files` is doing nothing on this build, and §8c's "
-            "silent-key-acceptance finding is the likely reason. `sandbox.py`'s "
+            "silent-key-acceptance finding is the likely reason. `gate/sandbox.py`'s "
             "containment would then be protecting nothing at the four paths it names"
         )
     else:
@@ -993,7 +993,7 @@ async def main() -> int:
 
     session_dir = Path(tempfile.mkdtemp(prefix="pptmstr-probe-session-")).resolve()
     outside_dir = Path(tempfile.mkdtemp(prefix="pptmstr-probe-outside-")).resolve()
-    # Under the first entry of `sandbox.DENIED_CREDENTIAL_FILES`, which is the only
+    # Under the first entry of `gate.sandbox.DENIED_CREDENTIAL_FILES`, which is the only
     # way to ask whether that entry is enforced. A decoy this script wrote, never a
     # key: the question is whether the denial fires, and a file with a nonce in it
     # answers that exactly as well as a secret would.

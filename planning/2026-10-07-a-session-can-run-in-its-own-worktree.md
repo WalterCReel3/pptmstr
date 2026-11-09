@@ -965,3 +965,19 @@ None of these was edited.
   Its `~/.pptmstr/worktrees/` convention is ruled out by D4. Its open item 2 is O4 here.
 - `launcher.scan_sessions`' docstring, l.109-111 — "This repo has no worktrees… a choice made on
   the reasoning rather than on a measurement." Both halves are now out of date.
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py` and `sandbox.py`. B5's last
+step (`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what
+was left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`,
+`park`) and deleted it, and moved `sandbox.py` to `pptmstr/gate/sandbox.py`
+unchanged. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.py` | deleted; its parts are `pptmstr/gate/rows.py`, `reach.py`, `classify.py` and `park.py`, beside the leaves |
+| `sandbox.ALLOWED_DOMAIN` | `gate.sandbox.ALLOWED_DOMAIN` |
+| `sandbox.containment_settings` | `gate.sandbox.containment_settings` |
+| `sandbox.py` | `gate/sandbox.py` |

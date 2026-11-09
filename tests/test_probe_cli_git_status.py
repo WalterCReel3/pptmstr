@@ -23,7 +23,7 @@ import pytest
 
 from pptmstr.bridge import Bridge
 from pptmstr.driver import GIT_STATUS_OFF, AgentSession
-from pptmstr.sandbox import containment_settings
+from pptmstr.gate.sandbox import containment_settings
 
 ROOT = Path(__file__).resolve().parent.parent
 

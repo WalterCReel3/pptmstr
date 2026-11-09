@@ -2,7 +2,7 @@
 The texts a parked edit is shown as, and the unified diff drawn from them.
 
 Works on strings alone: the file an edit targets is read in
-``approval.diff_texts``, which builds the ``DiffText`` records this renders.
+``gate.park.diff_texts``, which builds the ``DiffText`` records this renders.
 
 Imports nothing from pptmstr. ``model``'s ``PendingApproval`` carries a
 ``DiffText``, so an edge into the package would close a cycle through it.

@@ -80,7 +80,7 @@ FALLBACK_MODELS: tuple[str, ...] = (
 # ``launcher.LauncherState.policy`` holding a ``Policy`` rather than an index.
 DEFAULT_MODEL = "claude-sonnet-5"
 
-# Left unexpanded for the same reason ``sandbox.DENIED_CREDENTIAL_FILES`` leaves it so:
+# Left unexpanded for the same reason ``gate.sandbox.DENIED_CREDENTIAL_FILES`` leaves it so:
 # expanding it here would put an environment read inside a module-level constant.
 # ``read_credential`` expands it.
 CREDENTIAL_PATH = "~/.claude/.credentials.json"

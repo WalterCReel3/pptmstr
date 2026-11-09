@@ -271,7 +271,7 @@ def test_a_rung_that_releases_writes_pays_for_it_with_containment() -> None:
     requiring the containment that bounds them, which
     ``AgentSession._uncontained_autonomy`` then refuses to start without.
 
-    Both halves are read off ``approval`` rather than listed here, so a fourth rung
+    Both halves are read off ``gate.policy`` rather than listed here, so a fourth rung
     that released writes while answering False to ``requires_containment`` fails
     here, before it could put a reassuring line on the launcher.
     """
@@ -317,7 +317,7 @@ def test_a_rung_that_inherits_bounds_its_fleet_by_approval_or_by_containment() -
     its count. A rung that did neither would be §4's objection with nothing left
     answering it.
 
-    Read off ``approval`` rather than listed here, so a fourth rung has to pick one.
+    Read off ``gate.policy`` rather than listed here, so a fourth rung has to pick one.
     """
     for policy in Policy:
         if not inherits_to_subagents(policy):

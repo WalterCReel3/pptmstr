@@ -21,7 +21,8 @@ import pytest
 from imgui_bundle import imgui as real_imgui
 
 from pptmstr import brief as brief_mod
-from pptmstr import cli_version, sandbox, templates
+from pptmstr import cli_version, templates
+from pptmstr.gate import sandbox
 from pptmstr.gate.policy import Policy
 from pptmstr.model_catalog import DEFAULT_MODEL
 from pptmstr.sessionfile import UnknownPolicy

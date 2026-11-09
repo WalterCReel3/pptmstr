@@ -12,9 +12,9 @@ import dataclasses
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from ..approval import Summary, summary_of
 from ..channels.records import WITHDRAW_PEER_TOOL, PeerRefusal
 from ..effects import peer_forms, peer_identity
+from ..gate.rows import Summary, compose
 from ..gate.tools import peer_channel
 from ..model import AgentRecord, NodeId, PendingApproval, Snapshot, Task, TaskId, TaskState
 
@@ -39,7 +39,12 @@ def _peer_row(snap: Snapshot, pending: PendingApproval) -> PendingApproval:
     the row is rewritten only when a link changes.
 
     The session is said in the longest of its descriptions that leaves the
-    call's subject whole on the row (``effects.peer_forms``, ``summary_of``).
+    call's subject whole on the row (``effects.peer_forms``, ``gate.rows.compose``).
+
+    The row is composed with no records mark. The driver measured one when the
+    call parked (``gate.park.summary_of``), and for every call rewritten here it
+    is none: neither records check measures a peer tool, by its name
+    (``tests/test_approval.py`` pins it).
 
     A withdrawal names a message and no channel, so its link is the one the
     store finds that message on (``Snapshot.parked_link``), and the row names
@@ -60,7 +65,7 @@ def _peer_row(snap: Snapshot, pending: PendingApproval) -> PendingApproval:
         reaches = "will be refused: the link is newer than this call"
     else:
         reaches = peer_forms(peer_identity(snap, route[1][0]))
-    return _summarised(pending, summary_of(pending.tool_name, pending.raw_args, reaches=reaches))
+    return _summarised(pending, compose(pending.tool_name, pending.raw_args, reaches=reaches))
 
 
 def _withdrawal_row(snap: Snapshot, pending: PendingApproval) -> PendingApproval:
@@ -82,14 +87,14 @@ def _withdrawal_row(snap: Snapshot, pending: PendingApproval) -> PendingApproval
             reaches = peer_forms(peer_identity(snap, message.recipient[0]))
     return _summarised(
         pending,
-        summary_of(pending.tool_name, pending.raw_args, reaches=reaches, across=across),
+        compose(pending.tool_name, pending.raw_args, reaches=reaches, across=across),
     )
 
 
 def _summarised(pending: PendingApproval, summary: Summary) -> PendingApproval:
     """
     ``pending`` with ``summary`` as its row, and the span in it of the lead's
-    description (``PendingApproval.summary_peer``), as ``summary_of`` composed
+    description (``PendingApproval.summary_peer``), as ``compose`` composed
     them.
     """
     if summary.text == pending.summary and summary.peer == pending.summary_peer:

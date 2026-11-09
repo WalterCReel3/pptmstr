@@ -25,8 +25,9 @@ from typing import Any
 
 import pytest
 
-from pptmstr import approval, fake_driver
+from pptmstr import fake_driver
 from pptmstr.bridge import Bridge
+from pptmstr.gate import park as gate_park
 from pptmstr.gate.diff import render_texts
 from pptmstr.gate.tools import _BUS_DECLARE, _BUS_POST
 from pptmstr.intents import AgentSpawned, ApprovalRequested, ApprovalResolved, StateChanged
@@ -70,14 +71,14 @@ def parked(tool_name: str, raw_args: Mapping[str, Any], ident: str = "p1") -> Pe
     """
     A parked call as the driver builds one: the texts read once, the string from them.
     """
-    texts = approval.diff_texts(tool_name, raw_args)
+    texts = gate_park.diff_texts(tool_name, raw_args)
     return PendingApproval(
         id=ident,
         node=ROOT,
         tool_name=tool_name,
         tool_use_id=f"tu-{ident}",
         raw_args=raw_args,
-        summary=approval.summarize(tool_name, raw_args),
+        summary=gate_park.summarize(tool_name, raw_args),
         requested_at=0.0,
         diff=render_texts(tool_name, texts),
         texts=texts,

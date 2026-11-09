@@ -18,10 +18,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pptmstr import approval as approval_mod
 from pptmstr import theme as theme_mod
-from pptmstr.approval import summarize
+from pptmstr.gate import park as gate_park
+from pptmstr.gate import rows as gate_rows
 from pptmstr.gate.diff import DiffText, render_texts
+from pptmstr.gate.park import summarize
 from pptmstr.gate.tools import _BUS_DECLARE, _BUS_POST
 from pptmstr.model import (
     AgentRecord,
@@ -783,7 +784,7 @@ def test_an_argument_whose_whitespace_is_its_meaning_keeps_all_of_it() -> None:
         ]
         bash = detail.argument_parts("Bash", {"command": heredoc}, columns)
         # A Bash command as every approval surface draws it (``command_shown``).
-        shown = approval_mod.command_shown("Bash", "command", heredoc)
+        shown = gate_rows.command_shown("Bash", "command", heredoc)
         assert shown is not None and shown.replace("\\n\n", "\n") == heredoc
         assert _kinds(bash)[1] == ("literal", shown)
         spaced = detail.argument_parts("Bash", {"command": "grep  -n   'a  b'"}, columns)
@@ -1308,7 +1309,7 @@ def parked(tool: str, args: dict[str, object], pid: str = "p1") -> ApprovalNeede
     """
     A parked call as the driver builds one: the texts read once, the string from them.
     """
-    texts = approval_mod.diff_texts(tool, args)
+    texts = gate_park.diff_texts(tool, args)
     return ApprovalNeeded(
         node=ROOT,
         since=1.0,
@@ -1729,7 +1730,7 @@ def test_an_argument_of_several_lines_is_set_unbroken_and_the_pane_scrolls_to_it
         rig.frame(snap)
 
     key = (obligation.key, "arguments")
-    shown = approval_mod.command_shown("Bash", "command", command)
+    shown = gate_rows.command_shown("Bash", "command", command)
     assert rig.pane.views.texts(key) == ("command", shown)
     cell = _literal_cell(seam)
     assert cell == 8.0

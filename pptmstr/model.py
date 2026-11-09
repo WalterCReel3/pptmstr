@@ -365,7 +365,7 @@ class PendingApproval:
     # has nothing diff-shaped. Both are carried although one follows from the other:
     # ``diff`` is ``gate.diff.render_texts`` of this, and deriving it on read would put
     # ``difflib`` over a whole file on the frame path for as long as the call is
-    # parked. Built from one ``approval.diff_texts`` call at the construction site,
+    # parked. Built from one ``gate.park.diff_texts`` call at the construction site,
     # so the two cannot describe different reads of the file.
     #
     # Holds the file's whole text, twice for a whole-file Edit, in every snapshot
@@ -805,7 +805,7 @@ class DecisionOwed:
     ``summary`` is composed by the store from structure -- the id, the asker's
     role, the standing, the reversibility, the tasks it blocks, what became of
     the asker -- and holds none of the asker's sentences. The queue draws a
-    summary in its own voice beside ``approval.summarize``'s, so a question shown
+    summary in its own voice beside ``gate.park.summarize``'s, so a question shown
     there would be an agent's text reading as the queue's. The texts are on
     ``decision``, for a surface that marks them as authored.
 
@@ -1179,7 +1179,7 @@ class LaunchSpec:
     # new conversation from the same premises, which is the opposite of this.
     resume: str | None = None
     # The containment configuration as the JSON string `ClaudeAgentOptions.settings`
-    # takes -- what `sandbox.containment_settings` returns -- or None for a launch that
+    # takes -- what `gate.sandbox.containment_settings` returns -- or None for a launch that
     # is not contained. Text rather than anything structured for the reason
     # `driver.AgentSession.containment` gives: several of the keys have no slot in the
     # SDK's `SandboxSettings`.
@@ -2061,10 +2061,10 @@ def normalised_touches(paths: Iterable[str]) -> tuple[str, ...]:
 
 
 # The tools whose approved call writes a named file. Spelled here rather than
-# imported from ``approval``: the reducer's module graph stops at ``model``, and
-# ``approval`` reads the disk. Deliberate duplication, and pinned by a test against
-# ``approval.summarize``'s own branch, because unpinned duplication is the thing
-# that drifts (`STYLE.md` §3).
+# taken from ``gate.rows.compose``, which branches on the same four names:
+# ``gate.rows`` imports ``model``, so the import would close a cycle. Deliberate
+# duplication, and pinned by a test against ``compose``'s own branch, because
+# unpinned duplication is the thing that drifts (`STYLE.md` §3).
 #
 # ``NotebookEdit`` is in the set and carries ``notebook_path`` rather than
 # ``file_path``; reading only ``file_path`` records a notebook write as no write.
@@ -2082,7 +2082,7 @@ class ApprovedWrites:
     eventually read a divergence that is a failed tool call.
 
     **Retained rather than derived, and it is the exception it looks like.**
-    ``approval.render_diff`` reads the current file from disk to build the diff at
+    ``gate.park.render_diff`` reads the current file from disk to build the diff at
     park time, so the "before" state lives only inside the parked record: once the
     write lands there is no snapshot the line counts follow from. `STYLE.md` §1's
     *derive; do not store* asks whether another fact in the same snapshot implies
@@ -2689,7 +2689,7 @@ def kept_provenance(stated: Provenance | None, edited: bool) -> Provenance | Non
     sent, so an edit drops it to unstated, the way an edit drops a basis; the
     channel and the message stay, being what the operator approved whoever
     wrote them. The bus stores this (``bus.declare_task``) and the parked call
-    predicts it from the operator's draft (``approval.edited_provenance``): one
+    predicts it from the operator's draft (``gate.rows.edited_provenance``): one
     rule, so what the operator is told is what is stored.
     """
     if stated is None or not edited or stated.inside_charter is Charter.UNSTATED:
@@ -2736,7 +2736,7 @@ class Provenance:
         """
         The provenance as one line, the way DETAIL shows it: "requested on
         #<channel>, re <message>, inside charter: yes". The queue row says less
-        (``approval.summarize``).
+        (``gate.park.summarize``).
         """
         re = "" if self.re is None else f", re {self.re}"
         return f"requested on #{self.channel}{re}, inside charter: {self.inside_charter.value}"

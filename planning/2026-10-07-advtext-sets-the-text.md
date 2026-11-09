@@ -684,3 +684,16 @@ The same person, in another tree. Each of these is something the seam works arou
 - `Diff.from_texts` on the frame path, with no way to divide it.
 - Adding fonts between frames under a real renderer worked, in one run, where the
   library's docstring says unchecked.
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py`. B5's last step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what was
+left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`, `park`)
+and deleted it. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.diff_texts` | `gate.park.diff_texts` |
+| `render_diff` (in `approval.py`) | `gate.park.render_diff` |

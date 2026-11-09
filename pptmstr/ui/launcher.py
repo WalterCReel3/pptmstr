@@ -35,10 +35,11 @@ from typing import assert_never
 from imgui_bundle import imgui
 
 from .. import brief as brief_mod
-from .. import cli_version, drawable, sandbox, sessionfile, templates, tree
+from .. import cli_version, drawable, sessionfile, templates, tree
 from .. import sessions as sessions_mod
 from .. import worktree as worktree_mod
-from ..approval import classify
+from ..gate import sandbox
+from ..gate.classify import classify
 from ..gate.policy import Disposition, Policy, requires_containment
 from ..model import LaunchSpec, NewWorktree
 from ..model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
@@ -1100,7 +1101,7 @@ def contained_text(directory: LaunchDirectory, layout: GitLayout) -> ContainedTe
 # ``parents[1]`` is the package directory -- this file is ``pptmstr/ui/launcher.py``
 # -- and ``source_tree_of`` widens that to the checkout holding it when there is one.
 # The widening is the load-bearing half: what needs protecting is not only
-# ``approval.py`` but everything beside it that decides what the next launch does.
+# the gate (``pptmstr/gate/``) but everything beside it that decides what the next launch does.
 OWN_CHECKOUT = tree.source_tree_of(str(Path(__file__).resolve().parents[1]))
 
 # ``{named}`` is the directory the refusal is about, in the words the modal uses for
@@ -1116,7 +1117,7 @@ _REFUSAL = (
     "it is inside pptmstr's own checkout, or it is a path that cannot be resolved at "
     "all; the check answers yes to both and cannot tell them apart.\n"
     "under this mode that directory is where an agent writes without being asked, and "
-    "pptmstr's own approval.py is in this checkout."
+    "pptmstr's own gate is in this checkout."
 )
 
 
@@ -1149,7 +1150,7 @@ def refusal_for(
     The sandbox's protected paths cover ``.claude/**``, ``.mcp.json``, ``.git/hooks``
     and ``.git/config`` -- not ordinary project source. ``cwd`` defaults to ``"."``,
     so the default launch would hand an agent that runs ``Bash`` unattended write
-    access to the ``approval.py`` that gates the *next* launch. The alternative
+    access to the ``pptmstr/gate/`` that gates the *next* launch. The alternative
     boundary is "the operator typed a different directory", enforced by nothing.
 
     **The message names two situations because the predicate cannot separate them.**
@@ -3491,7 +3492,7 @@ def boundary_unstated(directory: LaunchDirectory) -> str | None:
 
 
 # A tool name no build knows, handed to the classifier to ask what a rung does with
-# one. ``approval.classify`` parks it at every rung; asking rather than saying so
+# one. ``gate.classify.classify`` parks it at every rung; asking rather than saying so
 # keeps the line under the dial a reading of the classifier, as the probes are.
 _UNKNOWN_TOOL = "pptmstr-probe-of-a-tool-no-build-knows"
 _UNKNOWN_KIND = "a tool this build has never heard of"

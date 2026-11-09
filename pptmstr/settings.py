@@ -154,11 +154,11 @@ class Settings:
     # The MCP servers a session may reach, and the whole of them. `driver` passes
     # these alongside the in-process bus under `strict_mcp_config=True`, so a server
     # the operator has not named here is one no session loads -- which is what keeps
-    # an stdio server out of a process the sandbox does not wrap (`sandbox.py`: "the
+    # an stdio server out of a process the sandbox does not wrap (`gate/sandbox.py`: "the
     # CLI process runs outside the sandbox").
     #
     # Admission is not a widening of the gate. Every `mcp__*` call still reaches
-    # `approval.classify`'s fail-closed fallthrough and parks in front of the
+    # `gate.classify.classify`'s fail-closed fallthrough and parks in front of the
     # operator at every policy, `AUTONOMOUS` included.
     admitted_connectors: tuple[McpConnector, ...] = ()
     # Whether a team session's board is written to disk as it changes and read

@@ -1373,3 +1373,20 @@ above is `approval.py`'s when the text was written.
 | `approval._REVIEW` | `gate.tools.REVIEW` |
 | `approval._BUS_AUTO` | `gate.tools.BUS_AUTO` |
 | `approval._BUS_DECLARE` | `gate.tools._BUS_DECLARE` |
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py` and `sandbox.py`. B5's last
+step (`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what
+was left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`,
+`park`) and deleted it, and moved `sandbox.py` to `pptmstr/gate/sandbox.py`
+unchanged. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.classify` | `gate.classify.classify` |
+| `approval.py` | deleted; its parts are `pptmstr/gate/rows.py`, `reach.py`, `classify.py` and `park.py`, beside the leaves |
+| `containment_settings` (in `sandbox.py`) | `gate.sandbox.containment_settings` |
+| `sandbox.DENIED_CREDENTIAL_FILES` | `gate.sandbox.DENIED_CREDENTIAL_FILES` |
+| `sandbox.py` | `gate/sandbox.py` |

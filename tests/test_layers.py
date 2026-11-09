@@ -8,8 +8,9 @@ for-what-they-require.md``, T3, T7 and A7). Thirteen are checked here:
 1. A module whose docstring says it imports no ImGui imports no ``imgui_bundle``,
    directly in any form, and does not reach it through the imports that run when
    it is imported.
-2. ``store`` imports no module that reads the disk, directly or through the imports
-   that run when it is imported, from whichever of its modules.
+2. ``store`` imports no module that reads the disk or asks it where a path leads,
+   directly or through the imports that run when it is imported, from whichever
+   of its modules.
 3. No module outside ``pptmstr/ui`` imports ``pptmstr.ui``, the two composition
    roots aside.
 4. A module the docstrings or ``STYLE.md`` call pure calls no clock.
@@ -40,7 +41,7 @@ including those inside a function (``lazy``) and those under ``if TYPE_CHECKING:
 covers. Importing the modules would see only the eager edges, and would need a
 working ImGui to see those.
 
-**Every exception is exact, and a stale one fails.** The tree breaks three of these
+**Every exception is exact, and a stale one fails.** The tree breaks two of these
 rules today, and each break is named below with its reason. An exception that no
 longer matches -- the edge gone, or changed kind -- fails with a request to delete
 it, so the lists shrink as the breaks are fixed (A6) rather than outliving them.
@@ -49,7 +50,7 @@ ImGui fails here until its entry goes.
 
 What this cannot see: an import made by ``importlib`` or ``__import__``, a clock
 handed in as a reference and called through another name, and a disk read through
-any call not in ``_DISK_READS``.
+any call not in ``_DISK_READS`` -- or, for the store, not in ``_DISK_TOUCHES``.
 """
 
 from __future__ import annotations
@@ -229,6 +230,7 @@ class Call:
     dotted: str
     function: str
     line: int
+    positional: int = 0
 
 
 def calls(tree: ast.Module, module: str | None = None, is_package: bool = False) -> Iterator[Call]:
@@ -245,9 +247,9 @@ def calls(tree: ast.Module, module: str | None = None, is_package: bool = False)
         if isinstance(node, ast.Call):
             dotted = _dotted(node.func, aliases)
             if dotted is not None:
-                yield Call(dotted, function, node.lineno)
+                yield Call(dotted, function, node.lineno, len(node.args))
             elif isinstance(node.func, ast.Attribute):
-                yield Call(f"?.{node.func.attr}", function, node.lineno)
+                yield Call(f"?.{node.func.attr}", function, node.lineno, len(node.args))
         for child in ast.iter_child_nodes(node):
             yield from visit(child, function)
 
@@ -352,8 +354,6 @@ class Claim:
 
 # Every module whose docstring says it imports no ImGui, with the words that say so.
 NO_IMGUI: dict[str, Claim] = {
-    # approval.py:4
-    "pptmstr.approval": Claim("pptmstr/approval.py", "No SDK and no UI"),
     # addresses.py:16
     "pptmstr.addresses": Claim("pptmstr/addresses.py", "Imports no imgui"),
     # board/rows.py:24
@@ -364,6 +364,14 @@ NO_IMGUI: dict[str, Claim] = {
     "pptmstr.commandtext": Claim("pptmstr/commandtext.py", "Pure functions: no UI, no IO"),
     # shellscan.py:4
     "pptmstr.shellscan": Claim("pptmstr/shellscan.py", "Pure functions: no SDK, no UI, no IO"),
+    # gate/rows.py:4
+    "pptmstr.gate.rows": Claim("pptmstr/gate/rows.py", "Pure: no SDK, no UI, no clock, no IO"),
+    # gate/reach.py:11
+    "pptmstr.gate.reach": Claim("pptmstr/gate/reach.py", "No SDK and no UI"),
+    # gate/classify.py:9
+    "pptmstr.gate.classify": Claim("pptmstr/gate/classify.py", "No SDK and no UI"),
+    # gate/park.py:8
+    "pptmstr.gate.park": Claim("pptmstr/gate/park.py", "No SDK and no UI"),
     # figures/__init__.py:4-5
     "pptmstr.figures.displaylist": Claim(
         "pptmstr/figures/__init__.py",
@@ -537,6 +545,44 @@ def disk_readers() -> frozenset[str]:
     )
 
 
+# Calls that touch the filesystem without reading a file: each asks the disk where a
+# path leads or whether it is there, so what it answers depends on the machine and
+# not on the arguments. The store rule counts these as well as ``_DISK_READS``; the
+# other rules count reads alone. ``settings.config_dir`` is here by its absolute
+# name, since it is the one place the configuration directory is located.
+#
+# ``resolve`` is ``Path.resolve``, which takes no positional argument. Every other
+# ``resolve`` in the tree -- ``Bridge.resolve`` and ``ui.review.resolve``, each called
+# with the approval it settles, and ``figure_host``'s local ``resolve`` -- is called
+# with one, or by a bare name, so only an attribute call with none counts.
+_DISK_TOUCHES = frozenset(
+    {
+        "?.realpath",
+        "?.stat",
+        "?.exists",
+        "?.is_dir",
+        "pptmstr.settings.config_dir",
+        f"{_ONDISK}.read_regular",
+    }
+)
+
+
+def _touches_disk(call: Call) -> bool:
+    if call.dotted in _DISK_TOUCHES:
+        return True
+    name = call.dotted.rpartition(".")[2]
+    if name == "resolve":
+        return "." in call.dotted and call.positional == 0
+    return "." in call.dotted and "?." + name in _DISK_TOUCHES
+
+
+@cache
+def disk_touchers() -> frozenset[str]:
+    return frozenset(
+        module for module in modules() if any(_touches_disk(call) for call in calls_of(module))
+    )
+
+
 STORE = "pptmstr.store"
 
 
@@ -552,17 +598,20 @@ def _walk(
     edges: tuple[Import, ...], known: frozenset[str], inside: Callable[[str], bool]
 ) -> Iterator[tuple[str, Import, list[str]]]:
     """
-    Every import that importing the modules ``inside`` names runs, as ``(importer,
-    edge, path to the importer)``, breadth first from those modules.
+    Every import that the modules ``inside`` names can run, on import or through a
+    call, as ``(importer, edge, path to the importer)``, breadth first from those
+    modules.
 
     An inside module's own imports count whatever their kind: one importing a
     module inside a function or under ``TYPE_CHECKING`` still imports it. Beyond
-    them only eager edges are followed, since a lazy or typing import elsewhere does
-    not run when they are imported.
+    them eager and lazy edges are followed: a lazy import runs when its function
+    is called, and the inside modules call into what they import, so a disk read
+    behind a function-local import is still theirs. Only a ``TYPE_CHECKING``
+    import elsewhere is left out, since it never runs.
     """
     out: dict[str, list[Import]] = {}
     for edge in edges:
-        if edge.target in known and (inside(edge.source) or edge.kind == "eager"):
+        if edge.target in known and (inside(edge.source) or edge.kind != "typing"):
             out.setdefault(edge.source, []).append(edge)
     roots = sorted(module for module in known if inside(module))
     path: dict[str, list[str]] = {module: [module] for module in roots}
@@ -621,25 +670,15 @@ def store_disk_edges(
     return disk_edges(edges, readers, known, in_store, STORE)
 
 
-# Every import of a disk reader that importing the store runs, keyed by the reader and
-# the module that imports it (``store_disk_edges``), with why it is there and the
-# design that removes it. The rule is stated in
+# Every import of a disk reader or toucher that importing the store runs, keyed by the
+# reader and the module that imports it (``store_disk_edges``), with why it is there
+# and the design that removes it. The rule is stated in
 # planning/2026-09-01-the-gates-measurement-outlives-the-approval.md:55-57 ("store.py
 # imports board, effects, intents and model and does not import the shell module that
-# reads disk"), and it does not hold: every edge below is eager and predates this test.
-# B5 is planning/2026-11-07-board-and-gate-packages.md, which deletes approval for gate/
-# and leaves the store importing only its pure modules.
-STORE_DISK_EXCEPTIONS: dict[tuple[str, str], str] = {
-    # store/approvals.py for Summary and summary_of.
-    ("pptmstr.approval", STORE): "approval's render_diff reads the file a write targets"
-    " (``_read``); B5 removes it",
-    # approval.py:30, for config_dir, which approval's records reach resolves.
-    ("pptmstr.settings", "pptmstr.approval"): "settings reads and saves settings.json;"
-    " B5 removes it with approval",
-    # settings.py:28, for replace, which save writes settings.json through.
-    ("pptmstr.ondisk", "pptmstr.settings"): "settings saves settings.json through"
-    " ondisk.replace; B5 removes it with approval",
-}
+# reads disk"). There are none: of the gate, the store imports ``gate.policy``,
+# ``gate.tools`` and ``gate.rows``, and the row's records mark is measured in
+# ``gate.park`` and handed to ``gate.rows.compose``.
+STORE_DISK_EXCEPTIONS: dict[tuple[str, str], str] = {}
 
 
 def test_the_disk_scan_sees_a_reader_and_a_pure_module() -> None:
@@ -676,6 +715,53 @@ def test_a_write_through_ondisk_is_a_disk_call_however_it_is_imported(source: st
 def test_a_method_named_like_an_ondisk_function_is_not_a_disk_call() -> None:
     source = "def w(s): return s.replace('a', 'b'), replace(s), create_once(s)\n"
     assert not any(_reads_disk(call) for call in calls(ast.parse(source), "pptmstr.x"))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from pathlib import Path\ndef w(p): return Path(p).resolve()\n",
+        "def w(base, p): return (base / p).resolve(strict=True)\n",
+        "def w(bold): return bold.resolve()\n",
+        "import os\ndef w(p): return os.path.realpath(p)\n",
+        "import os\ndef w(p): return os.stat(p)\n",
+        "def w(p): return p.exists() or p.is_dir()\n",
+        "from . import settings\ndef w(): return settings.config_dir()\n",
+        "from .settings import config_dir\ndef w(): return config_dir()\n",
+        "from .ondisk import read_regular\ndef w(p): return read_regular(p, 1)\n",
+    ],
+)
+def test_a_call_that_asks_where_a_path_leads_touches_the_disk(source: str) -> None:
+    assert any(_touches_disk(call) for call in calls(ast.parse(source), "pptmstr.x"))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def w(bridge, rid): return bridge.resolve(rid, True)\n",
+        "from .ui import review\ndef w(b, s, p): return review.resolve(b, s, p)\n",
+        "def w(p, q, r): return resolve(p, q, r)\n",
+        "def w(): return exists() or stat() or is_dir()\n",
+    ],
+)
+def test_a_call_named_like_a_path_question_is_not_one(source: str) -> None:
+    """
+    ``Bridge.resolve`` settles an approval, ``ui.review.resolve`` asks it to, and
+    each is called with the approval: a ``?.resolve`` that matched them would put
+    the bridge among the store's disk touchers.
+    """
+    assert not any(_touches_disk(call) for call in calls(ast.parse(source), "pptmstr.ui.x"))
+
+
+def test_the_store_rule_counts_resolve_where_the_tree_resolves_a_path() -> None:
+    """
+    A path the tree resolves is counted, and the approval ``ui.review`` resolves is
+    not.
+    """
+    touchers = disk_touchers()
+    assert {"pptmstr.plugins", "pptmstr.tree", "pptmstr.version"} <= touchers
+    assert "pptmstr.ui.review" not in touchers
+    assert "pptmstr.ui.review" not in disk_readers()
 
 
 def test_every_function_ondisk_offers_is_a_disk_call() -> None:
@@ -717,6 +803,7 @@ def test_the_store_walk_follows_what_importing_the_store_runs() -> None:
             edge("pptmstr.r", "pptmstr.s"),
             edge(STORE, "pptmstr.b"),
             edge("pptmstr.b", "pptmstr.s", "lazy"),
+            edge("pptmstr.b", "pptmstr.r", "typing"),
             edge("pptmstr.store.arms", "pptmstr.s", "typing"),
         ),
         readers=frozenset({"pptmstr.r", "pptmstr.s"}),
@@ -725,13 +812,14 @@ def test_the_store_walk_follows_what_importing_the_store_runs() -> None:
     assert set(found) == {
         ("pptmstr.r", "pptmstr.a"),
         ("pptmstr.s", "pptmstr.r"),
+        ("pptmstr.s", "pptmstr.b"),
         ("pptmstr.s", STORE),
     }
     assert found[("pptmstr.r", "pptmstr.a")][0] == "pptmstr.store.arms"
 
 
 def test_store_reaches_no_module_that_reads_the_disk() -> None:
-    readers = disk_readers()
+    readers = disk_readers() | disk_touchers()
     reading = sorted(module for module in modules() if in_store(module) and module in readers)
     assert not reading, f"{reading} read the disk themselves"
     found = store_disk_edges(imports(), readers, frozenset(modules()))
@@ -850,8 +938,10 @@ PURE: dict[str, Claim] = {
     "pptmstr.commandtext": NO_IMGUI["pptmstr.commandtext"],
     # shellscan.py:4
     "pptmstr.shellscan": NO_IMGUI["pptmstr.shellscan"],
-    # sandbox.py:6
-    "pptmstr.sandbox": Claim("pptmstr/sandbox.py", "no IO, no clock, no launch"),
+    # gate/sandbox.py:6
+    "pptmstr.gate.sandbox": Claim("pptmstr/gate/sandbox.py", "no IO, no clock, no launch"),
+    # gate/rows.py:4
+    "pptmstr.gate.rows": NO_IMGUI["pptmstr.gate.rows"],
     # replies.py:11
     "pptmstr.replies": Claim("pptmstr/replies.py", "Pure: no SDK, no clock, no IO"),
     # board/text.py
@@ -1150,7 +1240,7 @@ def test_channel_facts_reach_no_disk_reader() -> None:
     ``facts`` is the half of a link's log with no disk. Importing it runs
     ``intents`` and ``model``, which import the gate's leaves and no reader, so
     any edge to a reader -- ``facts`` importing ``journal.files``, ``settings`` or
-    ``log`` in any form, or ``model`` importing ``approval`` -- fails.
+    ``log`` in any form, or ``model`` importing ``gate.park`` -- fails.
     """
     readers = disk_readers()
     assert CHANNEL_FACTS in modules() and CHANNEL_FACTS not in readers
@@ -1228,7 +1318,7 @@ BOARD_WORDS = "pptmstr.board.words"
 
 def test_the_board_package_imports_nothing() -> None:
     """
-    ``approval``'s queue rows, the bus and the board's text import
+    ``gate.rows``' queue rows, the bus and the board's text import
     ``board.words``, and importing it runs ``board/__init__`` first. An import
     there would bring ``rows`` -- and ``model`` -- to each of them with the words,
     so the package's ``__init__`` is a docstring only.
@@ -1309,9 +1399,9 @@ def test_the_gate_package_imports_nothing() -> None:
 @pytest.mark.parametrize("home", GATE_LEAVES)
 def test_nothing_reaches_a_gate_leaf_name_through_another_module(home: str) -> None:
     """
-    No shim: ``approval`` imports the leaves and re-exports nothing, so every
-    module imports ``Policy``, ``DiffText``, the tool tables and the rest from the
-    leaf that defines them.
+    No shim: no module re-exports a leaf's name, so every module imports
+    ``Policy``, ``DiffText``, the tool tables and the rest from the leaf that
+    defines them.
     """
     defined = _defined_at_top(home)
     assert defined, f"{home} defines nothing"

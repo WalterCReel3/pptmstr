@@ -15,7 +15,7 @@ from typing import Any, NamedTuple
 import pytest
 from imgui_bundle import imgui as _real_imgui
 
-from pptmstr.approval import summarize
+from pptmstr.gate.park import summarize
 from pptmstr.model import (
     AgentRecord,
     AgentState,
@@ -119,7 +119,7 @@ def test_a_sub_agents_call_is_titled_by_its_session_and_qualified_by_itself() ->
 #
 # Every spawn parks, so the operator answers each one individually. Without a
 # running total twelve individually reasonable yesses add up to a fleet nobody
-# chose -- and `approval.summarize` cannot supply the number, because it is pure and
+# chose -- and `gate.park.summarize` cannot supply the number, because it is pure and
 # is handed a tool name and its arguments and nothing else.
 
 

@@ -60,7 +60,7 @@ captured is a tool call, not a sentence about one.
      *pointer* placed there is a pointer rather than the second copy
      `2026-08-15-an-operator-instruction-the-lead-cannot-see.md` refuses.
   7. **Which tool names does this CLI build offer, and how many has
-     `pptmstr.approval` never heard of?** The size of that gap has been inferred
+     `pptmstr.gate.classify` never heard of?** The size of that gap has been inferred
      twice and the two inferences disagreed, so this arm records the list instead
      of counting it. `message.data["tools"]` on the init message is the
      authoritative array for the *root*. A sub-agent has no init of its own -- see
@@ -298,7 +298,7 @@ def _worker_prompt(name: str, extra: str = "") -> str:
 
 def _unclassified(names: list[str]) -> dict[str, list[str]]:
     """
-    Which of these names `approval.classify` has never heard of.
+    Which of these names `gate.classify.classify` has never heard of.
 
     Split by prefix because the two halves are different questions: an `mcp__`
     name belongs to whichever server this machine happens to have mounted and
@@ -807,7 +807,7 @@ def report_findings(workspace: Path) -> None:
     print(f"  {INIT_SEED:<24}{initial}")
     print(f"  {'':<24}carries the canary: {INITIAL_CANARY in initial}")
 
-    print("\n=== 7. which offered tool names has `approval` never heard of? ===")
+    print("\n=== 7. which offered tool names has `gate.classify` never heard of? ===")
     print(f"  classified by pptmstr.gate.tools (AUTO | REVIEW | BUS_AUTO): {len(CLASSIFIED)} names")
 
     print("\n  -- root/lead: the full offered array, off the init message --")

@@ -10,7 +10,7 @@ cause and the other must hold whatever the cause:
 - **Such a call is drawn**, in both panes that show a parked call and under either
   renderer, with each such code unit written out: as ``\\uXXXX`` (``drawable``)
   in a file's text, and in a Bash command as every approval surface spells a
-  command (``approval.command_shown``: ``\\x00``, ``\\u{DC80}``), and **what
+  command (``gate.rows.command_shown``: ``\\x00``, ``\\u{DC80}``), and **what
   approve releases is the call as the agent made it**: the gate's own answer is
   read back off the real park.
 - **Nothing is approved over a pane that failed to draw**, by key, click or batch,
@@ -32,9 +32,10 @@ from typing import Any
 
 import pytest
 
-from pptmstr import app, approval
+from pptmstr import app
 from pptmstr.bridge import Bridge, Decision
 from pptmstr.driver import AgentSession
+from pptmstr.gate import park as gate_park
 from pptmstr.gate.diff import render_texts
 from pptmstr.intents import AgentSpawned, ApprovalRequested
 from pptmstr.model import NodeId, PendingApproval, Snapshot
@@ -61,14 +62,14 @@ def parked(tool_name: str, raw_args: Mapping[str, Any], ident: str = "p1") -> Pe
     """
     A parked call as the driver builds one: the texts read once, the string from them.
     """
-    texts = approval.diff_texts(tool_name, raw_args)
+    texts = gate_park.diff_texts(tool_name, raw_args)
     return PendingApproval(
         id=ident,
         node=ROOT,
         tool_name=tool_name,
         tool_use_id=f"tu-{ident}",
         raw_args=raw_args,
-        summary=approval.summarize(tool_name, raw_args),
+        summary=gate_park.summarize(tool_name, raw_args),
         requested_at=0.0,
         diff=render_texts(tool_name, texts),
         texts=texts,

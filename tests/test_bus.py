@@ -1190,8 +1190,8 @@ def test_the_stamped_names_are_read_off_the_table_and_the_peer_names_are_on_it()
 
 
 def test_a_message_between_agents_is_reviewed() -> None:
-    from pptmstr.approval import classify
     from pptmstr.bus import qualified
+    from pptmstr.gate.classify import classify
     from pptmstr.gate.policy import Disposition
 
     assert classify(qualified("post_concern"), {}) is Disposition.REQUIRE_APPROVAL
@@ -1203,16 +1203,16 @@ def test_a_declaration_is_reviewed() -> None:
     is where the decision belongs. It was previously auto-approved on the premise
     that the board had already been approved -- and nothing had ever approved it.
     """
-    from pptmstr.approval import classify
     from pptmstr.bus import qualified
+    from pptmstr.gate.classify import classify
     from pptmstr.gate.policy import Disposition
 
     assert classify(qualified("declare_task"), {}) is Disposition.REQUIRE_APPROVAL
 
 
 def test_coordination_is_not_reviewed() -> None:
-    from pptmstr.approval import classify
     from pptmstr.bus import qualified
+    from pptmstr.gate.classify import classify
     from pptmstr.gate.policy import Disposition
 
     # Bookkeeping about work whose existence is now a decision the operator made at
@@ -1237,8 +1237,8 @@ def test_coordination_is_not_reviewed() -> None:
 
 
 def test_a_parked_concern_reads_as_a_message_not_an_argument_dict() -> None:
-    from pptmstr.approval import summarize
     from pptmstr.bus import qualified
+    from pptmstr.gate.park import summarize
 
     row = summarize(
         qualified("post_concern"),
@@ -1253,8 +1253,8 @@ def test_a_parked_declaration_reads_as_the_work_not_an_argument_dict() -> None:
     `mcp__pptmstr__declare_task task_id='t-a1b2'`, which is the serialised argument
     dict this function exists to avoid. The queue is scanned, not read.
     """
-    from pptmstr.approval import summarize
     from pptmstr.bus import qualified
+    from pptmstr.gate.park import summarize
 
     row = summarize(qualified("declare_task"), {"task_id": "t1", "title": "validate the checksum"})
     assert row == "declare (basis unstated) validate the checksum"
@@ -1266,8 +1266,8 @@ def test_a_parked_declaration_carries_its_size() -> None:
     on the row rather than waiting behind it: what it will write, and what it is
     sequenced after.
     """
-    from pptmstr.approval import summarize
     from pptmstr.bus import qualified
+    from pptmstr.gate.park import summarize
 
     row = summarize(
         qualified("declare_task"),
@@ -1285,8 +1285,8 @@ def test_a_parked_declaration_carries_its_size() -> None:
 
 
 def test_a_declaration_with_no_title_is_named_rather_than_blank() -> None:
-    from pptmstr.approval import summarize
     from pptmstr.bus import qualified
+    from pptmstr.gate.park import summarize
 
     assert (
         summarize(qualified("declare_task"), {"task_id": "t1"})
@@ -3749,8 +3749,8 @@ def test_a_digest_does_not_hand_an_agent_a_message_nobody_approved_yet() -> None
     the gate. The reply says who is waiting and for what kind of thing, and none of
     the row.
     """
-    from pptmstr.approval import summarize
     from pptmstr.bus import qualified
+    from pptmstr.gate.park import summarize
     from pptmstr.intents import ApprovalRequested
     from pptmstr.model import PendingApproval
 
@@ -9245,7 +9245,7 @@ def test_a_parked_dry_run_carrying_provenance_shows_both_on_its_row() -> None:
     The row an operator approves a parked dry run from leads with the dry run,
     and still carries where the request came from beside the standing.
     """
-    from pptmstr.approval import summarize
+    from pptmstr.gate.park import summarize
 
     row = summarize(
         "mcp__pptmstr__declare_task",
@@ -9862,11 +9862,11 @@ def test_a_parked_declarations_row_says_dry_run_exactly_when_the_handler_makes_o
 ) -> None:
     """
     The gate auto-approves only a JSON true, so a dry run spelled any other way
-    parks, and the operator approves from ``approval.summarize``'s row. That row
+    parks, and the operator approves from ``gate.park.summarize``'s row. That row
     reads the flag by the handler's rule: a row that read as a declaration for a
     call the handler only rehearses, or the reverse, is approved unseen.
     """
-    from pptmstr.approval import summarize
+    from pptmstr.gate.park import summarize
 
     store = _Recording()
     _graph_store(store)

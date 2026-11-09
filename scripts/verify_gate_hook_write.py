@@ -72,7 +72,7 @@ allow followed by a failure; the raw text is printed, and is the only basis for 
 whether the CLI names a permission rule or the sandbox. This script does not decide
 that from the text beyond flagging the word.
 
-**The offline line** is `approval.classify` and `driver._escapes_write_region` asked
+**The offline line** is `gate.classify.classify` and `driver._escapes_write_region` asked
 directly, with no session. Under AUTONOMOUS it is the claim being checked -- that the
 gate allows every target -- and costs nothing; the session's own `PreToolUse` answers
 are the measurement, and the report says when they disagree. Under STRICT it answers
@@ -122,7 +122,6 @@ from claude_agent_sdk import (  # noqa: E402
 )
 
 from pptmstr import tree  # noqa: E402
-from pptmstr.approval import classify  # noqa: E402
 from pptmstr.bridge import Bridge, Decision  # noqa: E402
 from pptmstr.cli_version import (  # noqa: E402
     SANDBOX_FLOOR,
@@ -131,10 +130,11 @@ from pptmstr.cli_version import (  # noqa: E402
     resolve_cli_path,
 )
 from pptmstr.driver import AgentSession, _escapes_write_region  # noqa: E402
+from pptmstr.gate.classify import classify  # noqa: E402
 from pptmstr.gate.policy import Policy  # noqa: E402
+from pptmstr.gate.sandbox import containment_settings  # noqa: E402
 from pptmstr.intents import AgentFinished, StateChanged, UsageAccrued  # noqa: E402
 from pptmstr.model import AgentState, ApprovalNeeded  # noqa: E402
-from pptmstr.sandbox import containment_settings  # noqa: E402
 from pptmstr.store import Store  # noqa: E402
 
 MODEL = "claude-haiku-4-5-20251001"

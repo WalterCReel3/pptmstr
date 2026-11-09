@@ -1032,7 +1032,7 @@ def test_a_parked_send_names_the_session_it_reaches_and_follows_a_relink() -> No
         .summary.startswith("message the lead on #brand (it reaches no lead now)")
     )
     snap, _, _ = apply(snap, link("k3", "brand", S, C), now=4.0)
-    # The subject outlasts the description of whom (``approval._SUBJECT_KEPT``).
+    # The subject outlasts the description of whom (``gate.rows._SUBJECT_KEPT``).
     assert snap.nodes[LEAD].pending[0].summary == (
         "message the lead on #brand (will be refused: the link is newer than this call): "
         "the hero image"

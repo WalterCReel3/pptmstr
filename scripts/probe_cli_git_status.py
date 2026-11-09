@@ -50,7 +50,7 @@ With ``--pptmstr``, four more arms measure the switch pptmstr now sets
 (``driver.GIT_STATUS_OFF``) through its own option building rather than a direct call:
 
   e-pptmstr-uncontained       the CLI started by the SDK from ``AgentSession._options()``.
-  f-pptmstr-contained         the same, with ``sandbox.containment_settings()``.
+  f-pptmstr-contained         the same, with ``gate.sandbox.containment_settings()``.
   g-pptmstr-vs-settings-env   e, with a ``--settings`` whose ``env`` block sets the
                               variable to the empty string: can an operator's settings
                               undo it?
@@ -78,7 +78,7 @@ loads the tree's ``.claude/settings.json`` (project tier) and
   k1-<event>-contained        UserPromptSubmit) whose command touches a marker inside P
                               and a second outside P, in the fixture's top directory.
                               Launched from pptmstr's options, without and with
-                              ``sandbox.containment_settings()``. The outside marker in
+                              ``gate.sandbox.containment_settings()``. The outside marker in
                               the contained arm asks whether the hook ran inside the
                               sandbox, which would refuse that write.
   k1-<event>-control          the same hook, the CLI started directly.
@@ -407,7 +407,7 @@ def pptmstr_options(fx: Fixture, *, contained: bool, env: dict[str, str] | None 
     The options ``AgentSession.run()`` hands ``ClaudeSDKClient`` for a session in P,
     built by ``AgentSession._options()`` itself and not reproduced here: run() adds
     nothing to them between the refusal checks and the client. ``contained`` gives
-    the session ``sandbox.containment_settings()``, the other shape ``_options``
+    the session ``gate.sandbox.containment_settings()``, the other shape ``_options``
     builds. ``env``, when given, replaces the options' ``env`` field and nothing else;
     ``{}`` is pptmstr's launch shape without the switch.
     """
@@ -415,7 +415,7 @@ def pptmstr_options(fx: Fixture, *, contained: bool, env: dict[str, str] | None 
 
     from pptmstr.bridge import Bridge
     from pptmstr.driver import AgentSession
-    from pptmstr.sandbox import containment_settings
+    from pptmstr.gate.sandbox import containment_settings
 
     session = AgentSession(
         Bridge(),

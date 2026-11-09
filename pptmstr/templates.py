@@ -6,7 +6,7 @@ what the lead is supposed to do with them. The driver turns roles into
 ``AgentDefinition``s and the lead briefing into a system-prompt append; nothing in
 here imports the SDK.
 
-That boundary is deliberate, and it is the same one ``approval.py`` keeps. A
+That boundary is deliberate, and it is the same one ``pptmstr.gate`` keeps. A
 template is configuration -- the kind of thing that eventually comes from a file
 the operator edits -- so it is worth being able to write, read and test one without
 an agent runtime anywhere near it.

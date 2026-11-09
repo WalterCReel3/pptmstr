@@ -38,7 +38,7 @@ from pptmstr.settings import RoleChoice, Settings, legacy_faces
 from pptmstr.store import Store
 from pptmstr.ui.launcher import FailedLaunch
 
-# Stands in for what `sandbox.containment_settings()` returns. Its content does not
+# Stands in for what `gate.sandbox.containment_settings()` returns. Its content does not
 # matter to `_launch` -- it is opaque text that must arrive unchanged -- and a literal
 # keeps these tests from depending on the sandbox module's current spelling.
 CONTAINMENT = '{"sandbox": {"network": {"strictAllowlist": true}}}'
@@ -2005,7 +2005,7 @@ def test_a_contained_launch_into_pptmstrs_own_checkout_starts_nothing(
     The launcher asks whether the directory is pptmstr's own source when the button
     is pressed, and the version read is awaited between that and the session. A spec
     that arrives here contained and pointing inside the checkout -- because the path
-    moved in between -- must not become an unattended session writing ``approval.py``.
+    moved in between -- must not become an unattended session writing ``pptmstr/gate/``.
 
     Refused after the version read and not instead of it, so the question is asked
     as late as this function can ask it.

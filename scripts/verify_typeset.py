@@ -150,7 +150,8 @@ def main() -> int:
     import screenshot
     from imgui_bundle import hello_imgui, imgui, immapp
 
-    from pptmstr import approval, theme
+    from pptmstr import theme
+    from pptmstr.gate import park as gate_park
     from pptmstr.ui import typeset
 
     edit_file = ROOT / "shots" / ".verify-typeset-edit.py"
@@ -158,7 +159,7 @@ def main() -> int:
     edit_file.write_text(BEFORE, encoding="utf-8")
     # Read once, here, as the driver does when a call parks: the seam is handed
     # the texts and opens no file.
-    edit = approval.diff_texts(EDIT[0], {**EDIT[1], "file_path": str(edit_file)})
+    edit = gate_park.diff_texts(EDIT[0], {**EDIT[1], "file_path": str(edit_file)})
 
     cache = typeset.ViewCache()
     parts = tuple(

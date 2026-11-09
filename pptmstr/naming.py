@@ -7,9 +7,8 @@ the board log and the board share it without any of them importing the others,
 and it is held by ``tests/test_layers.py``.
 
 What a node in a snapshot is called on a board (``addresses.role_name``) is not here.
-It reads a ``Snapshot``, and ``model`` reaches ``board`` through ``approval``'s
-lazy imports, so a module that imports ``model`` cannot be one that ``board``'s
-importers use to avoid ``board``.
+It reads a ``Snapshot``, which needs ``model``, and this module imports nothing
+from pptmstr.
 """
 
 from __future__ import annotations

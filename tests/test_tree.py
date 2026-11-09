@@ -353,7 +353,7 @@ def test_an_installed_package_answers_with_its_own_directory(tmp_path: Path) -> 
     Installed, there is no checkout at all: the parent is ``site-packages``, a
     directory of unrelated projects. Claiming it as pptmstr's tree would refuse every
     launch inside any of them, and what is actually being protected -- the
-    ``approval.py`` that gates the next launch -- is inside the package either way.
+    ``pptmstr/gate/`` that gates the next launch -- is inside the package either way.
     """
     site = tmp_path / "site-packages"
     package = _package_in(site)

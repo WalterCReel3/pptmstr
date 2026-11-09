@@ -14,7 +14,7 @@ skills load exactly as they do without it: any value of ``skills`` makes the SDK
 pass ``--setting-sources=user,project``, which drops ``settings.local.json``
 (notes/vector-rendering/probe-skills.md §2).
 
-No SDK import here: ``approval`` reads ``SKILLS``, and it stays free of the SDK.
+No SDK import here: ``gate.classify`` reads ``SKILLS``, and it stays free of the SDK.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ FIGURES = "pptmstr-figures"
 SKILLS = frozenset({f"{NAME}:{FIGURES}"})
 """
 Every skill the shipped plugin holds, as a ``Skill`` call names it
-(``tool_input["skill"]``). ``approval.classify`` admits exactly these, by
+(``tool_input["skill"]``). ``gate.classify.classify`` admits exactly these, by
 equality, so a name that merely starts with the prefix is not one of them.
 """
 

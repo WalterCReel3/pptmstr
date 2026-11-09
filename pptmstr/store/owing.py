@@ -355,7 +355,7 @@ def _decision_summary(world: Snapshot, decision: Decision) -> str:
     asker wrote as prose.
 
     The queue draws a summary in its own colour and font beside
-    ``approval.summarize``'s rows, the detail pane puts it on the clipboard and
+    ``gate.park.summarize``'s rows, the detail pane puts it on the clipboard and
     the digest draws it as one of its own items. A question shown there -- or its
     first line -- is an agent's sentence in the operator's own voice, and
     "Bash  git push --force  (approved)" is a sentence an agent can write. So the

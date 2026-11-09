@@ -43,9 +43,7 @@ from typing import Any, assert_never
 
 from imgui_bundle import imgui
 
-from .. import approval
 from ..addresses import role_name
-from ..approval import command_shown, edited_provenance
 from ..bridge import Bridge
 from ..command import (
     COMMAND_TAG,
@@ -58,7 +56,9 @@ from ..command import (
 )
 from ..commandrun import environment_changes, kill_line, look_line
 from ..effects import peer_identity, peer_text
+from ..gate import park
 from ..gate.diff import DiffText, diff_line_kind
+from ..gate.rows import command_shown, edited_provenance, is_edit
 from ..gate.tools import states_provenance
 from ..intents import HeldMailDismissed, PeerQuestionDismissed, WakeChainReleased
 from ..model import (
@@ -218,7 +218,7 @@ _DECLARE_TASK = "mcp__pptmstr__declare_task"
 # A declaration's provenance (``channel``, ``re``, ``inside_charter``) heads it
 # beside the title, when it is given: on a reviewed rung it is what the operator
 # judges a peer's request on, and the row's summary carries its mark and channel
-# (``approval.summarize``).
+# (``gate.park.summarize``).
 DESCRIBED: dict[str, tuple[str, tuple[str, ...]]] = {
     _POST_CONCERN: ("body", ("to", "subject", "task_id")),
     _DECLARE_TASK: (
@@ -337,7 +337,7 @@ UNSUPERVISED = "STILL RUNNING, unsupervised · "
 
 def command_summary(command: Command) -> str:
     """
-    A command's queue row: ``approval.summarize`` of it as a Bash call, which
+    A command's queue row: ``gate.park.summarize`` of it as a Bash call, which
     is how a Bash approval's row is made, behind how it stands. The string is
     the one that would run or is running.
 
@@ -347,7 +347,7 @@ def command_summary(command: Command) -> str:
     row's body has it whole.
     """
     run = command.run
-    said = approval.summarize("Bash", {"command": command.asked if run is None else run.text})
+    said = park.summarize("Bash", {"command": command.asked if run is None else run.text})
     if command.unsupervised is not None:
         return UNSUPERVISED + said
     if run is None:
@@ -1186,7 +1186,7 @@ def spawn_marker(snap: Snapshot, obligation: Obligation) -> str | None:
 
     The row this qualifies reads ``spawn builder: <description>``, which is a
     reasonable thing to say yes to twelve times in a row while nobody ever decides
-    to run twelve. ``approval.summarize`` cannot supply the number -- it is pure,
+    to run twelve. ``gate.park.summarize`` cannot supply the number -- it is pure,
     and is handed a tool name and its arguments and nothing else -- so the shell
     renders it from the snapshot it already holds.
 
@@ -1637,7 +1637,7 @@ def argument_parts(
     A call's arguments as one document: each name dim and tight over its value,
     which is set whitespace-exact and broken to the window at any column. A
     Bash command is ``command`` where it is given (``review.shown_command``)
-    and otherwise ``approval.command_shown`` of the value, as on every approval
+    and otherwise ``gate.rows.command_shown`` of the value, as on every approval
     surface: broken at the edge, a break the command makes would otherwise be
     one the window made.
 
@@ -1764,7 +1764,7 @@ def _field_column(names: Iterable[str]) -> float:
 def edit_provenance(state: review.ReviewState, pending: PendingApproval) -> str | None:
     """
     What approving the operator's draft does to the provenance the call states
-    (``approval.edited_provenance``), or None: with no draft, with one that does
+    (``gate.rows.edited_provenance``), or None: with no draft, with one that does
     not parse -- ``review.resolve`` sends nothing then -- and where the board
     keeps what is drawn.
 
@@ -1797,7 +1797,7 @@ def edit_withheld(state: review.ReviewState, pending: PendingApproval) -> bool:
     its editor -- ``e`` on another row moves the editor and keeps this one's text --
     and then ``a`` approves something other than the diff above it.
 
-    Whether the draft differs is ``draft_is_edit``'s: ``approval.is_edit``, the
+    Whether the draft differs is ``draft_is_edit``'s: ``gate.rows.is_edit``, the
     rule the gate stamps by.
     """
     draft = state.edits.get(pending.id)
@@ -1824,7 +1824,7 @@ def withheld_notice(draft: str) -> str:
 def draft_is_edit(draft: str, pending: PendingApproval) -> bool:
     """
     Whether approving ``draft`` sends something other than the call as the agent
-    made it: ``approval.is_edit`` of the draft as ``review.resolve`` parses it
+    made it: ``gate.rows.is_edit`` of the draft as ``review.resolve`` parses it
     and the arguments the gate parked, the rule the gate stamps
     ``bus.EDITED_KEY`` by. A draft that only reflows or reorders the JSON is not
     an edit; one that changes a value's type is.
@@ -1844,7 +1844,7 @@ def draft_is_edit(draft: str, pending: PendingApproval) -> bool:
     if parsed is None:
         return True
     parked = review.parse_edit(review.pretty_args(pending))
-    return parked is None or approval.is_edit(parsed, parked)
+    return parked is None or is_edit(parsed, parked)
 
 
 def refusals(pending: PendingApproval) -> tuple[str, ...]:
@@ -2072,7 +2072,7 @@ def _command_text(
     tool_name: str | None, key: str, value: object, command: str | None
 ) -> str | None:
     """
-    An argument as ``approval.command_shown`` draws it, or ``None`` for one that
+    An argument as ``gate.rows.command_shown`` draws it, or ``None`` for one that
     is not a Bash command: ``command`` where it is given, which is of the
     command as sent (``review.shown_command``), and otherwise of ``value``.
     """
@@ -2088,7 +2088,7 @@ def argument_rows(tool_name: str, args: Mapping[str, Any], command: str | None =
     The arguments of a call with no diff, as the items ``_native_arguments``
     draws, each wrapped to the pane.
 
-    A Bash command is drawn as ``approval.command_shown`` spells it, a row for
+    A Bash command is drawn as ``gate.rows.command_shown`` spells it, a row for
     every line of it under its key, each line but the last ending in the
     newline marker: in a body that wraps, a break the command makes and one the
     pane makes are otherwise the same thing on screen, and a second command

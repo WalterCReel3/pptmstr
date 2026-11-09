@@ -81,7 +81,7 @@ own to write the worktree's `.git` pointer file or the main repo's `.git/config`
 arm isolates the CLI's behaviour from the gate's.
 
 **Where the launch differs from `AgentSession._options`.** Same: `settings` is
-`sandbox.containment_settings()`, `sandbox` is left None, `permission_mode` is
+`gate.sandbox.containment_settings()`, `sandbox` is left None, `permission_mode` is
 `dontAsk`, a `stderr` callback is set, cwd is the directory under test. Different: no
 `agents`, no `system_prompt`, no `mcp_servers` / `strict_mcp_config` (so the user's
 own MCP configuration loads), no `session_id`, no `thinking` or partial messages, the
@@ -147,7 +147,7 @@ from claude_agent_sdk import (  # noqa: E402
 )
 
 from pptmstr.cli_version import read_cli_version, resolve_cli_path  # noqa: E402
-from pptmstr.sandbox import containment_settings  # noqa: E402
+from pptmstr.gate.sandbox import containment_settings  # noqa: E402
 
 MODEL = "claude-haiku-4-5-20251001"
 NETWORK_REMOTE = "https://github.com/octocat/Hello-World.git"

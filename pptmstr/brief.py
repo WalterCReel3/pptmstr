@@ -120,9 +120,9 @@ def default_root() -> Path:
     CLI's transcript slug cannot be reproduced past 200 characters, where it carries
     a hash the CLI and the SDK compute differently.
 
-    **A root of its own, not ``sessions/<id>/brief``.** ``sandbox`` denies the whole
+    **A root of its own, not ``sessions/<id>/brief``.** ``gate.sandbox`` denies the whole
     ``sessions`` tree to a contained ``Bash`` command, the session's own directory
-    included, and ``approval.records_read`` denies one session another's directory
+    included, and ``gate.reach.records_read`` denies one session another's directory
     there. A worker lists and reads its premises, and a fork reads its parent's,
     so either denial would cut a team off from its brief.
 

@@ -18,7 +18,7 @@ Two kinds of loss are being repaired here, and only one is about pixels:
 
 * **Pixel clipping.** ``ellipsis`` in the row, ``ChildFlags_.borders`` bodies of a
   fixed height, and no wrap in the expanded raw-args fallback.
-* **Clipping at the source.** ``approval.summarize`` cuts to 90 characters before
+* **Clipping at the source.** ``gate.park.summarize`` cuts to 90 characters before
   the store ever sees the string, so for a Bash call the summary in the row is a
   *lossy* rendering of ``raw_args["command"]`` and no amount of window width
   recovers it. The arguments block below is the only place the full call exists.
@@ -82,12 +82,12 @@ from typing import Any, assert_never
 from imgui_bundle import imgui
 
 from .. import drawable
-from ..approval import command_shown, declared_provenance
 from ..bridge import Bridge
 from ..channels.records import WITHDRAW_PEER_TOOL, Channel, ThreadMark, ThreadWakeHeld
 from ..command import CommandId
 from ..effects import peer_identity, peer_text
 from ..gate.diff import DiffText, diff_line_kind
+from ..gate.rows import command_shown, declared_provenance
 from ..gate.tools import PEER_DECISION_TOOL, PEER_MESSAGE_TOOL
 from ..ids import is_concern_id
 from ..model import (
@@ -1416,7 +1416,7 @@ def shown_value(tool_name: str, key: str, value: Any) -> str:
     An argument as this pane draws it: `render_value`, except for the one
     argument that is run rather than read.
 
-    A Bash command goes through ``approval.command_shown``. This pane wraps,
+    A Bash command goes through ``gate.rows.command_shown``. This pane wraps,
     so a command's own line break and one the pane made at its edge are the
     same thing on screen unless the command's is marked; the marker ahead of
     each real break is what tells them apart. The clipboard copy
@@ -1603,7 +1603,7 @@ def _value_text(
     """
     ``shown_value`` for a pane that breaks literal text at its edge and nowhere else.
 
-    A Bash command is ``approval.command_shown``'s, as on every approval surface:
+    A Bash command is ``gate.rows.command_shown``'s, as on every approval surface:
     ``command`` where it is given (``review.shown_command``, of the command as
     sent), and otherwise of ``value``.
     Any other string is itself. Anything else is still its Python literal, quoting intact,
@@ -1629,7 +1629,7 @@ def edit_differs(state: review.ReviewState, pending: PendingApproval) -> bool:
     an open editor does not excuse it: the editor is in the row, and the diff here
     is still of the original while it is being typed in.
 
-    Whether the draft differs is ``inbox.draft_is_edit``'s: ``approval.is_edit``,
+    Whether the draft differs is ``inbox.draft_is_edit``'s: ``gate.rows.is_edit``,
     the rule the gate stamps by.
     """
     draft = state.edits.get(pending.id)

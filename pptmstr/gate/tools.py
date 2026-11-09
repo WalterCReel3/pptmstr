@@ -2,8 +2,8 @@
 The tool names the gate knows, and the tables that sort them.
 
 ``AUTO``, ``BUS_AUTO``, ``REVIEW`` and ``AUTONOMOUS_AUTO`` say which calls run
-unattended on which rung (``approval.classify``); ``FILE_READS`` and
-``TREE_READS`` are the reading tools whose paths ``approval.records_read``
+unattended on which rung (``gate.classify.classify``); ``FILE_READS`` and
+``TREE_READS`` are the reading tools whose paths ``gate.reach.records_read``
 measures. The predicates here read a tool's name and its arguments and nothing
 else.
 

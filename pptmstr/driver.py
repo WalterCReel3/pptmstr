@@ -55,20 +55,16 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import SystemPromptCustom, SystemPromptPreset
 
 from . import commandbus, ids, plugins
-from .approval import (
-    classify,
-    diff_texts,
-    is_edit,
-    records_read,
-    records_written,
-    summarize,
-)
 from .bridge import Bridge
 from .bus import CALLED_AT_KEY, EDITED_KEY, FROM_KEY, SERVER_NAME, build_server, offered_tools
 from .cli_version import BelowFloor, MeetsFloor, Unreadable, VersionRead, check_floor
 from .figures import fences
+from .gate.classify import classify
 from .gate.diff import render_texts
+from .gate.park import diff_texts, summarize
 from .gate.policy import Disposition, Policy, inherits_to_subagents, requires_containment
+from .gate.reach import records_read, records_written
+from .gate.rows import is_edit
 from .intents import (
     AgentFinished,
     AgentResumed,
@@ -152,7 +148,7 @@ MAX_STREAM_FRAME = 64 * 1024 * 1024
 # return <settings>.includeGitInstructions ?? true``). A setting therefore loses to
 # any value of the variable the operator's shell exports, while ``options.env`` is
 # merged over the inherited environment by the transport and so replaces that value.
-# The setting would also have to be spliced into ``sandbox.containment_settings``'s
+# The setting would also have to be spliced into ``gate.sandbox.containment_settings``'s
 # string and would give an uncontained launch a ``--settings`` flag it does not have.
 #
 # What this does not reach: a settings file's own ``env`` block, which the CLI applies
@@ -1118,7 +1114,7 @@ class AgentSession:
         self.cwd = cwd
         self.session_base = session_base
         # §8's containment configuration as the JSON string ``settings`` takes -- what
-        # ``sandbox.containment_settings`` returns -- or None for a launch that is not
+        # ``gate.sandbox.containment_settings`` returns -- or None for a launch that is not
         # contained. Carried as text rather than as anything structured because three of
         # §8's keys have no slot in the SDK's ``SandboxSettings``; the comment in
         # ``_options`` says why the typed field must stay unset. Read through the
@@ -2025,7 +2021,7 @@ class AgentSession:
         Its own sentence because ``_no_reviewer_reason``'s would send the agent
         the wrong way under ``AUTONOMOUS``: that one says the tool is one this
         build does not recognise and to use a tool it does, and here the tool is
-        ``Read`` and the path is what was refused. ``approval.records_read`` says
+        ``Read`` and the path is what was refused. ``gate.reach.records_read`` says
         which path and where the session's own records are; this adds only why
         nobody was asked, in ``_no_reviewer_reason``'s two cases and its order.
         """
@@ -2551,7 +2547,7 @@ class AgentSession:
             # delete the whole containment with no error. It could not carry a
             # replacement either: `SandboxSettings` has no `failIfUnavailable` or
             # `credentials`, and `SandboxNetworkConfig` no `strictAllowlist`
-            # (pptmstr/sandbox.py).
+            # (pptmstr/gate/sandbox.py).
             #
             # Piping the CLI's error stream is what this field is for: the transport
             # passes `stderr=PIPE` only when a callback is set, so without one every
@@ -2586,7 +2582,7 @@ class AgentSession:
             # so they park in front of the operator at every policy, `AUTONOMOUS`
             # included, and no policy can widen that. What a config file can do that
             # the gate does not see is *connect*: an stdio server named there is
-            # spawned by the CLI process, which `sandbox.py` records as running outside
+            # spawned by the CLI process, which `gate/sandbox.py` records as running outside
             # the sandbox. That happens before any tool call exists, so the gate never
             # gets a say and `toggle_mcp_server` cannot undo it. Naming the admitted
             # set here is what keeps an unadmitted server from ever starting.
@@ -2803,13 +2799,13 @@ class AgentSession:
         string reaches the CLI as the flag's value and counts as present here.
 
         Only ``app._launch`` supplies the value and it supplies
-        ``sandbox.containment_settings()`` or ``None``, so neither blank reaches
+        ``gate.sandbox.containment_settings()`` or ``None``, so neither blank reaches
         this from the application: the edge is the guard's own, not a route in.
 
         So this does not establish a working sandbox, or a sandbox at all. The
         string is not parsed: ``"{}"`` passes, as would a string that is not JSON
         or one whose JSON names no sandbox key. That the string is the one
-        ``sandbox.containment_settings`` builds is a property of the single call
+        ``gate.sandbox.containment_settings`` builds is a property of the single call
         site that supplies it, ``app._launch``, and not of this check.
 
         Whether the CLI honours the keys inside it is a different question again,

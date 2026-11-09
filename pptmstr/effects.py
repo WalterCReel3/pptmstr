@@ -201,7 +201,7 @@ def peer_forms(peer: PeerIdentity) -> tuple[str, ...]:
     the whole one, then the session head and a title cut to
     ``PEER_SHORT_TITLE_CHARS``, then the head alone. For a row that must keep
     something else whole and says whom it reaches in what room is left
-    (``approval.summarize``).
+    (``gate.park.summarize``).
     """
     forms = (
         peer_text(peer),

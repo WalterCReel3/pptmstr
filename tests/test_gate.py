@@ -16,9 +16,9 @@ from pathlib import Path
 import pytest
 
 from pptmstr import driver as driver_module
-from pptmstr.approval import classify
 from pptmstr.bridge import Bridge, Decision
 from pptmstr.driver import AgentSession
+from pptmstr.gate.classify import classify
 from pptmstr.gate.policy import Disposition, Policy
 from pptmstr.model import AgentState
 from pptmstr.store import Store
@@ -1154,7 +1154,7 @@ def test_a_spawn_from_inside_a_subagent_stays_out_of_the_spawn_ledger(bridge: Br
 
 # -- the session's policy, and its scope --------------------------------------
 #
-# What a preset *admits* is `approval.classify`'s business and is pinned in
+# What a preset *admits* is `gate.classify.classify`'s business and is pinned in
 # test_approval.py. What is pinned here is the driver's half: which policy each
 # node's call is classified under, and that nothing but the operator ever
 # changes which policy a session holds (2026-09-21 -- see the comment at the
@@ -1165,7 +1165,7 @@ def test_a_spawn_from_inside_a_subagent_stays_out_of_the_spawn_ledger(bridge: Br
 # `classify` so that these tests state a fact about the gate rather than about
 # whichever preset happens to be filled in -- a behavioural test written against
 # the real PERMISSIVE arm would assert nothing on the day that arm is empty, and
-# would start silently re-testing `approval.py` on the day it is not.
+# would start silently re-testing `gate/classify.py` on the day it is not.
 
 
 def _watch_policies(monkeypatch: pytest.MonkeyPatch) -> list[Policy]:

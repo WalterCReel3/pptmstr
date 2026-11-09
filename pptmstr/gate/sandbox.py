@@ -172,7 +172,7 @@ def containment_settings() -> str:
     **This bounds a ``Bash`` command and nothing else.** The CLI's ``Read``, ``Grep``
     and ``Glob`` run in the CLI's own process and follow permission rules; upstream
     says in so many words that a ``denyRead`` entry does not stop the ``Read`` tool.
-    What stands in front of those is the gate: ``approval.records_read`` takes a
+    What stands in front of those is the gate: ``gate.reach.records_read`` takes a
     read of another session's records off the allowlist on every rung, and leaves
     the session's own readable, which this entry does not.
 

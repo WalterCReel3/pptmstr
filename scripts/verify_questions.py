@@ -75,7 +75,8 @@ from claude_agent_sdk import (  # noqa: E402
     UserMessage,
 )
 
-from pptmstr.approval import classify, render_diff, summarize  # noqa: E402
+from pptmstr.gate.classify import classify  # noqa: E402
+from pptmstr.gate.park import render_diff, summarize  # noqa: E402
 
 CASES: dict[str, tuple[str, str]] = {
     # name: (permission_mode, prompt)

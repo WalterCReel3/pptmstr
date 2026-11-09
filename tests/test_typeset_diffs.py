@@ -23,7 +23,8 @@ import imscribe
 import pytest
 from imscribe import Diff, RowKind
 
-from pptmstr import approval, theme
+from pptmstr import theme
+from pptmstr.gate import park as gate_park
 from pptmstr.gate.diff import DiffText
 from pptmstr.model import NodeId, PendingApproval
 from pptmstr.ui import typeset
@@ -115,13 +116,13 @@ def test_a_write_over_a_file_that_could_not_be_read_says_so_instead_of_calling_i
     target = tmp_path / "blob.bin"
     target.write_bytes(b"\xff\xfe\x00\x80binary")
     over = typeset.diff_model(
-        approval.diff_texts("Write", {"file_path": str(target), "content": "text\n"}) or ()
+        gate_park.diff_texts("Write", {"file_path": str(target), "content": "text\n"}) or ()
     )
     assert "not readable as text" in over.files[0].label
     assert rows(over, RowKind.ADD) == ["text"]
 
     fresh = typeset.diff_model(
-        approval.diff_texts("Write", {"file_path": str(tmp_path / "no"), "content": "t\n"}) or ()
+        gate_park.diff_texts("Write", {"file_path": str(tmp_path / "no"), "content": "t\n"}) or ()
     )
     assert "not readable" not in fresh.files[0].label
 
@@ -129,7 +130,7 @@ def test_a_write_over_a_file_that_could_not_be_read_says_so_instead_of_calling_i
 def test_an_edit_that_applies_is_numbered_as_the_file_is(tmp_path: Path) -> None:
     target = tmp_path / "a.py"
     target.write_text("".join(f"line {n}\n" for n in range(1, 41)))
-    texts = approval.diff_texts(
+    texts = gate_park.diff_texts(
         "Edit", {"file_path": str(target), "old_string": "line 30\n", "new_string": "thirty\n"}
     )
     built = typeset.diff_model(texts or ())
@@ -189,7 +190,7 @@ def test_a_diff_rows_pitch_is_its_roles(seam: Any, monkeypatch: pytest.MonkeyPat
     the same table as every other pitch, and ``diff_row_height`` is what a pane
     sizes a cap in rows with.
     """
-    texts = approval.diff_texts("Write", {"file_path": "/x/a.py", "content": "one\ntwo\n"})
+    texts = gate_park.diff_texts("Write", {"file_path": "/x/a.py", "content": "one\ntwo\n"})
     cache = typeset.ViewCache()
     frame(seam, lambda: typeset.diff(cache, "d", texts))
     assert cache.view("d").grid.row == 18 == typeset.diff_row_height()
@@ -270,12 +271,12 @@ def test_new_texts_under_a_key_are_a_new_diff_in_the_same_view_and_equal_ones_ar
     target.write_text("one\ntwo\n")
     args = {"file_path": str(target), "old_string": "two", "new_string": "2"}
     cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.diff(cache, "k", approval.diff_texts("Edit", args)))
+    frame(seam, lambda: typeset.diff(cache, "k", gate_park.diff_texts("Edit", args)))
     view = cache.view("k")
     model = view.diff
-    frame(seam, lambda: typeset.diff(cache, "k", list(approval.diff_texts("Edit", dict(args)))))
+    frame(seam, lambda: typeset.diff(cache, "k", list(gate_park.diff_texts("Edit", dict(args)))))
     assert cache.view("k") is view and view.diff is model
-    edited = approval.diff_texts("Edit", {**args, "new_string": "II"})
+    edited = gate_park.diff_texts("Edit", {**args, "new_string": "II"})
     frame(seam, lambda: typeset.diff(cache, "k", edited))
     assert cache.view("k") is view and view.diff is not model
     assert rows(view.diff, RowKind.ADD) == ["II"]
@@ -373,7 +374,7 @@ def test_a_diff_is_made_and_drawn_without_opening_a_file_or_asking_the_gate_agai
     seam: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    ``approval.diff_texts`` is the one place a call's effect on a file is decided, and
+    ``gate.park.diff_texts`` is the one place a call's effect on a file is decided, and
     it runs when the call parks. A second reader here would be a second answer -- and
     so would a second call to the first.
 
@@ -401,7 +402,7 @@ def test_a_diff_is_made_and_drawn_without_opening_a_file_or_asking_the_gate_agai
         monkeypatch.setattr(owner, name, refuse)
     monkeypatch.setattr(Path, "read_text", refuse)
     monkeypatch.setattr(Path, "read_bytes", refuse)
-    monkeypatch.setattr(approval, "diff_texts", refuse)
+    monkeypatch.setattr(gate_park, "diff_texts", refuse)
     built = typeset.approval_diff(call)
     got: list[float | None] = []
     frame(seam, lambda: got.append(typeset.diff(cache, "k", call)))
@@ -2240,7 +2241,7 @@ def test_a_pane_that_says_a_files_warnings_itself_has_them_left_out_of_the_model
     """
     target = tmp_path / "blob.bin"
     target.write_bytes(b"\xff\xfe\x00\x80binary")
-    over = approval.diff_texts("Write", {"file_path": str(target), "content": "text\n"}) or ()
+    over = gate_park.diff_texts("Write", {"file_path": str(target), "content": "text\n"}) or ()
     assert "not readable as text" in typeset.diff_model(over).files[0].label
     assert typeset.diff_model(over, warned=False).files[0].label == str(target)
 

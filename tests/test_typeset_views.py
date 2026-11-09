@@ -29,7 +29,8 @@ import imscribe
 import pytest
 from imscribe import BlockKind, Diff, Face, RowKind, registered_fonts, unregister_font
 
-from pptmstr import approval, theme
+from pptmstr import theme
+from pptmstr.gate import park as gate_park
 from pptmstr.gate.diff import render_texts
 from pptmstr.model import NodeId, PendingApproval
 from pptmstr.ui import typeset
@@ -95,7 +96,7 @@ def pending(tool_name: str, raw_args: dict[str, Any], ident: str = "a1") -> Pend
     """
     A parked call as the driver builds one: the texts read once, the string from them.
     """
-    texts = approval.diff_texts(tool_name, raw_args)
+    texts = gate_park.diff_texts(tool_name, raw_args)
     return PendingApproval(
         id=ident,
         node=NodeId("n1"),

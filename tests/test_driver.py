@@ -3474,7 +3474,7 @@ def test_an_uncontained_launch_is_handed_no_settings_at_all() -> None:
 
 
 def test_the_containment_configuration_reaches_the_settings_field_verbatim() -> None:
-    from pptmstr.sandbox import containment_settings
+    from pptmstr.gate.sandbox import containment_settings
 
     raw = containment_settings()
     options = AgentSession(Bridge(), task="t", containment=raw)._options()
@@ -3497,7 +3497,7 @@ def test_the_typed_sandbox_field_is_left_unset_so_the_containment_survives() -> 
     """
     from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
-    from pptmstr.sandbox import containment_settings
+    from pptmstr.gate.sandbox import containment_settings
 
     options = AgentSession(Bridge(), task="t", containment=containment_settings())._options()
     assert options.sandbox is None
@@ -4475,7 +4475,7 @@ def test_the_session_restricts_the_cli_to_the_servers_it_passes() -> None:
     What it guards is connect-time, not call-time. An external server's own tools
     park at `classify`'s fail-closed fallthrough under every policy, so the gate
     already covers those. An stdio server named in a config file is *spawned* by the
-    CLI process, which `sandbox.py` records as running outside the sandbox, and that
+    CLI process, which `gate/sandbox.py` records as running outside the sandbox, and that
     happens before any tool call exists for the gate to see.
 
     Not policy-scoped, and that is the decision rather than an oversight: the spawn
@@ -6050,7 +6050,7 @@ def _git_launches() -> dict[str, tuple[dict[str, Any], set[str]]]:
     is the new-session shape with a cwd; it is listed so the claim covers it by name.
     """
     from pptmstr.figures import fences
-    from pptmstr.sandbox import containment_settings
+    from pptmstr.gate.sandbox import containment_settings
 
     # Every launch appends what the reply pane draws, where anything draws, and
     # passes the plugin pptmstr ships (tests/test_skill_ship.py).

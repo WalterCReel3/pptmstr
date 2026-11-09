@@ -18,14 +18,14 @@ from pptmstr import plugins
 from pptmstr.bridge import Bridge
 from pptmstr.driver import AgentSession
 from pptmstr.figures import fences
-from pptmstr.sandbox import containment_settings
+from pptmstr.gate.sandbox import containment_settings
 from pptmstr.templates import FEATURE
 
 RESUMED = "11111111-2222-3333-4444-555555555555"
 
 # Manifest keys and top-level entries that make the CLI start something: an MCP
 # server, a hook command, a language server or a monitor, each outside the sandbox
-# (plugins reference, "Standard layout"; sandbox.py on stdio MCP servers). Commands
+# (plugins reference, "Standard layout"; gate/sandbox.py on stdio MCP servers). Commands
 # and agents start nothing but are not what this plugin is for, so they are refused
 # too.
 SPAWNING_KEYS = {

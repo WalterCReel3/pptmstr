@@ -5,7 +5,7 @@ them.
 
 Each is a function of one value -- a ``Basis``, a string, a flag -- and of no
 ``Snapshot``, so this imports nothing from pptmstr when it runs. That is what lets
-``approval``'s queue rows say what the board says without importing the board's
+``gate.rows``' queue rows say what the board says without importing the board's
 rows, which need ``model``.
 """
 

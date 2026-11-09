@@ -85,10 +85,10 @@ import imgui_bundle  # noqa: E402
 from imgui_bundle import imgui  # noqa: E402
 
 from pptmstr import fake_driver, theme  # noqa: E402
-from pptmstr.approval import diff_texts, summarize  # noqa: E402
 from pptmstr.board.rows import board_concerns, board_tasks  # noqa: E402
 from pptmstr.bridge import Bridge  # noqa: E402
 from pptmstr.gate.diff import render_texts  # noqa: E402
+from pptmstr.gate.park import diff_texts, summarize  # noqa: E402
 from pptmstr.intents import (  # noqa: E402
     AgentFinished,
     AgentSpawned,

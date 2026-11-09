@@ -114,7 +114,7 @@ method is not discriminating and both context readings are void.
 
 **Where a launch differs from `AgentSession._options`.** Same: `resume` set and
 `session_id` omitted on a resume, `session_id` alone on a fresh launch, `fork_session`
-off, `settings` is `sandbox.containment_settings()` or None, `sandbox` left None, the
+off, `settings` is `gate.sandbox.containment_settings()` or None, `sandbox` left None, the
 system prompt is the `claude_code` preset with an append, `permission_mode` is
 `dontAsk`, a `stderr` callback is set, `session_store` unset. Different: no `agents`, no
 `mcp_servers` / `strict_mcp_config` (so the user's own MCP configuration loads), no
@@ -141,7 +141,7 @@ carries an append, which is every team template; it says nothing about which of 
 CLI's own preset texts a solo resume answers to.
 
 **Bounds.** One run of each direction, one bundled CLI build, one machine. A CONTAINED
-verdict is about `sandbox.containment_settings()` as it is today, the two write targets
+verdict is about `gate.sandbox.containment_settings()` as it is today, the two write targets
 and one host named here, and a resume in the same cwd; it says nothing about a resume
 from a different cwd, about `fork_session`, about the file tools (which run in the CLI
 process, outside the sandbox, at every setting), or about a second resume.
@@ -226,7 +226,7 @@ from pptmstr.cli_version import (  # noqa: E402
     read_cli_version,
     resolve_cli_path,
 )
-from pptmstr.sandbox import ALLOWED_DOMAIN, containment_settings  # noqa: E402
+from pptmstr.gate.sandbox import ALLOWED_DOMAIN, containment_settings  # noqa: E402
 
 MODEL = "claude-haiku-4-5-20251001"
 EGRESS_URL = "https://example.com"

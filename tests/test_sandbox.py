@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 from pptmstr.brief import default_root, legacy_root
-from pptmstr.sandbox import ALLOWED_DOMAIN, containment_settings, denied_records
+from pptmstr.gate.sandbox import ALLOWED_DOMAIN, containment_settings, denied_records
 
 
 def _sandbox() -> dict[str, Any]:
