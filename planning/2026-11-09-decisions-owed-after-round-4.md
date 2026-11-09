@@ -309,6 +309,19 @@ the upgrade's diff stay separable.
    pass. A fresh resolve was not tried here: it needs the network. `make lock` stays for the
    operator, on its own branch.
 
+## Decided after Round 5 (operator, 2026-11-09)
+
+- **The bookmark-during-scan defect** (planning/2026-11-09-ui-saves-leave-the-frame.md):
+  deferred. It is built with that design, first in its move order, not on its own.
+- **The off-thread design's three questions:**
+  - A save that fails to write is **shown**, not swallowed. STYLE.md §1's `settings.save`
+    example changes with the build.
+  - The module is named **`prefsync`**.
+  - `SerialWorker`'s reason text becomes **neutral**, not "append".
+- **`replace` keeps masking off setuid, setgid and sticky** (`& 0o777`).
+- **Before merging:** `make verify` was run in the session. `make smoke` and `make shot` were
+  asked of the operator (they need a display), and so was one interactive `make run`.
+
 ## Not a decision now
 
 - **B6 step 5** (Snapshot methods → `channels/projections` functions, about 250 call sites). Its
