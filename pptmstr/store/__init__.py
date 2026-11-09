@@ -329,7 +329,7 @@ def _clock(now: float | None) -> float:
 #   them (``command.request_refusal``, ``Snapshot.command_approval_refusal``), which
 #   has to see a NUL or a lone surrogate to refuse it.
 # - A channel's charter, which is written to the channel's log from the store
-#   and read back from it (``channels.log.outcomes``): the operator's text, kept as
+#   and read back from it (``channels.facts.outcomes``): the operator's text, kept as
 #   typed.
 #
 # A board restore is not here because it never meets this table: ``_drawable``

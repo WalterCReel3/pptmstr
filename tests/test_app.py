@@ -9654,6 +9654,7 @@ def test_a_link_and_its_close_survive_a_restart_through_the_channel_log() -> Non
     ``_start`` before anything else is queued.
     """
     from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
     from pptmstr.channels import log as channel_log
     from pptmstr.intents import AgentSpawned, ChannelsRestored
     from pptmstr.settings import Loaded
@@ -9680,8 +9681,8 @@ def test_a_link_and_its_close_survive_a_restart_through_the_channel_log() -> Non
         app._close_board_log(first)
 
     assert (
-        channel_log.FileChannels().state(channel_log.LinkKey("brand", linked.channel_id))
-        == channel_log.Whole()
+        channel_log.FileChannels().state(channel_facts.LinkKey("brand", linked.channel_id))
+        == channel_facts.Whole()
     )
     second = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
     try:
@@ -9751,23 +9752,24 @@ def test_a_link_whose_log_is_short_restores_not_live_and_its_name_links_afresh()
     A link, a damaged record, then a close the damage hides: the link is said
     and withheld, never live, and linking the name again gets a log of its own.
     A damaged log can never restore live, so the relink appends nothing to it
-    (``channels.log.owes_close``): it is left byte for byte. After the next start
+    (``channels.facts.owes_close``): it is left byte for byte. After the next start
     the earlier link is still not live and the new one is.
     """
     from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
     from pptmstr.channels import log as channel_log
     from pptmstr.intents import ChannelsRestored
     from pptmstr.settings import Loaded
 
     log = channel_log.FileChannels()
-    old = channel_log.LinkKey("brand", "k1")
-    created = channel_log.LinkCreated(
+    old = channel_facts.LinkKey("brand", "k1")
+    created = channel_facts.LinkCreated(
         at=1.0, channel_id="k1", members=("lead-a", "lead-b"), charter=""
     )
     assert log.append(old, created) == channel_log.Appended()
     (log.root / "brand" / "k1" / "00000001.json").write_text("torn\n")
     assert (
-        log.append(old, channel_log.LinkClosed(at=3.0, channel_id="k1")) == channel_log.Appended()
+        log.append(old, channel_facts.LinkClosed(at=3.0, channel_id="k1")) == channel_log.Appended()
     )
     written = log.read(old)
     before = {f.name: f.read_bytes() for f in (log.root / "brand" / "k1").iterdir()}
@@ -9797,9 +9799,9 @@ def test_a_link_whose_log_is_short_restores_not_live_and_its_name_links_afresh()
     assert {f.name: f.read_bytes() for f in (log.root / "brand" / "k1").iterdir()} == before
     assert log.read(old) == written
 
-    fresh = channel_log.LinkKey("brand", linked.channel_id)
+    fresh = channel_facts.LinkKey("brand", linked.channel_id)
     assert log.links() == tuple(sorted((old, fresh)))
-    assert log.state(fresh) == channel_log.Whole()
+    assert log.state(fresh) == channel_facts.Whole()
     restored = channel_log.restore_all(log)
     assert not isinstance(restored, channel_log.Unlisted)
     by_link = {r.link: r for r in restored}
@@ -9817,6 +9819,7 @@ def test_while_the_channel_logs_cannot_be_listed_no_link_is_made() -> None:
     import os
 
     from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
     from pptmstr.channels import log as channel_log
     from pptmstr.intents import ChannelsRestored
     from pptmstr.settings import Loaded
@@ -9824,10 +9827,10 @@ def test_while_the_channel_logs_cannot_be_listed_no_link_is_made() -> None:
     if os.geteuid() == 0:
         pytest.skip("root lists any directory")
     log = channel_log.FileChannels()
-    created = channel_log.LinkCreated(
+    created = channel_facts.LinkCreated(
         at=1.0, channel_id="k1", members=("lead-a", "lead-b"), charter=""
     )
-    assert log.append(channel_log.LinkKey("brand", "k1"), created) == channel_log.Appended()
+    assert log.append(channel_facts.LinkKey("brand", "k1"), created) == channel_log.Appended()
     mark = LOG.snapshot()[1]
     log.root.chmod(0o300)
     try:
@@ -9851,7 +9854,7 @@ def test_while_the_channel_logs_cannot_be_listed_no_link_is_made() -> None:
     finally:
         app._close_channel_log(state)
         app._close_board_log(state)
-    assert log.links() == (channel_log.LinkKey("brand", "k1"),)
+    assert log.links() == (channel_facts.LinkKey("brand", "k1"),)
 
 
 def test_a_charter_over_the_limit_is_refused_and_says_the_limit() -> None:
@@ -9883,6 +9886,7 @@ def test_a_close_on_a_channel_whose_recording_stopped_is_said_and_returned() -> 
     the operator's close then holds for this run only, and is said to.
     """
     from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
     from pptmstr.channels import log as channel_log
     from pptmstr.intents import AgentSpawned
     from pptmstr.settings import Loaded
@@ -9896,18 +9900,18 @@ def test_a_close_on_a_channel_whose_recording_stopped_is_said_and_returned() -> 
 
         def links(
             self, name: str | None = None
-        ) -> tuple[channel_log.LinkKey, ...] | channel_log.Unlisted:
+        ) -> tuple[channel_facts.LinkKey, ...] | channel_log.Unlisted:
             return self.inner.links(name)
 
         def append(
-            self, link: channel_log.LinkKey, fact: channel_log.Fact
+            self, link: channel_facts.LinkKey, fact: channel_facts.Fact
         ) -> channel_log.NotAppended:
             return channel_log.NotAppended("no space left on device")
 
-        def read(self, link: channel_log.LinkKey) -> channel_log.Read:
+        def read(self, link: channel_facts.LinkKey) -> channel_facts.Read:
             return self.inner.read(link)
 
-        def state(self, link: channel_log.LinkKey) -> channel_log.ChannelState:
+        def state(self, link: channel_facts.LinkKey) -> channel_facts.ChannelState:
             return self.inner.state(link)
 
     a, b = "lead-a", "lead-b"
@@ -9924,7 +9928,7 @@ def test_a_close_on_a_channel_whose_recording_stopped_is_said_and_returned() -> 
         assert not isinstance(linked, channel_log.Refused)
         app.apply_intents(state)
         deadline = time.monotonic() + 5.0
-        link = channel_log.LinkKey("brand", linked.channel_id)
+        link = channel_facts.LinkKey("brand", linked.channel_id)
         while state.channel_writer.refusal(link) is None:
             assert time.monotonic() < deadline, "the failed link never stopped the channel"
             time.sleep(0.01)
@@ -9960,9 +9964,10 @@ class _FailingCloses:
         return self.inner.links(name)
 
     def append(self, link: Any, fact: Any) -> Any:
+        from pptmstr.channels import facts as channel_facts
         from pptmstr.channels import log as channel_log
 
-        if isinstance(fact, channel_log.LinkClosed):
+        if isinstance(fact, channel_facts.LinkClosed):
             return channel_log.NotAppended("no space left on device")
         return self.inner.append(link, fact)
 
@@ -10249,9 +10254,10 @@ def test_a_close_not_written_is_worded_by_whose_close_it_was() -> None:
       landed is not put in front of the operator.
     """
     from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
     from pptmstr.channels import log as channel_log
 
-    made = channel_log.LinkKey("brand", "new")
+    made = channel_facts.LinkKey("brand", "new")
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000.0))
     full = channel_log.NotAppended("no space left on device")
     state = _linking_state()
@@ -10261,8 +10267,8 @@ def test_a_close_not_written_is_worded_by_whose_close_it_was() -> None:
         (live,) = state.store.snapshot().channels
         reports: tuple[channel_log.Report, ...] = (
             channel_log.Outcome(
-                channel_log.LinkKey("brand", live),
-                channel_log.LinkClosed(at=1.0, channel_id=live),
+                channel_facts.LinkKey("brand", live),
+                channel_facts.LinkClosed(at=1.0, channel_id=live),
                 full,
             ),
             channel_log.Swept(made, channel_log.Unlisted("EIO")),
@@ -10270,22 +10276,24 @@ def test_a_close_not_written_is_worded_by_whose_close_it_was() -> None:
                 made,
                 (
                     channel_log.SweptClose(
-                        channel_log.LinkKey("brand", "e1"),
+                        channel_facts.LinkKey("brand", "e1"),
                         1_700_000_000.0,
                         full,
                         channel_log.NotAppended("disk full"),
                     ),
                     channel_log.SweptClose(
-                        channel_log.LinkKey("brand", "e2"),
+                        channel_facts.LinkKey("brand", "e2"),
                         1_700_000_000.0,
                         full,
                         channel_log.Appended(),
                     ),
                     channel_log.SweptClose(
-                        channel_log.LinkKey("brand", "e4"), 1_700_000_000.0, channel_log.Appended()
+                        channel_facts.LinkKey("brand", "e4"),
+                        1_700_000_000.0,
+                        channel_log.Appended(),
                     ),
                     channel_log.SweptClose(
-                        channel_log.LinkKey("brand", "e3"),
+                        channel_facts.LinkKey("brand", "e3"),
                         None,
                         full,
                         channel_log.NotAppended("disk full"),
@@ -10322,10 +10330,11 @@ def test_a_sweep_is_logged_as_the_sweeps_and_never_as_the_new_links_close() -> N
     names a ``LinkClosed`` of the new link, which nothing closed.
     """
     from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
     from pptmstr.channels import log as channel_log
     from pptmstr.log import LOG
 
-    made = channel_log.LinkKey("brand", "new")
+    made = channel_facts.LinkKey("brand", "new")
     full = channel_log.NotAppended("no space left on device")
     mark = LOG.snapshot()[1]
     app._read_channel_reports(
@@ -10334,13 +10343,13 @@ def test_a_sweep_is_logged_as_the_sweeps_and_never_as_the_new_links_close() -> N
                 made,
                 (
                     channel_log.SweptClose(
-                        channel_log.LinkKey("brand", "e1"), 1.0, channel_log.Appended()
+                        channel_facts.LinkKey("brand", "e1"), 1.0, channel_log.Appended()
                     ),
                     channel_log.SweptClose(
-                        channel_log.LinkKey("brand", "e2"), 1.0, full, channel_log.Appended()
+                        channel_facts.LinkKey("brand", "e2"), 1.0, full, channel_log.Appended()
                     ),
                     channel_log.SweptClose(
-                        channel_log.LinkKey("brand", "e3"), None, channel_log.Appended()
+                        channel_facts.LinkKey("brand", "e3"), None, channel_log.Appended()
                     ),
                 ),
             ),
@@ -10388,7 +10397,7 @@ def test_a_sweep_report_drained_after_the_operator_closed_its_link_is_still_the_
     sweep's, and nothing says the operator's close failed.
     """
     from pptmstr import app
-    from pptmstr.channels import log as channel_log
+    from pptmstr.channels import facts as channel_facts
 
     log = _Unlistable()
     log.gate.clear()
@@ -10403,12 +10412,12 @@ def test_a_sweep_report_drained_after_the_operator_closed_its_link_is_still_the_
         log.gate.set()
         _settle_channel_writer(state)
         notices = list(state.not_done)
-        facts = log.inner.read(channel_log.LinkKey("brand", held.id)).facts
+        facts = log.inner.read(channel_facts.LinkKey("brand", held.id)).facts
     finally:
         app._close_channel_log(state)
         app._close_board_log(state)
 
-    assert [type(f) for f in facts] == [channel_log.LinkCreated, channel_log.LinkClosed]
+    assert [type(f) for f in facts] == [channel_facts.LinkCreated, channel_facts.LinkClosed]
     # Nothing in it says #brand is linked now, which it is not.
     assert notices == [UNLISTED_EIO.replace("(EIO)", "(OSError: permission denied)")]
 
@@ -10417,9 +10426,10 @@ class _Unwritable(_Unlistable):
     """A log that can list no name's links and takes no link's creation."""
 
     def append(self, link: Any, fact: Any) -> Any:
+        from pptmstr.channels import facts as channel_facts
         from pptmstr.channels import log as channel_log
 
-        if isinstance(fact, channel_log.LinkCreated):
+        if isinstance(fact, channel_facts.LinkCreated):
             return channel_log.NotAppended("read-only file system")
         return self.inner.append(link, fact)
 

@@ -56,6 +56,7 @@ from . import settings as settings_mod
 from . import version as version_mod
 from .approval import Policy, requires_containment
 from .bridge import Bridge
+from .channels import facts as channel_facts
 from .channels import log as channel_log
 from .command import (
     COMMAND_TAG,
@@ -1421,7 +1422,7 @@ def _observer(state: AppState, writer: boardsync.BoardWriter | None) -> Observer
 def _record_channels(state: AppState) -> Observer:
     """
     The channel logs' half of the observer: each applied link or close, as the
-    fact ``channels.log.outcomes`` reads off the store, queued for the channel
+    fact ``channels.facts.outcomes`` reads off the store, queued for the channel
     writer; and a link the store refused, said with the reason.
 
     The refusal is worked out from the snapshot the act met
@@ -1447,7 +1448,7 @@ def _record_channels(state: AppState) -> Observer:
             writer = state.channel_writer
             if writer is None:
                 return
-            for link, fact in channel_log.outcomes(before, intent, after):
+            for link, fact in channel_facts.outcomes(before, intent, after):
                 writer.submit(link, fact)
         except Exception as exc:  # noqa: BLE001 - see the docstring: this must not raise
             LOG.error(
@@ -1607,19 +1608,19 @@ def _sweep_notices(report: channel_log.Swept) -> list[str]:
     return said
 
 
-def _not_written(link: channel_log.LinkKey, kind: type, reason: str) -> str:
+def _not_written(link: channel_facts.LinkKey, kind: type, reason: str) -> str:
     """
     What the operator is told of a link fact that did not reach its log: one
     sentence for a close refused before it was queued (``close_channel``) and
     for one the writer reported, so the two read as one thing said.
     """
     what = drawable.text(reason)
-    if kind is channel_log.LinkClosed:
+    if kind is channel_facts.LinkClosed:
         return (
             f"#{link.name}: closed for this run only; the close did not reach the link's"
             f" log ({what}), and the next start reads the link as its log left it"
         )
-    if kind is channel_log.LinkCreated:
+    if kind is channel_facts.LinkCreated:
         return (
             f"#{link.name}: linked for this run only; the link did not reach its log"
             f" ({what}), and the next start does not restore it"
@@ -1711,7 +1712,7 @@ def close_channel(state: AppState, channel_id: str) -> str | None:
     state.bridge.emit(ChannelClosed(channel_id=channel_id, at=time.time()))
     if held is None or not held.live or writer is None:
         return None
-    link = channel_log.LinkKey(held.name, held.id)
+    link = channel_facts.LinkKey(held.name, held.id)
     refused = writer.refusal(link)
     if refused is not None:
         LOG.warn(
@@ -1719,7 +1720,7 @@ def close_channel(state: AppState, channel_id: str) -> str | None:
             f"{link}: closed for this run only; the close cannot be written to its"
             f" log ({refused}), and the next start reads the link as its log left it",
         )
-        _not_done(state, _not_written(link, channel_log.LinkClosed, refused))
+        _not_done(state, _not_written(link, channel_facts.LinkClosed, refused))
     return refused
 
 

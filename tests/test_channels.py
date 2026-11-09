@@ -19,22 +19,25 @@ from typing import get_args
 import pytest
 
 from pptmstr import boardlog
+from pptmstr.channels import facts as channel_facts
 from pptmstr.channels import log as channel_log
+from pptmstr.channels.facts import (
+    LinkClosed,
+    LinkCreated,
+    LinkKey,
+    Read,
+    Short,
+    Stopped,
+    Whole,
+)
 from pptmstr.channels.log import (
     Appended,
     ChannelLog,
     FileChannels,
-    LinkClosed,
-    LinkCreated,
-    LinkKey,
     NotAppended,
     Outcome,
-    Read,
-    Short,
-    Stopped,
     Swept,
     SweptClose,
-    Whole,
 )
 from pptmstr.intents import AgentSpawned, ChannelClosed, ChannelLinked, Intent
 from pptmstr.journal import codec
@@ -125,7 +128,7 @@ def test_the_seam_keeps_facts_in_order_per_link_and_says_what_it_holds(
     assert log.links("brand") == (K1, again)
     assert log.links("none") == () == log.links("../brand")
     for link in (K1, again, other):
-        assert log.state(link) == Whole() == channel_log.judge(link, log.read(link))
+        assert log.state(link) == Whole() == channel_facts.judge(link, log.read(link))
 
     bad_keys = [LinkKey(n, "k1") for n in ("", "Brand", "../brand", ".brand", "a" * 65)]
     bad_keys += [LinkKey("brand", i) for i in ("", "../k1", "K1", "k 1")]
@@ -234,6 +237,38 @@ def test_a_board_record_in_a_links_directory_is_of_no_kind_a_link_has(tmp_path: 
     assert len(facts) == 1 and isinstance(facts[0], Unrecognised)
     assert facts[0].kind == boardlog.Claimed.KIND
     assert isinstance(FileChannels(tmp_path).state(K1), Short)
+
+
+@pytest.mark.parametrize(
+    "kind", sorted(set(boardlog.KINDS.by_name) - {RecordingStopped.KIND}), ids=str
+)
+def test_a_board_record_that_does_not_decode_in_a_links_directory_is_damage(
+    tmp_path: Path, kind: str
+) -> None:
+    """
+    A link's log is read under the board's kind table, so a record of a board
+    kind without that kind's fields is damage, not a kind this build does not
+    define: the read is damaged, the link is owed no close, and a relink of the
+    name leaves the log byte for byte. Read under a link-only table the same
+    record would be carried as ``Unrecognised`` and the sweep would close the
+    link (planning/2026-11-07-the-board-log-is-one-journal-of-two.md, the
+    addendum on a board record that does not decode).
+    """
+    log = FileChannels(tmp_path)
+    directory = tmp_path / "brand" / "k1"
+    assert log.append(K1, _created()) == Appended()
+    _write(directory, 1, json.dumps({"kind": kind, "at": 2.0}))
+    before = _bytes(directory)
+
+    read = log.read(K1)
+    assert read.facts == (_created(),)
+    assert read.damaged and read.broken is not None and read.broken.startswith("record 1 ")
+    assert isinstance(channel_facts.judge(K1, read), Short)
+    assert channel_facts.owes_close(K1, read) is False
+
+    reports = _link(log, LinkKey("brand", "k2"))
+    assert all(c.link != K1 for c in _closes(reports))
+    assert _bytes(directory) == before
 
 
 def _write(directory: Path, ordinal: int, text: str) -> None:
@@ -367,7 +402,7 @@ def test_the_longest_charter_of_the_costliest_characters_still_fits_a_record(
     """``CHARTER_CHARS``' reason: what ``app.link_leads`` lets through always lands."""
     for costly in ("\U0001f600", "\udc80", "\x00", '"', "\\"):
         charter = costly * channel_log.CHARTER_CHARS
-        size = len(codec.encode(channel_log.encode(_created(charter=charter))).encode("utf-8"))
+        size = len(codec.encode(channel_facts.encode(_created(charter=charter))).encode("utf-8"))
         assert size < journal_files.MAX_RECORD_BYTES // 4, costly
         assert (
             FileChannels(tmp_path).append(
@@ -387,12 +422,12 @@ def test_the_fold_closes_the_link_and_a_second_close_agrees() -> None:
         LinkClosed(at=2.0, channel_id="k1"),
         LinkClosed(at=3.0, channel_id="k1"),
     )
-    folded = channel_log.restore(K1, facts)
+    folded = channel_facts.restore(K1, facts)
 
     assert folded.channel is not None
     assert (folded.channel.name, folded.channel.closed_at) == ("brand", 2.0)
     assert folded.channel.members == frozenset({A, B})
-    assert channel_log.assess(folded) == Whole()
+    assert channel_facts.assess(folded) == Whole()
 
 
 @pytest.mark.parametrize(
@@ -408,22 +443,22 @@ def test_the_fold_closes_the_link_and_a_second_close_agrees() -> None:
     ],
 )
 def test_a_fact_one_reducer_could_not_have_appended_makes_the_log_short(
-    facts: tuple[channel_log.Fact, ...], field: str
+    facts: tuple[channel_facts.Fact, ...], field: str
 ) -> None:
-    folded = channel_log.restore(K1, facts)
+    folded = channel_facts.restore(K1, facts)
 
     assert len(getattr(folded, field)) == 1
     assert folded.channel is None or folded.channel.id == "k1"
-    assert isinstance(channel_log.assess(folded), Short)
+    assert isinstance(channel_facts.assess(folded), Short)
 
 
 @pytest.mark.parametrize("members", [(A,), (A, A), (A, B, C), ()])
 def test_a_link_that_is_not_a_pair_is_not_restored(members: tuple[str, ...]) -> None:
     """Decided 7 on restore: a record of a link wider than a pair makes nothing live."""
-    folded = channel_log.restore(K1, (_created(members=members),))
+    folded = channel_facts.restore(K1, (_created(members=members),))
 
     assert folded.channel is None
-    state = channel_log.assess(folded)
+    state = channel_facts.assess(folded)
     assert isinstance(state, Short)
     assert f"a link of {len(set(members))} member(s), where a link joins 2" in state.reason
 
@@ -498,14 +533,14 @@ def test_startup_reads_each_log_once(tmp_path: Path) -> None:
             asked.append("links")
             return inner.links(name)
 
-        def append(self, link: LinkKey, fact: channel_log.Fact) -> Appended | NotAppended:
+        def append(self, link: LinkKey, fact: channel_facts.Fact) -> Appended | NotAppended:
             raise AssertionError("startup appends nothing")
 
         def read(self, link: LinkKey) -> Read:
             asked.append(f"read {link.name}")
             return inner.read(link)
 
-        def state(self, link: LinkKey) -> channel_log.ChannelState:
+        def state(self, link: LinkKey) -> channel_facts.ChannelState:
             asked.append(f"state {link.name}")
             return inner.state(link)
 
@@ -537,17 +572,17 @@ def test_a_link_and_its_close_are_the_facts_the_store_settled() -> None:
     _running(store, A, B)
 
     before, after = _step(store, _linked())
-    assert channel_log.outcomes(before, _linked(), after) == (
+    assert channel_facts.outcomes(before, _linked(), after) == (
         (K1, LinkCreated(10.0, "k1", (A, B), "the brand work")),
     )
 
     closing = ChannelClosed("k1", 20.0)
     before, after = _step(store, closing)
-    assert channel_log.outcomes(before, closing, after) == ((K1, LinkClosed(20.0, "k1")),)
+    assert channel_facts.outcomes(before, closing, after) == ((K1, LinkClosed(20.0, "k1")),)
 
     # Closed already: nothing more is written.
     before, after = _step(store, ChannelClosed("k1", 30.0))
-    assert channel_log.outcomes(before, ChannelClosed("k1", 30.0), after) == ()
+    assert channel_facts.outcomes(before, ChannelClosed("k1", 30.0), after) == ()
 
 
 def test_a_refused_link_writes_nothing() -> None:
@@ -558,7 +593,7 @@ def test_a_refused_link_writes_nothing() -> None:
     before, after = _step(store, refused)
 
     assert after.channels == {}
-    assert channel_log.outcomes(before, refused, after) == ()
+    assert channel_facts.outcomes(before, refused, after) == ()
 
 
 def _live_link() -> Snapshot:
@@ -581,7 +616,7 @@ _REPRESENTATIVE: dict[type, Intent] = {
 }
 
 # What each writes over ``_live_link()``. Every intent not named writes nothing.
-_WRITES: dict[type, tuple[tuple[LinkKey, channel_log.Known], ...]] = {
+_WRITES: dict[type, tuple[tuple[LinkKey, channel_facts.Known], ...]] = {
     ChannelLinked: ((LinkKey("ops", "k2"), LinkCreated(5.0, "k2", (bf.S, bf.Z), "the ops work")),),
     ChannelClosed: ((LinkKey("brand", "k1"), LinkClosed(5.0, "k1")),),
 }
@@ -594,7 +629,7 @@ def test_only_a_link_and_its_close_write_a_link_log(kind: type) -> None:
     assert type(intent) is kind
     after, _ = store_apply(before, intent, 5.0)
 
-    assert channel_log.outcomes(before, intent, after) == _WRITES.get(kind, ())
+    assert channel_facts.outcomes(before, intent, after) == _WRITES.get(kind, ())
 
 
 def test_no_generated_step_writes_a_link_log_but_a_link_or_its_close() -> None:
@@ -602,7 +637,7 @@ def test_no_generated_step_writes_a_link_log_but_a_link_or_its_close() -> None:
     for seed in range(4):
         snap = bf.started()
         for step in bf.steps(seed):
-            if channel_log.outcomes(snap, step.intent, step.after):
+            if channel_facts.outcomes(snap, step.intent, step.after):
                 written.add(type(step.intent))
             snap = step.after
     assert written == {ChannelLinked, ChannelClosed}
@@ -625,7 +660,7 @@ def test_every_intent_has_a_case_in_outcomes_and_the_default_is_assert_never() -
     so an intent added to the union is a failure here until ``outcomes`` says
     what it writes.
     """
-    module = ast.parse(Path(channel_log.__file__).read_text(encoding="utf-8"))
+    module = ast.parse(Path(channel_facts.__file__).read_text(encoding="utf-8"))
     (function,) = [
         node
         for node in module.body
@@ -651,7 +686,7 @@ class _Failing:
     def links(self, name: str | None = None) -> tuple[LinkKey, ...] | Unlisted:
         return self.inner.links(name)
 
-    def append(self, link: LinkKey, fact: channel_log.Fact) -> Appended | NotAppended:
+    def append(self, link: LinkKey, fact: channel_facts.Fact) -> Appended | NotAppended:
         if link == self.failing and self.fail and not isinstance(fact, RecordingStopped):
             self.fail = False
             return NotAppended("no space left on device")
@@ -660,7 +695,7 @@ class _Failing:
     def read(self, link: LinkKey) -> Read:
         return self.inner.read(link)
 
-    def state(self, link: LinkKey) -> channel_log.ChannelState:
+    def state(self, link: LinkKey) -> channel_facts.ChannelState:
         return self.inner.state(link)
 
 
@@ -746,10 +781,10 @@ def test_a_fact_the_worker_never_took_up_is_reported_not_written_and_never_lands
     writer = channel_log.ChannelWriter(log)
     waiting, release = threading.Event(), threading.Event()
 
-    class Held(queue.SimpleQueue[tuple[LinkKey, channel_log.Fact] | None]):
+    class Held(queue.SimpleQueue[tuple[LinkKey, channel_facts.Fact] | None]):
         def get(
             self, block: bool = True, timeout: float | None = None
-        ) -> tuple[LinkKey, channel_log.Fact] | None:
+        ) -> tuple[LinkKey, channel_facts.Fact] | None:
             waiting.set()
             assert release.wait(30)
             return super().get(block, timeout)
@@ -777,12 +812,12 @@ def test_a_fact_the_worker_never_took_up_is_reported_not_written_and_never_lands
 class _Wedged(_Failing):
     """A log whose append of one fact waits for ``release``; every other lands."""
 
-    def __init__(self, inner: ChannelLog, wedged: channel_log.Fact) -> None:
+    def __init__(self, inner: ChannelLog, wedged: channel_facts.Fact) -> None:
         super().__init__(inner, LinkKey("none", "k0"))
         self.wedged = wedged
         self.entered, self.release = threading.Event(), threading.Event()
 
-    def append(self, link: LinkKey, fact: channel_log.Fact) -> Appended | NotAppended:
+    def append(self, link: LinkKey, fact: channel_facts.Fact) -> Appended | NotAppended:
         if fact == self.wedged:
             self.entered.set()
             assert self.release.wait(30)
@@ -829,7 +864,7 @@ def test_a_stop_marker_carries_at_most_the_bounded_part_of_a_long_reason(
     essay = "no room " * journal_files.MAX_RECORD_BYTES
 
     class Verbose(_Failing):
-        def append(self, link: LinkKey, fact: channel_log.Fact) -> Appended | NotAppended:
+        def append(self, link: LinkKey, fact: channel_facts.Fact) -> Appended | NotAppended:
             if link == self.failing and self.fail and not isinstance(fact, RecordingStopped):
                 self.fail = False
                 return NotAppended(essay)
@@ -1070,7 +1105,7 @@ _LOGS = {
 class _Unmarkable(_Failing):
     """``_Failing``, whose stop marker for the failing link is lost as well."""
 
-    def append(self, link: LinkKey, fact: channel_log.Fact) -> Appended | NotAppended:
+    def append(self, link: LinkKey, fact: channel_facts.Fact) -> Appended | NotAppended:
         if link == self.failing and isinstance(fact, RecordingStopped):
             return NotAppended("read-only file system")
         return super().append(link, fact)
@@ -1182,7 +1217,7 @@ def test_a_relink_leaves_a_log_that_can_never_be_live_byte_for_byte(
     directory = tmp_path / "brand" / "k1"
     make(log, directory)
     before = _bytes(directory)
-    assert channel_log.owes_close(K1, log.read(K1)) is False
+    assert channel_facts.owes_close(K1, log.read(K1)) is False
 
     for again in ("k2", "k3"):
         reports = _link(log, LinkKey("brand", again))
@@ -1194,7 +1229,7 @@ def test_a_relink_leaves_a_log_that_can_never_be_live_byte_for_byte(
 class _Full(_Failing):
     """Every append to one link fails, its stop marker too, until ``fail`` is unset."""
 
-    def append(self, link: LinkKey, fact: channel_log.Fact) -> Appended | NotAppended:
+    def append(self, link: LinkKey, fact: channel_facts.Fact) -> Appended | NotAppended:
         if link == self.failing and self.fail:
             return NotAppended("no space left on device")
         return self.inner.append(link, fact)
@@ -1267,7 +1302,7 @@ def test_a_log_that_cannot_be_read_now_is_closed_for_when_it_can(tmp_path: Path)
     try:
         read = log.read(K1)
         assert read.broken is not None and not read.damaged
-        assert channel_log.owes_close(K1, read) is True
+        assert channel_facts.owes_close(K1, read) is True
         reports = _link(log, LinkKey("brand", "k2"))
     finally:
         record.chmod(0o600)

@@ -1287,7 +1287,7 @@ class ChannelLinked:
     same way, or link a session whose board nobody writes.
 
     The fact goes to the channel's own log from the shell, never from here
-    (``channels.log.outcomes``).
+    (``channels.facts.outcomes``).
     """
 
     channel_id: ChannelId

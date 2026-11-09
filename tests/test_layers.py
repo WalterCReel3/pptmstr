@@ -22,7 +22,9 @@ for-what-they-require.md``, T3, T7 and A7). Eleven are checked here:
    module that imports ``uuid`` or ``secrets`` (B6).
 9. ``pptmstr.channels`` imports nothing, ``channels.records`` imports nothing from
    pptmstr, only ``app`` imports ``channels.log``, and a name ``records`` defines
-   is imported from ``records`` alone (B6).
+   is imported from ``records`` alone (B6). ``channels.facts`` reaches a disk
+   reader only through the edges the store reaches and B5 removes, and nothing
+   importing it runs starts a thread.
 10. ``pptmstr.board`` imports nothing, ``board.words`` imports nothing from
     pptmstr when it runs, and a name ``words`` defines is imported from ``words``
     alone (B5).
@@ -51,7 +53,7 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -543,40 +545,77 @@ def in_store(module: str) -> bool:
     return module == STORE or module.startswith(STORE + ".")
 
 
+def _walk(
+    edges: tuple[Import, ...], known: frozenset[str], inside: Callable[[str], bool]
+) -> Iterator[tuple[str, Import, list[str]]]:
+    """
+    Every import that importing the modules ``inside`` names runs, as ``(importer,
+    edge, path to the importer)``, breadth first from those modules.
+
+    An inside module's own imports count whatever their kind: one importing a
+    module inside a function or under ``TYPE_CHECKING`` still imports it. Beyond
+    them only eager edges are followed, since a lazy or typing import elsewhere does
+    not run when they are imported.
+    """
+    out: dict[str, list[Import]] = {}
+    for edge in edges:
+        if edge.target in known and (inside(edge.source) or edge.kind == "eager"):
+            out.setdefault(edge.source, []).append(edge)
+    roots = sorted(module for module in known if inside(module))
+    path: dict[str, list[str]] = {module: [module] for module in roots}
+    todo = list(roots)
+    while todo:
+        current = todo.pop(0)
+        for edge in sorted(out.get(current, ()), key=lambda e: (e.target, e.line)):
+            yield current, edge, path[current]
+            if edge.target not in path:
+                step = f"{edge.target} ({edge.source}:{edge.line}, {edge.kind})"
+                path[edge.target] = [*path[current], step]
+                todo.append(edge.target)
+
+
+def disk_edges(
+    edges: tuple[Import, ...],
+    readers: frozenset[str],
+    known: frozenset[str],
+    inside: Callable[[str], bool],
+    label: str,
+) -> dict[tuple[str, str], list[str]]:
+    """
+    Every import of a disk reader that importing the modules ``inside`` names runs
+    (``_walk``), as ``(reader, importer)``, with a path to that import. The walk
+    goes on through a reader, so a second reader behind the first is named too. An
+    importer inside is named ``label``, so moving an import between those modules
+    changes no key.
+    """
+    found: dict[tuple[str, str], list[str]] = {}
+    for current, edge, path in _walk(edges, known, inside):
+        if edge.target in readers:
+            importer = label if inside(current) else current
+            step = f"{edge.target} ({edge.source}:{edge.line}, {edge.kind})"
+            found.setdefault((edge.target, importer), [*path, step])
+    return found
+
+
+def reached(
+    edges: tuple[Import, ...], known: frozenset[str], inside: Callable[[str], bool]
+) -> frozenset[str]:
+    """
+    The modules ``inside`` names and every module importing them runs (``_walk``).
+    """
+    found = {module for module in known if inside(module)}
+    found.update(edge.target for _, edge, _ in _walk(edges, known, inside))
+    return frozenset(found)
+
+
 def store_disk_edges(
     edges: tuple[Import, ...], readers: frozenset[str], known: frozenset[str]
 ) -> dict[tuple[str, str], list[str]]:
     """
-    Every import of a disk reader that importing the store runs, as ``(reader,
-    importer)``, with a path from the store to that import.
-
-    A store module's own imports count whatever their kind, as rule 2 always has:
-    the store importing a reader inside a function or under ``TYPE_CHECKING`` is
-    still the store importing it. Beyond the store only eager edges are followed,
-    since a lazy or typing import elsewhere does not run when the store is imported.
-    The walk goes on through a reader, so a second reader behind the first is named
-    too. An importer inside the store is named ``STORE``, so moving an import
-    between store modules changes no key.
+    Every import of a disk reader that importing the store runs, from whichever of
+    its modules (``disk_edges``); the store's modules are named ``STORE``.
     """
-    out: dict[str, list[Import]] = {}
-    for edge in edges:
-        if edge.target in known and (in_store(edge.source) or edge.kind == "eager"):
-            out.setdefault(edge.source, []).append(edge)
-    roots = sorted(module for module in known if in_store(module))
-    path: dict[str, list[str]] = {module: [module] for module in roots}
-    todo = list(roots)
-    found: dict[tuple[str, str], list[str]] = {}
-    while todo:
-        current = todo.pop(0)
-        for edge in sorted(out.get(current, ()), key=lambda e: (e.target, e.line)):
-            step = f"{edge.target} ({edge.source}:{edge.line}, {edge.kind})"
-            if edge.target in readers:
-                importer = STORE if in_store(current) else current
-                found.setdefault((edge.target, importer), [*path[current], step])
-            if edge.target not in path:
-                path[edge.target] = [*path[current], step]
-                todo.append(edge.target)
-    return found
+    return disk_edges(edges, readers, known, in_store, STORE)
 
 
 # Every import of a disk reader that importing the store runs, keyed by the reader and
@@ -848,6 +887,10 @@ PURE: dict[str, Claim] = {
     "pptmstr.boardlog": Claim(
         "pptmstr/boardlog.py", "**Pure: no IO, no clock, and nothing here is in the snapshot.**"
     ),
+    # channels/facts.py:5
+    "pptmstr.channels.facts": Claim(
+        "pptmstr/channels/facts.py", "Pure: no disk, no clock, no thread"
+    ),
     # channels/records.py:9
     "pptmstr.channels.records": Claim(
         "pptmstr/channels/records.py", "It is pure: no disk, no clock, no entropy"
@@ -1097,6 +1140,62 @@ def test_only_app_imports_the_channel_log() -> None:
         if edge.target == CHANNEL_LOG and not edge.source.startswith(CHANNEL_LOG)
     }
     assert importers == {"pptmstr.app"}, sorted(importers)
+
+
+CHANNEL_FACTS = "pptmstr.channels.facts"
+
+
+def _is_channel_facts(module: str) -> bool:
+    return module == CHANNEL_FACTS
+
+
+def test_channel_facts_reach_no_disk_reader_but_through_the_stores_edges() -> None:
+    """
+    ``facts`` is the half of a link's log with no disk. Importing it runs
+    ``intents`` and ``model``, which reach ``approval`` and through it the disk
+    (``STORE_DISK_EXCEPTIONS``), so those edges are allowed here for the reason
+    they are allowed there, and B5 removes them from both. Any other edge to a
+    reader -- ``facts`` importing ``journal.files``, ``settings`` or ``log`` in any
+    form -- is new and fails.
+    """
+    readers = disk_readers()
+    assert CHANNEL_FACTS in modules() and CHANNEL_FACTS not in readers
+    found = disk_edges(imports(), readers, frozenset(modules()), _is_channel_facts, CHANNEL_FACTS)
+    allowed = {key for key in STORE_DISK_EXCEPTIONS if key[1] != STORE}
+    new = set(found) - allowed
+    assert not new, "importing channels.facts reaches a disk reader: " + "; ".join(
+        f"{reader} imported by {importer}, by " + " -> ".join(found[(reader, importer)])
+        for reader, importer in sorted(new)
+    )
+
+
+# Calls that start a thread, by the name they resolve to.
+_THREAD_STARTS = frozenset(
+    {
+        "threading.Thread",
+        "threading.Timer",
+        "_thread.start_new_thread",
+        "concurrent.futures.ThreadPoolExecutor",
+        "pptmstr.serialworker.SerialWorker",
+    }
+)
+
+
+def test_nothing_importing_channel_facts_runs_starts_a_thread() -> None:
+    """
+    The appender's thread is ``log``'s (``ChannelWriter`` through
+    ``serialworker``). Neither is reached from ``facts``, and no module it reaches
+    calls a thread into being.
+    """
+    reach = reached(imports(), frozenset(modules()), _is_channel_facts)
+    assert not reach & {CHANNEL_LOG, "pptmstr.serialworker"}, sorted(reach)
+    found = [
+        f"{module} line {call.line}: {call.dotted} in {call.function}"
+        for module in sorted(reach)
+        for call in calls_of(module)
+        if call.dotted in _THREAD_STARTS or call.dotted.rpartition(".")[2] == "Thread"
+    ]
+    assert not found, "importing channels.facts reaches a thread: " + ", ".join(found)
 
 
 def _defined_at_top(module: str) -> frozenset[str]:

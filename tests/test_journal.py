@@ -181,10 +181,10 @@ def test_a_channel_record_under_a_link_is_not_read_through(tmp_path: Path) -> No
     A link's log is read by ``files.read``, so the refusal is the one a board
     gets. The planted record is a channel fact in the form ``channels.log`` writes.
     """
-    from pptmstr.channels import log as channel_log
+    from pptmstr.channels import facts as channel_facts
 
-    created = channel_log.encode(
-        channel_log.LinkCreated(at=1.0, channel_id="c-1", members=("a", "b"), charter="x")
+    created = channel_facts.encode(
+        channel_facts.LinkCreated(at=1.0, channel_id="c-1", members=("a", "b"), charter="x")
     )
     elsewhere = tmp_path / "elsewhere"
     write(elsewhere, (created,))

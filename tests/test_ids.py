@@ -109,7 +109,7 @@ def test_a_command_id_is_its_utc_second_and_twelve_hex() -> None:
 
 def test_a_channel_id_is_a_name_a_link_log_can_live_under() -> None:
     """
-    A channel's id names its log's directory (``channels.log.LinkKey``), so the id
+    A channel's id names its log's directory (``channels.facts.LinkKey``), so the id
     ``link_leads`` mints must pass the plain-name rule the log lister reads
     directories back by.
     """

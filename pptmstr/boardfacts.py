@@ -261,7 +261,7 @@ def outcomes(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> t
 
         case ChannelLinked() | ChannelClosed() | ChannelsRestored():
             # A link is not a board fact. Its record is the channel's own log
-            # (``channels.log.outcomes``), never a member's board.
+            # (``channels.facts.outcomes``), never a member's board.
             return ()
 
         case SessionSettled() | WakeChainReleased() | PeerWakeSent() | DecisionWakeSent():

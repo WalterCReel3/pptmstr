@@ -2598,7 +2598,7 @@ def why_held(world: Snapshot, link_id: ChannelId, messages: Iterable[Concern] = 
     link = world.channels.get(link_id)
     if link is None:
         # A channel log read short or stopped is withheld from the store whole
-        # (``channels.log.restore``), so the two look alike from here.
+        # (``channels.facts.restore``), so the two look alike from here.
         return "is not open in this run (not restored, or its log not read whole)"
     if not link.live:
         return "is closed"
