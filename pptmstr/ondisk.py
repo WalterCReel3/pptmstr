@@ -159,9 +159,14 @@ def replace(target: Path, data: bytes, *, durable: bool) -> None:
     only if the filesystem orders the rename after the data. It is keyword-only and
     has no default, so each caller states which it is.
 
-    The result keeps the permission bits of the regular file it replaces, read just
-    before the bytes are staged. Where there was none, or the name held something
-    else, it is 0600, as ``tempfile`` makes it.
+    The result keeps the permission bits of the regular file it replaces, read with
+    an ``lstat`` just before the bytes are staged; setuid, setgid and sticky are not
+    carried onto the new bytes. Where the name is free, or holds a link, a FIFO or
+    anything else that is not a regular file, the result is 0600, as ``tempfile``
+    makes it: a link is replaced by the file, and what it pointed at is left alone.
+    A directory under the name fails the rename. An ``lstat`` that fails for any
+    reason but absence raises before anything is staged, so a file whose mode
+    cannot be read is never silently made 0600.
     """
     mode = _permissions(target)
     fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=TEMP_PREFIX, suffix=_TEMP_SUFFIX)
@@ -182,13 +187,14 @@ def replace(target: Path, data: bytes, *, durable: bool) -> None:
 
 def _permissions(target: Path) -> int | None:
     """
-    The permission bits of the regular file at ``target``, or None. Not following
-    a link, and None for anything that cannot be read: the bits are kept where they
-    can be, and missing them is no reason not to write.
+    The permission bits of the regular file at ``target``, or None where the name
+    is free or holds something other than a regular file. Not following a link.
+    Any other failure raises: writing anyway would put 0600 over a file whose
+    bits were meant to survive.
     """
     try:
         status = os.stat(target, follow_symlinks=False)
-    except OSError:
+    except FileNotFoundError:
         return None
     return stat.S_IMODE(status.st_mode) & 0o777 if stat.S_ISREG(status.st_mode) else None
 

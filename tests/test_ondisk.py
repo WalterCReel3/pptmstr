@@ -419,6 +419,27 @@ def test_replace_over_a_link_replaces_the_link_and_not_what_it_points_at(
     assert elsewhere.read_bytes() == b"theirs"
 
 
+def test_replace_over_a_fifo_puts_an_owner_only_file_there(tmp_path: Path) -> None:
+    target = tmp_path / "settings.json"
+    os.mkfifo(target, 0o644)
+
+    replace(target, b"new", durable=False)
+
+    assert target.is_file() and target.read_bytes() == b"new"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_replace_over_a_directory_raises_and_leaves_no_staged_file(tmp_path: Path) -> None:
+    target = tmp_path / "settings.json"
+    target.mkdir()
+
+    with pytest.raises(IsADirectoryError):
+        replace(target, b"new", durable=False)
+
+    assert target.is_dir()
+    assert _names(tmp_path) == ["settings.json"]
+
+
 @pytest.mark.parametrize("durable", [True, False])
 def test_replace_flushes_before_the_rename_only_when_durable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, durable: bool
@@ -436,7 +457,7 @@ def test_replace_flushes_before_the_rename_only_when_durable(
         assert steps == [placed]
 
 
-@pytest.mark.parametrize("failing", ["replace", "fsync"])
+@pytest.mark.parametrize("failing", ["replace", "fsync", "fchmod"])
 def test_replace_that_fails_leaves_the_old_file_whole_and_no_staged_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
 ) -> None:
@@ -448,6 +469,28 @@ def test_replace_that_fails_leaves_the_old_file_whole_and_no_staged_file(
         replace(target, b"new", durable=True)
 
     assert target.read_bytes() == b"old"
+    assert _names(tmp_path) == ["settings.json"]
+
+
+def test_replace_that_cannot_read_the_old_mode_raises_and_leaves_the_old_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "settings.json"
+    target.write_bytes(b"old")
+    target.chmod(0o644)
+
+    def unreadable(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "stat", unreadable)
+
+    with pytest.raises(OSError) as raised:
+        replace(target, b"new", durable=False)
+
+    monkeypatch.undo()
+    assert raised.value.errno == errno.EIO
+    assert target.read_bytes() == b"old"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
     assert _names(tmp_path) == ["settings.json"]
 
 
