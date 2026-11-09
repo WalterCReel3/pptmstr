@@ -478,7 +478,7 @@ Deferred: B9 stage 2 and B6's methods-to-functions step.
 **Defects the designs found** (all reproduced by probes, not yet fixed):
 - `brief.write_entry` can give two entries the same number when an existing entry cannot be read.
 - One non-UTF-8 entry blocks every later brief write.
-- Rename-based saves leave files at mode 0600.
+- Rename-based saves leave files at mode 0600. (Resolved by B2, 3cb1528: `replace` keeps an existing file's bits; 14d24cd closed the unreadable-mode case.)
 - `test_board_pane.py:3289` cites `store._restore`, which does not exist.
 - `effects.py:622` cites `bus.wake_lines`, which does not exist.
 

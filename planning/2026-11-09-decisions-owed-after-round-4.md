@@ -252,7 +252,7 @@ the upgrade's diff stay separable.
      `layout_ini.keep_layout_for`). hello_imgui's own saves of `imgui.ini` do not go through
      pptmstr. So it never touches the UI thread mid-run. The section above guessed "every dock
      move", and that guess was wrong.
-   - `sessions.save_overlay` runs on a bookmark or rename click, and the launcher's own
+   - `sessions.save_overlay` runs on a bookmark click (`sessions.set_title` has no caller), and the launcher's own
      docstring argues for durability: "a bookmark that survives only a clean shutdown is a
      bookmark lost by the crash it was made to protect against".
    - `settings.save` has one caller (`app._save`), on a deliberate change.
