@@ -293,8 +293,15 @@ the upgrade's diff stay separable.
    - **Interim**, until that exists: `durable=True` for both. A rare multi-second freeze on a
      deliberate click is visible and recoverable. A lost `settings.json` is silent.
 
-   Awaiting the operator's confirmation.
-4. **`replace` keeps an existing file's mode; a new file is 0600.**
+   Confirmed by the operator ("So, continue?", read by the lead as confirming the plan, and
+   said so when the round started). Built in Round 5: all three saves are durable, and the
+   off-thread design is `planning/2026-11-09-ui-saves-leave-the-frame.md`.
+4. **`replace` keeps an existing file's mode; a new file is 0600.** This section's premise
+   was stale. B2's build (3cb1528, 2026-11-07) had already made `replace` keep the target's
+   bits. The "Rename-based saves leave files at mode 0600" line in the module plan's
+   defect list described the code before B2. Round 5 closed the one remaining gap: an
+   `lstat` that failed for a reason other than absence used to fall back to 0600 over the
+   existing file. It now raises before writing (14d24cd).
 5. **`create_once` keeps `durable`.**
 6. **pyproject first:** `asyncio_default_fixture_loop_scope = "function"` is set (it is
    pytest-asyncio's default, so nothing changes in behaviour). On the current `.venv`

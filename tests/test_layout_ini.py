@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from pptmstr import layout_ini
+from pptmstr import layout_ini, ondisk
 from pptmstr.layout_ini import with_window_beside
 
 # Two layouts as hello_imgui writes them, cut down: BOARD dragged into a node of
@@ -223,6 +223,37 @@ def test_a_replaced_file_keeps_its_permission_bits(tmp_path: Path) -> None:
 
     assert layout_ini.keep_layout_for(ini, "DIGEST", "BOARD") is not None
     assert stat.S_IMODE(ini.stat().st_mode) == 0o644
+
+
+def test_a_replaced_file_is_flushed_to_the_device_before_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    So a power loss as well as a process crash leaves the old layout or the new
+    one, never a short file hello_imgui would read as no layout. Patched on
+    ``ondisk.os``: the primitive calls ``os.fsync`` and ``os.replace`` through the
+    module.
+    """
+    ini = tmp_path / "pptmstr.ini"
+    ini.write_bytes(SAVED.encode())
+    steps: list[tuple[object, ...]] = []
+    real_fsync, real_replace = ondisk.os.fsync, ondisk.os.replace
+
+    def fsync(fd: int) -> None:
+        held = ondisk.os.fstat(fd)
+        steps.append(("fsync", held.st_ino, ondisk.os.pread(fd, held.st_size + 1, 0)))
+        real_fsync(fd)
+
+    def rename(src: str, dst: object) -> None:
+        steps.append(("replace", dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(ondisk.os, "fsync", fsync)
+    monkeypatch.setattr(ondisk.os, "replace", rename)
+
+    assert layout_ini.keep_layout_for(ini, "DIGEST", "BOARD") is not None
+
+    assert steps == [("fsync", ini.stat().st_ino, ini.read_bytes()), ("replace", ini)]
 
 
 def test_no_file_is_nothing_to_do_and_none_is_made(tmp_path: Path) -> None:

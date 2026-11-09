@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from claude_agent_sdk import SDKSessionInfo
 
+from pptmstr import ondisk
 from pptmstr import sessions as sessions_mod
 from pptmstr import settings as settings_mod
 from pptmstr.sessions import (
@@ -202,12 +203,8 @@ def test_a_save_whose_rename_fails_leaves_the_old_overlay_whole_and_no_temp(
     assert [p.name for p in tmp_path.iterdir()] == ["sessions.json"]
 
 
-def test_the_overlay_is_written_as_sorted_indented_ascii_json_and_not_flushed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_overlay_is_written_as_sorted_indented_ascii_json(tmp_path: Path) -> None:
     path = tmp_path / "sessions.json"
-    flushed: list[int] = []
-    monkeypatch.setattr(os, "fsync", flushed.append)
     overlay = set_title(set_bookmark({}, "b", True), "a", "caf\u00e9 \udc80")
 
     save_overlay(overlay, path)
@@ -220,7 +217,35 @@ def test_the_overlay_is_written_as_sorted_indented_ascii_json_and_not_flushed(
     }
     assert path.read_bytes() == (json.dumps(expected, indent=2, sort_keys=True) + "\n").encode()
     assert path.read_bytes().isascii()
-    assert flushed == []
+
+
+def test_a_save_flushes_the_written_bytes_to_the_device_before_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A bookmark is made against a crash, so it has to survive one: the bytes reach
+    the device before the name moves onto them. Patched on ``ondisk.os``: the
+    primitive calls ``os.fsync`` and ``os.replace`` through the module.
+    """
+    path = tmp_path / "sessions.json"
+    steps: list[tuple[object, ...]] = []
+    real_fsync, real_replace = ondisk.os.fsync, ondisk.os.replace
+
+    def fsync(fd: int) -> None:
+        held = ondisk.os.fstat(fd)
+        steps.append(("fsync", held.st_ino, ondisk.os.pread(fd, held.st_size + 1, 0)))
+        real_fsync(fd)
+
+    def rename(src: str, dst: object) -> None:
+        steps.append(("replace", dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(ondisk.os, "fsync", fsync)
+    monkeypatch.setattr(ondisk.os, "replace", rename)
+
+    save_overlay(set_bookmark({}, "abc", True), path)
+
+    assert steps == [("fsync", path.stat().st_ino, path.read_bytes()), ("replace", path)]
 
 
 def test_a_saved_overlay_keeps_the_files_permission_bits(tmp_path: Path) -> None:

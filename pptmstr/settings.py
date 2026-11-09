@@ -523,11 +523,11 @@ def save(
     """
     Write settings atomically, or refuse and say why. None is not a refusal.
 
-    Renamed over the target by ``ondisk.replace``, so an interrupted write leaves the
-    previous file intact instead of a truncated one, and the file keeps its
-    permission bits. Not flushed to the device first: this runs on the UI thread, and
-    after a power loss the old file is whole only if the filesystem orders the rename
-    after the data.
+    Flushed to the device and renamed over the target by ``ondisk.replace``, so an
+    interrupted write, by a process crash or a power loss, leaves the previous file
+    intact instead of a truncated one, and the file keeps its permission bits. The
+    flush runs on the UI thread: on a disk busy writing back other data it can hold
+    the frame for seconds.
 
     **Refused in two cases, and both are about ``board_log``.** The file is
     written whole from ``settings``, so a save is the one place a value nobody
@@ -556,7 +556,9 @@ def save(
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         data = (json.dumps(encoded(settings), indent=2, sort_keys=True) + "\n").encode("utf-8")
-        ondisk.replace(target, data, durable=False)
+        # Durable: a lost settings file is silent. The cost is a stall on a busy disk
+        # while this is on the UI thread.
+        ondisk.replace(target, data, durable=True)
     except OSError:
         pass
     return None

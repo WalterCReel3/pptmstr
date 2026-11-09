@@ -119,11 +119,10 @@ def keep_layout_for(path: Path, new: str, beside: str) -> str | None:
     ``UnicodeDecodeError`` when the file could not be read or replaced; the caller
     decides that the app starts anyway.
 
-    Replaced by rename (``ondisk.replace``), so a process crash part-way leaves the
-    old file whole and not a truncated one hello_imgui would read as no layout at
-    all. Not flushed to the device first, so after a power loss that holds only if
-    the filesystem orders the rename after the data. The file keeps its permission
-    bits.
+    Replaced by rename (``ondisk.replace``) after the bytes are flushed to the
+    device, so a crash part-way, of the process or the machine, leaves the old file
+    whole and not a truncated one hello_imgui would read as no layout at all. The
+    file keeps its permission bits.
     """
     try:
         # newline="" so the file's own line endings are what is written back.
@@ -134,6 +133,7 @@ def keep_layout_for(path: Path, new: str, beside: str) -> str | None:
     patched = with_window_beside(text, new, beside)
     if patched == text:
         return None
-    replace(path, patched.encode("utf-8"), durable=False)
+    # Durable: this runs once, before the runner starts, so no frame waits on the flush.
+    replace(path, patched.encode("utf-8"), durable=True)
     added = patched.count(f"[Window][{new}]") - text.count(f"[Window][{new}]")
     return f"{new} added beside {beside} in {added} saved layout(s) of {path}"

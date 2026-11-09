@@ -177,11 +177,11 @@ def save_overlay(overlay: Overlay, path: Path | None = None) -> None:
     """
     Write the overlay atomically.
 
-    Renamed over the target by ``ondisk.replace``, so an interrupted write leaves the
-    previous overlay intact rather than a truncated one, and the file keeps its
-    permission bits. Not flushed to the device first: this runs on the UI thread, and
-    after a power loss the old overlay is whole only if the filesystem orders the
-    rename after the data.
+    Flushed to the device and renamed over the target by ``ondisk.replace``, so an
+    interrupted write, by a process crash or a power loss, leaves the previous
+    overlay intact rather than a truncated one, and the file keeps its permission
+    bits. The flush runs on the UI thread: on a disk busy writing back other data it
+    can hold the frame for seconds.
 
     Failures are swallowed: this is called when the operator clicks a bookmark, and a
     read-only config directory must not take down a frame.
@@ -196,7 +196,9 @@ def save_overlay(overlay: Overlay, path: Path | None = None) -> None:
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        ondisk.replace(target, data, durable=False)
+        # Durable: a lost overlay is silent, and a bookmark must survive the crash it
+        # guards against. The cost is a stall on a busy disk while this is on the UI thread.
+        ondisk.replace(target, data, durable=True)
     except OSError:
         return
 
