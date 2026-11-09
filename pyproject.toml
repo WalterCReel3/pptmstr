@@ -214,4 +214,7 @@ warn_unused_ignores = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# pytest-asyncio warns when this is unset, and filterwarnings turns that warning
+# into a configure error on a freshly resolved environment.
+asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error"]
