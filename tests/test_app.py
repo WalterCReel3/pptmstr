@@ -2685,7 +2685,7 @@ def test_two_resumed_leads_are_each_restored_between_their_announce_and_anyone_e
 ) -> None:
     """
     What keeps a lead that answered in an earlier run from being told it owes
-    (``store._peer_waking``'s ``BoardRestored`` arm): with both leads resumed at
+    (``store.waking._peer_waking``'s ``BoardRestored`` arm): with both leads resumed at
     once, no other session's restore is applied between a session's announce
     and its own restore, so the asker's restore never meets the recipient
     wakeable without its answer. The two launches race on the log reads they
@@ -2742,7 +2742,7 @@ def test_were_the_askers_restore_applied_inside_the_recipients_it_would_wake_it_
     recipient's restore is held back until the asker's is in, so the asker's
     restore meets the recipient announced and wakeable but without its
     answer: it is woken for a question it answered. Its own restore then lets
-    the wake go (``store._still_owed``), and the shell, which waits while the
+    the wake go (``store.waking._still_owed``), and the shell, which waits while the
     session is still starting, drops it unsent (``app._still_to_read``).
     """
     import asyncio

@@ -233,7 +233,7 @@ _REVIEW = frozenset(
         # did. What stands on that rung is the reducer's rule and not this gate:
         # only the agent that declared a task and never held it may amend it, it
         # may not then claim it, and the text it replaced is kept as a version
-        # (``store._amender_refusal``, ``store._claim_refusal``).
+        # (``store.tasks._amender_refusal``, ``store.tasks._claim_refusal``).
         _BUS_AMEND,
         # A message to another team's lead is a message between agents, reviewed
         # for ``post_concern``'s reason, and gated by the *sender's* rung: each
@@ -251,8 +251,8 @@ _REVIEW = frozenset(
         # declarer's session once the declarer has stopped -- a sub-agent whose
         # record is terminal, or an agent of an earlier run -- and no agent it
         # could not take the claim back from holds it
-        # (``store._withdrawer_refusal``, ``store._has_stopped``,
-        # ``store._may_take_claim``).
+        # (``store.tasks._withdrawer_refusal``, ``store.tasks._has_stopped``,
+        # ``store.tasks._may_take_claim``).
         _BUS_WITHDRAW,
     }
 )
@@ -305,7 +305,7 @@ _AUTONOMOUS_AUTO = _REVIEW
 # **`release_task` is bookkeeping on the caller's own claim, with one exception
 # that rides the same auto-approved name on every rung, ``STRICT`` included.** The
 # root of a session may release a claim that is not its own when the holder is an
-# agent of an earlier run of that session (`store._may_reclaim`): it puts another
+# agent of an earlier run of that session (`store.tasks._may_reclaim`): it puts another
 # agent's task back on the board, and no operator is asked. It is here because
 # what it undoes is a claim nothing running will ever finish or give back, it
 # gives the root nothing but the task's return to PENDING -- the root cannot
@@ -386,7 +386,7 @@ _AUTONOMOUS_AUTO = _REVIEW
 # carry on, which a parked call does not let it do. The row is the review:
 # nothing runs on this call, and nothing runs at all until the operator presses
 # twice on the exact string, which only an intent naming no node can start
-# (`store._approved`). `withdraw_command` removes the asker's own row.
+# (`store.commands._approved`). `withdraw_command` removes the asker's own row.
 #
 # `read_commands` hands text to a second reader, as `read_decisions` does: a
 # session's root reads every command asked in it
@@ -404,7 +404,7 @@ _AUTONOMOUS_AUTO = _REVIEW
 #
 # **`withdraw_peer_message` is here on `withdraw_decision`'s grounds, without a
 # reason.** It takes back a message the caller's own lead sent, which only that
-# sender may (`store._message_withdrawal_refusal`), so like `withdraw_decision`
+# sender may (`store.mail._message_withdrawal_refusal`), so like `withdraw_decision`
 # it removes the asker's own act. Parking it would leave a question the sender
 # has disowned open for the other lead while the operator gets to the row,
 # which is the case-study failure the tool exists to end.

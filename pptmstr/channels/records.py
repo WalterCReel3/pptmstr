@@ -349,7 +349,7 @@ class PeerRefusal(enum.Enum):
 class PeerWithdrawRefusal(enum.Enum):
     """
     Why a withdrawal by an agent (``intents.ConcernWithdrawn`` with a node)
-    was not applied (``store._message_withdrawal_refusal``).
+    was not applied (``store.mail._message_withdrawal_refusal``).
 
     ``NOT_YOURS`` is a message this store does not hold, or one another agent
     sent: one member for both, so a lead cannot tell an id that exists from
@@ -432,7 +432,7 @@ class PeerIdentity:
 def logged_charter(text: str | None) -> Charter:
     """
     A logged charter mark as the member it names. One this build does not define,
-    or none, reads as unstated, for the reason ``store._stated`` reads a basis so.
+    or none, reads as unstated, for the reason ``store.restore._stated`` reads a basis so.
     """
     try:
         return Charter.UNSTATED if text is None else Charter(text)

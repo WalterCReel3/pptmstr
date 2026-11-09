@@ -296,7 +296,7 @@ def _stranded(row: BoardTask, root: bool) -> str:
     **Only the session's lead is told a release will work, and only where it
     will.** The store takes a release that is not the holder's from the root of
     the task's session when the holder is an agent of an earlier run of it
-    (``store._may_reclaim``), and from nobody else. Told to a worker, or about a
+    (``store.tasks._may_reclaim``), and from nobody else. Told to a worker, or about a
     holder that merely finished its turn, the sentence sends an agent to make a
     call that is refused. Which holder it is comes from the row
     (``BoardTask.holder_left_behind``) and never from the holder's name, which
@@ -1383,7 +1383,7 @@ def _duplicate_id_text(on_my_board: bool | None, held_off_fleet: str | None = No
 
     **Two mistakes under one refusal, named apart when the caller knows which.**
     Task ids are one namespace for every session in the window
-    (``store._declaration_refusal``), so the id may be a row of the declarer's
+    (``store.tasks._declaration_refusal``), so the id may be a row of the declarer's
     own board or a task of another session that no read of this board shows.
     "Claim the task that is there" is the recovery for the first and a dead end
     for the second -- that claim is answered "not on your board" -- and a task

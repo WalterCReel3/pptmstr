@@ -51,7 +51,8 @@ from pptmstr.intents import (
 )
 from pptmstr.journal import codec
 from pptmstr.model import AgentState, Concern, ConcernState, NodeId, Snapshot, Unplaced
-from pptmstr.store import Store, _apply, _concern_wake
+from pptmstr.store import Store, _apply
+from pptmstr.store.mail import _concern_wake
 from tests.test_bus import _live_bus
 
 S, Z, C = "s", "z", "c"
@@ -1948,7 +1949,7 @@ def test_a_parked_withdrawal_over_a_closed_link_reaches_nobody_and_says_so() -> 
 
 def test_the_operator_approving_a_parked_withdrawal_starts_its_links_chain_again() -> None:
     """
-    The chain-release lookup (``store._moved``) finds the link through the
+    The chain-release lookup (``store.waking._moved``) finds the link through the
     withdrawn message, as the row does; a withdrawal of a message the caller
     did not send moves no link.
     """

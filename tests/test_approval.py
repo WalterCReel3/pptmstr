@@ -1809,12 +1809,12 @@ def test_the_comment_arguing_the_auto_approved_set_names_limits_and_questions_th
     assert {"MAX_OPEN_DECISIONS_PER_ASKER", "MAX_OPEN_SUBAGENT_DECISIONS"} <= cited
     for name in cited:
         assert hasattr(model, name), name
-    assert "`store._may_reclaim`" in source and hasattr(store, "_may_reclaim")
+    assert "`store.tasks._may_reclaim`" in source and hasattr(store.tasks, "_may_reclaim")
     # The command tools' half of the argument cites the reducer's one arm that
     # starts a command, who reads one, and the two bounds, each by name.
     from pptmstr import command
 
-    assert "`store._approved`" in source and hasattr(store, "_approved")
+    assert "`store.commands._approved`" in source and hasattr(store.commands, "_approved")
     assert "`model.Snapshot.commands_readable_by`" in source
     assert hasattr(model.Snapshot, "commands_readable_by")
     bounds = set(re.findall(r"`command\.([A-Z_]+)`", source))
@@ -2771,7 +2771,7 @@ def test_a_decision_without_a_channel_is_never_parked(
 def test_a_parked_call_to_a_peer_names_the_session_it_reaches() -> None:
     """
     RV5 1(c): the store finishes the row with the session at the other end of
-    the link (``store._peer_row``); the channel alone does not say whom.
+    the link (``store.approvals._peer_row``); the channel alone does not say whom.
     """
     from pptmstr.approval import peer_channel, summarize
 

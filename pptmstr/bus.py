@@ -41,7 +41,7 @@ snapshot the read delivered; a dry run emits no write.
 
 **The bus raises and withdraws a decision and never ends one.** An answer and a
 dismissal are the operator's, and the reducer tells them from an agent's only by
-the intent naming no node (``store._ended_by_operator``), so nothing here builds
+the intent naming no node (``store.decisions._ended_by_operator``), so nothing here builds
 ``DecisionAnswered`` or ``DecisionDismissed``: a handler that did would be the
 only thing between an agent and writing its own answer.
 

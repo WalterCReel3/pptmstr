@@ -832,7 +832,7 @@ def test_a_write_the_board_accepted_answers_with_no_refusal() -> None:
     store.apply(TaskClaimRequested(DEV, request_id="k1"))
     released = store.apply(TaskReleased(DEV, "t1", request_id="x1"))
     # By id, because a bare claim no longer returns a task this node released --
-    # see `store._pick_claim`. Naming it is the documented way back to a task you
+    # see `store.tasks._pick_claim`. Naming it is the documented way back to a task you
     # gave up, and it is what this test needs: the subject here is that an accepted
     # write reports no refusal, not which of the two claim forms was used.
     store.apply(TaskClaimRequested(DEV, request_id="k2", task_id="t1"))
@@ -7545,7 +7545,7 @@ def _declared_by_the_stopped_reviewer_held_from_before() -> Store:
     """
     t1, declared by the reviewer of this run, which has stopped, and held by
     an agent of the earlier process -- a holder the lead may release, and so
-    one it may withdraw from (``store._withdrawer_refusal``).
+    one it may withdraw from (``store.tasks._withdrawer_refusal``).
     """
     from pptmstr.intents import AgentFinished
     from pptmstr.model import AgentState

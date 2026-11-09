@@ -1623,7 +1623,7 @@ def test_the_leads_withdrawal_in_a_stopped_declarers_place_survives_the_round_tr
     still saying whose words the reason is. The holder's notice keeps the edit.
 
     The lead holds it: a holder of this run that can still be woken is one
-    whose claim the lead may not end (``store._withdrawer_refusal``), and the
+    whose claim the lead may not end (``store.tasks._withdrawer_refusal``), and the
     lead's own claim is the one this run can give it.
     """
     from pptmstr.model import withdrawal_label

@@ -1328,13 +1328,13 @@ def _decision_after(decision: RestoredDecision, record: _DecisionRecord) -> Rest
 
 def _withdrawer(task: RestoredTask, record: WithdrawnByDeclarer) -> bool | None:
     """
-    Who a withdrawal is by, as ``store._withdrawer_refusal`` admits it: False
+    Who a withdrawal is by, as ``store.tasks._withdrawer_refusal`` admits it: False
     for the task's declarer, True for the root of the declarer's session
     standing in for it, and None for anybody else.
 
     **Half of the store's rule, and the half a log can ask.** The store also
     asks that a root withdrawing in the declarer's place found the declarer
-    stopped (``store._has_stopped``), which is about agent records this log does
+    stopped (``store.tasks._has_stopped``), which is about agent records this log does
     not hold -- as a reclaim's record cannot say its holder was of an earlier
     run (``Reclaimed``). What it can say is who the withdrawer was, and that no
     sub-agent withdrew another's task.

@@ -921,7 +921,7 @@ def draw(
     # empty node table also implies an empty ``needs_you``, so a later check would
     # be reachable only by luck of ordering.
     #
-    # ``nodes`` rather than ``order``, though ``store._preorder`` makes the two
+    # ``nodes`` rather than ``order``, though ``store.nodes._preorder`` makes the two
     # equivalent: it re-attaches orphans at the root specifically so nothing in the
     # node table can be missing from the walk, and the lengths are therefore always
     # equal. ``nodes`` is asked anyway because it is the primary fact and ``order``

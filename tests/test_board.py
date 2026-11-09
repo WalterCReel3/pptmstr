@@ -1458,7 +1458,7 @@ def test_a_row_says_its_holder_was_left_behind_exactly_where_the_lead_may_releas
     kind: str,
 ) -> None:
     """
-    The row's boolean is a second spelling of ``store._may_reclaim``, which the
+    The row's boolean is a second spelling of ``store.tasks._may_reclaim``, which the
     bus turns into an instruction. So the release is made: where the row says
     yes the store takes it, and where the row says no the store refuses.
     """

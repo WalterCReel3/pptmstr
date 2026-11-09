@@ -5,7 +5,7 @@ message waits on a lead remembering to look -- coalesced per link, never for a
 leads ``PEER_WAKE_CHAIN`` times in a row with nothing moving, and at a resume
 only once the resumed session's restore is in the store.
 
-The reducer is driven directly for what the store decides (``store._peer_waking``),
+The reducer is driven directly for what the store decides (``store.waking._peer_waking``),
 and the shell for what it sends (``app._send_wakes``).
 """
 
@@ -68,7 +68,8 @@ from pptmstr.model import (
     WakeChainHeld,
 )
 from pptmstr.settings import Settings
-from pptmstr.store import Store, _apply, _concern_wake
+from pptmstr.store import Store, _apply
+from pptmstr.store.mail import _concern_wake
 
 S, Z, C = "s", "z", "c"
 LEAD: NodeId = (S, None)
@@ -1560,7 +1561,7 @@ def test_the_shell_sends_to_exactly_the_sessions_the_store_wakes(
     import dataclasses
     from types import MappingProxyType
 
-    from pptmstr.store import _wakeable
+    from pptmstr.store.waking import _wakeable
 
     base = linked()
     root = dataclasses.replace(
@@ -1694,7 +1695,7 @@ def test_a_lead_that_ends_its_turn_without_answering_is_not_woken_again_until_it
 
 
 def test_the_settles_wake_stays_pending_while_the_question_is_owed() -> None:
-    """``store._still_owed`` keeps it, or the shell would drop it unsent."""
+    """``store.waking._still_owed`` keeps it, or the shell would drop it unsent."""
     snap, (cid,) = _owes()
     snap, _ = _restarted(snap)
 

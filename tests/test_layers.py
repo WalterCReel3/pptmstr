@@ -3,7 +3,7 @@ The layer rules the tree states in prose, checked against its imports.
 
 Each rule below was a sentence in a docstring, in ``STYLE.md`` or in a planning
 record, and nothing held the code to it (``planning/2026-11-06-modules-are-named-
-for-what-they-require.md``, T3, T7 and A7). Ten are checked here:
+for-what-they-require.md``, T3, T7 and A7). Eleven are checked here:
 
 1. A module whose docstring says it imports no ImGui imports no ``imgui_bundle``,
    directly in any form, and does not reach it through the imports that run when
@@ -26,6 +26,8 @@ for-what-they-require.md``, T3, T7 and A7). Ten are checked here:
 10. ``pptmstr.board`` imports nothing, ``board.words`` imports nothing from
     pptmstr when it runs, and a name ``words`` defines is imported from ``words``
     alone (B5).
+11. Only ``pptmstr.store`` imports a module of ``pptmstr.store``: ``_apply`` is the
+    one door into the step its modules are parts of (B9).
 
 **Read from the source, never imported.** Every import is collected with ``ast``,
 including those inside a function (``lazy``) and those under ``if TYPE_CHECKING:``
@@ -586,7 +588,8 @@ def store_disk_edges(
 # B5 is planning/2026-11-07-board-and-gate-packages.md, which deletes approval for gate/
 # and leaves the store importing only its pure modules.
 STORE_DISK_EXCEPTIONS: dict[tuple[str, str], str] = {
-    # store.py:35, for Policy, Summary, peer_channel and summary_of.
+    # store/__init__.py for Policy; store/approvals.py for Summary, peer_channel and
+    # summary_of; store/waking.py for peer_channel.
     ("pptmstr.approval", STORE): "approval's render_diff reads the file a write targets"
     " (``_read``); B5 removes it",
     # intents.py:32, for Policy.
@@ -707,6 +710,29 @@ def test_store_reaches_no_module_that_reads_the_disk() -> None:
     assert not stale, "no longer reached, delete from STORE_DISK_EXCEPTIONS: " + ", ".join(
         f"{reader} imported by {importer}" for reader, importer in sorted(stale)
     )
+
+
+def test_only_the_store_imports_a_module_of_the_store() -> None:
+    """
+    ``_apply`` is the audit point because every step goes through it; a module
+    outside the store calling one of its parts would be a step that does not.
+    """
+    reaching = sorted(
+        f"{edge.source}:{edge.line} imports {edge.target}"
+        for edge in imports()
+        if edge.target.startswith(STORE + ".") and not in_store(edge.source)
+    )
+    assert not reaching, "; ".join(reaching)
+
+
+def test_the_store_is_a_package_of_modules() -> None:
+    """
+    The rule above is vacuous over a store with no modules.
+    """
+    assert {module for module in modules() if module.startswith(STORE + ".")} >= {
+        f"{STORE}.tasks",
+        f"{STORE}.waking",
+    }
 
 
 # -- 3. nothing outside ui imports ui ----------------------------------------------
@@ -836,12 +862,28 @@ PURE: dict[str, Claim] = {
     "pptmstr.ui.splash": NO_IMGUI["pptmstr.ui.splash"],
     # ui/typeset/parts.py:4
     "pptmstr.ui.typeset.parts": NO_IMGUI["pptmstr.ui.typeset.parts"],
+    # The modules of the store's step, each saying so in its docstring.
+    **{
+        f"{STORE}.{name}": Claim(f"pptmstr/store/{name}.py", "Pure: no SDK, no clock, no IO")
+        for name in (
+            "approvals",
+            "commands",
+            "decisions",
+            "mail",
+            "nodes",
+            "owing",
+            "peers",
+            "restore",
+            "tasks",
+            "waking",
+        )
+    },
 }
 
 # store holds the reducer and the Store cell around it. STYLE.md:49-50: ``now`` is a
 # parameter so the core cannot read a clock; the entry point supplies it, and this is
-# the one function that does.
-STORE_CLOCK_SITES = frozenset({"_clock"})
+# the one function that does, by its module and name.
+STORE_CLOCK_SITES = frozenset({("pptmstr.store", "_clock")})
 
 
 @pytest.mark.parametrize("module", sorted(PURE))
@@ -862,7 +904,13 @@ def test_a_pure_module_reads_no_clock(module: str) -> None:
 
 
 def test_store_reads_a_clock_only_at_its_entry_point() -> None:
-    sites = {call.function for call in calls_of("pptmstr.store") if call.dotted in _CLOCKS}
+    sites = {
+        (module, call.function)
+        for module in modules()
+        if in_store(module)
+        for call in calls_of(module)
+        if call.dotted in _CLOCKS
+    }
     new = sites - STORE_CLOCK_SITES
     stale = STORE_CLOCK_SITES - sites
     assert not new, f"store reads a clock in {sorted(new)}; take ``now`` as a parameter"

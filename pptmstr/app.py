@@ -1234,7 +1234,7 @@ def _sendable(snap: Snapshot, session_id: str) -> bool:
     a card recalled from its file, not done, cancelled or failed, and on the
     fleet.
 
-    Must agree with the store's ``store._wakeable``, which asks it to never
+    Must agree with the store's ``store.waking._wakeable``, which asks it to never
     leave a peer wake pending that this would drop. Were this to refuse a
     session the store would wake, each drop is said (``intents.PeerWakeSent``)
     with nothing covered, the store asks a counted wake again, and the link's
@@ -1304,7 +1304,7 @@ def _still_to_read(snap: Snapshot, wake: effects.SessionWoken) -> bool:
     ordered, whose messages that are not quiet may have been withdrawn,
     whose decisions may have ended, and whose questions owed an answer
     (``Snapshot.peer_owing``) may have been answered. Quiet mail alone wakes nobody, here as in
-    the store (``store._still_owed``).
+    the store (``store.waking._still_owed``).
     """
     if wake.reason is not effects.WakeReason.PEER_MESSAGE:
         return True

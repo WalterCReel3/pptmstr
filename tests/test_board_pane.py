@@ -3286,7 +3286,7 @@ def _blocked_by_a_removed_session(monkeypatch) -> tuple[Snapshot, list[str]]:
     """
     A session on the fleet whose restore left out ``t1`` because the removed
     session's board has it. The report is written by hand -- it is what
-    ``store._restore`` records -- and whether its holder is off the fleet is the
+    ``store.restore._restored`` records -- and whether its holder is off the fleet is the
     reducer's.
     """
     from pptmstr.model import NotPlaced, Unplaced

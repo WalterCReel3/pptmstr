@@ -13,6 +13,8 @@ import dataclasses
 import itertools
 import pathlib
 import random
+import re
+import typing
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
@@ -69,6 +71,9 @@ from pptmstr.intents import (
     ApprovalRequested,
     ApprovalResolved,
     BoardRestored,
+    ChannelClosed,
+    ChannelLinked,
+    ChannelsRestored,
     CommandApproved,
     CommandEnded,
     CommandRefused,
@@ -84,12 +89,15 @@ from pptmstr.intents import (
     DecisionDismissed,
     DecisionRaised,
     DecisionsRead,
+    DecisionWakeSent,
     DecisionWithdrawn,
     FailedSessionClosed,
     FailureAcknowledged,
     Intent,
+    PeerSent,
     SessionDetached,
     SessionRecalled,
+    SessionSettled,
     StateChanged,
     SubagentDelivered,
     SubagentProgress,
@@ -103,6 +111,7 @@ from pptmstr.intents import (
     TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
+    WakeChainReleased,
 )
 from pptmstr.journal import codec
 from pptmstr.model import (
@@ -146,7 +155,9 @@ from pptmstr.model import (
     is_address_only,
     stored_as_sent,
 )
-from pptmstr.store import Store, _apply, _raise_refusal, _request_refusal
+from pptmstr.store import Store, _apply
+from pptmstr.store.commands import _request_refusal
+from pptmstr.store.decisions import _raise_refusal
 from pptmstr.transcript import Transcript
 
 ROOT: NodeId = ("sess-1", None)
@@ -3202,7 +3213,7 @@ def test_the_only_call_into_the_reducer_is_the_observed_one() -> None:
     that place is the loop that calls the observer. A second caller would be a
     way to change the board that the log never hears of.
     """
-    source = pathlib.Path(__file__).parent.parent / "pptmstr" / "store.py"
+    source = pathlib.Path(__file__).parent.parent / "pptmstr" / "store" / "__init__.py"
     store_class = next(
         node
         for node in ast.parse(source.read_text()).body
@@ -4831,7 +4842,7 @@ def _held_from_an_earlier_run(*then: Intent) -> Store:
     """
     ``t1``, declared by the builder CHILD of this run and held by _OLD_BUILDER,
     an agent of an earlier run whose claim the lead may take back
-    (``store._may_reclaim``); ``t2`` waits on it. Then ``then``.
+    (``store.tasks._may_reclaim``); ``t2`` waits on it. Then ``then``.
     """
     store = Store()
     _restore(
@@ -8341,3 +8352,311 @@ def test_a_charter_is_held_as_the_operator_typed_it() -> None:
     store.apply(_link(charter=charter))
 
     assert store.snapshot().channels["k1"].charter == charter
+
+
+# -- the reducer's shape: one match, two exits, one tail -------------------------
+#
+# Pins written before ``store`` became a package, so that moving its helpers into
+# per-entity modules is checked against the reducer as it stood rather than as it
+# was left.
+
+_STORE_SOURCE = pathlib.Path(__file__).resolve().parents[1] / "pptmstr" / "store" / "__init__.py"
+
+
+def _apply_match() -> ast.Match:
+    tree = ast.parse(_STORE_SOURCE.read_text(encoding="utf-8"))
+    (apply,) = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_apply"]
+    (match,) = [n for n in apply.body if isinstance(n, ast.Match)]
+    return match
+
+
+def _class_patterns(pattern: ast.pattern) -> list[str]:
+    if isinstance(pattern, ast.MatchOr):
+        return [name for p in pattern.patterns for name in _class_patterns(p)]
+    assert isinstance(pattern, ast.MatchClass), ast.unparse(pattern)
+    assert isinstance(pattern.cls, ast.Name), ast.unparse(pattern)
+    return [pattern.cls.id]
+
+
+def test_every_intent_has_its_own_case_in_apply_and_the_last_is_assert_never() -> None:
+    """
+    mypy holds this through ``assert_never``; this holds it when the default arm
+    is turned into ``pass`` or a ``case _:`` grows a body, where mypy is silent.
+    """
+    match = _apply_match()
+    *arms, default = match.cases
+
+    named = [name for case in arms for name in _class_patterns(case.pattern)]
+    assert sorted(named) == sorted({kind.__name__ for kind in typing.get_args(Intent)})
+    assert len(named) == len(set(named)), "an intent is matched by two cases"
+    assert all(case.guard is None for case in arms)
+
+    assert isinstance(default.pattern, ast.MatchAs) and default.pattern.pattern is None
+    (call,) = default.body
+    assert ast.unparse(call) == "assert_never(intent)"
+
+
+def _one_node() -> Snapshot:
+    snap, _ = _apply(Snapshot.empty(), spawn(ROOT), 0.0)
+    return snap
+
+
+def _one_node_restored() -> Snapshot:
+    snap, _ = _apply(
+        _one_node(), BoardRestored("sess-1", boardlog.restore([]), Clock(10_000.0, 1.0)), 1.0
+    )
+    return snap
+
+
+# One intent per arm that has a ``return snap, ...``, each built to take it. That
+# return skips the tail: no ``seq``, no waking, no re-derivation, and the caller
+# gets back the snapshot it passed in. An arm made to fall through instead would
+# hand back a new snapshot even with nothing changed.
+_EARLY_RETURNS: dict[str, tuple[Any, Intent]] = {
+    "StateChanged": (_one_node, StateChanged(OTHER, AgentState.THINKING)),
+    "SubagentProgress": (_one_node, SubagentProgress(OTHER, "reading")),
+    "SubagentDelivered": (_one_node, SubagentDelivered(OTHER, "done")),
+    "TopicChanged": (_one_node, TopicChanged(OTHER, "reading")),
+    "UsageAccrued": (_one_node, UsageAccrued(OTHER, UsageRollup(input_tokens=1))),
+    "ContextPolled": (_one_node, ContextPolled(OTHER, ctx(1))),
+    "CompactionObserved": (_one_node, CompactionObserved(ROOT, 1.0, "auto")),
+    "ApprovalResolved": (_one_node, ApprovalResolved(ROOT, "no-such-approval", True)),
+    "AgentFinished": (_one_node, AgentFinished(OTHER, AgentState.DONE, 1.0)),
+    "FailureAcknowledged": (_one_node, FailureAcknowledged(OTHER)),
+    "AgentResumed": (_one_node, AgentResumed(OTHER, 1.0)),
+    "AgentRemoved": (_one_node, AgentRemoved(OTHER)),
+    "ConcernPosted": (
+        _one_node,
+        # A peer message from a sub-agent: only leads write to each other.
+        ConcernPosted(
+            CHILD,
+            Concern(
+                id="c-000000000001",
+                sender=CHILD,
+                recipient=OTHER,
+                subject="s",
+                body="b",
+                posted_at=1.0,
+                channel="brand",
+                link="k-unlinked",
+            ),
+        ),
+    ),
+    "PeerSent": (
+        _one_node,
+        PeerSent(OTHER, "rq", "c-000000000002", "brand", "s", "b", 1.0),
+    ),
+    "TaskClosed": (_one_node, TaskClosed("t-none")),
+    "BoardRestored": (
+        _one_node_restored,
+        BoardRestored("sess-1", boardlog.restore([]), Clock(10_000.0, 1.0)),
+    ),
+    "DecisionAnswered": (_one_node, DecisionAnswered("d-none", "yes")),
+    "DecisionDismissed": (_one_node, DecisionDismissed("d-none")),
+    "CommandApproved": (
+        _one_node,
+        CommandApproved(cid(1), "make", "/bin/sh", "/w", TIMEOUT_CHOICES_S[0], 1.0),
+    ),
+    "CommandRefused": (_one_node, CommandRefused(cid(1), "no", 1.0)),
+    "CommandStopAsked": (_one_node, CommandStopAsked(cid(1), 1.0)),
+    "CommandEnded": (_one_node, CommandEnded(cid(1), End(Exited(0), 1.0))),
+    "CommandsRestored": (_one_node, CommandsRestored("sess-1", ())),
+    "SessionRecalled": (
+        _one_node,
+        SessionRecalled("sess-1", "an earlier task", "claude-opus-5", Recalled()),
+    ),
+    "SessionDetached": (_one_node, SessionDetached("sess-none", request_id="rq")),
+    "FailedSessionClosed": (_one_node, FailedSessionClosed(ROOT, run_held=True)),
+    "ChannelLinked": (
+        _one_node,
+        ChannelLinked("k1", "brand", frozenset({"sess-1"}), "c", 1.0, frozenset({"sess-1"})),
+    ),
+    "ChannelClosed": (_one_node, ChannelClosed("k-none", 1.0)),
+    "ChannelsRestored": (_one_node, ChannelsRestored(())),
+}
+
+
+def _arms_with_an_early_return() -> set[str]:
+    out: set[str] = set()
+    for case in _apply_match().cases:
+        body = ast.Module(body=case.body, type_ignores=[])
+        if any(isinstance(node, ast.Return) for node in ast.walk(body)):
+            out.update(_class_patterns(case.pattern))
+    return out
+
+
+# Arms whose ``return snap, ...`` no intent can reach today, with why.
+_UNREACHED_EARLY_RETURNS = {
+    # Its return is for ``_closed`` refusing a ``Withdrawn`` end, and it is reached
+    # only past ``_command_withdrawal_refusal``, which lets through only an ASKED
+    # command: one with no run, which a ``Withdrawn`` end always fits.
+    "CommandWithdrawn": "Command accepts every end this arm builds",
+}
+
+
+def test_every_arm_with_an_early_return_has_a_case_that_takes_it() -> None:
+    assert set(_EARLY_RETURNS) | set(_UNREACHED_EARLY_RETURNS) == _arms_with_an_early_return()
+    assert not set(_EARLY_RETURNS) & set(_UNREACHED_EARLY_RETURNS)
+
+
+@pytest.mark.parametrize("arm", sorted(_EARLY_RETURNS))
+def test_an_early_return_hands_back_the_snapshot_it_was_given(arm: str) -> None:
+    make, intent = _EARLY_RETURNS[arm]
+    assert type(intent).__name__ == arm
+    before = make()
+
+    after, effects = _apply(before, intent, 2.0)
+
+    assert after is before
+    assert after.seq == before.seq
+    # Two of them answer even as they skip the tail: a refusal is still a reply.
+    if arm in ("PeerSent", "SessionDetached"):
+        assert effects
+    else:
+        assert effects == ()
+
+
+def _tail_only(name: str) -> tuple[Snapshot, Intent]:
+    """
+    A world and one of the four intents the match does nothing for, built so that
+    what the tail does with it changes ``peer_wakes``.
+    """
+    from tests import test_peer_wakes as pw
+
+    match name:
+        case "SessionSettled":
+            snap, _ = pw.step(pw.linked(), pw.sent())
+            return snap, SessionSettled(pw.Z)
+        case "WakeChainReleased":
+            return pw._chained(), WakeChainReleased("k1")
+        case "PeerWakeSent":
+            snap, _ = pw.step(pw.linked(), pw.sent())
+            return snap, pw._spent(snap)
+        case "DecisionWakeSent":
+            snap, _ = pw.step(pw.linked(), pw.raise_on(did="d-1"))
+            snap, _ = pw.step(snap, DecisionAnswered("d-1", "yes"))
+            return snap, DecisionWakeSent(pw.Z, frozenset({"d-1"}))
+    raise AssertionError(name)
+
+
+@pytest.mark.parametrize(
+    "name", ["SessionSettled", "WakeChainReleased", "PeerWakeSent", "DecisionWakeSent"]
+)
+def test_an_intent_the_match_does_nothing_for_still_runs_the_tail(name: str) -> None:
+    """
+    The match's ``pass`` for these four exists for the tail: ``_peer_waking`` acts
+    on exactly them, and ``Snapshot.peer_wakes`` is written nowhere else.
+    """
+    before, intent = _tail_only(name)
+
+    after, effects = _apply(before, intent, 6.0)
+
+    assert after is not before
+    assert after.seq == before.seq + 1
+    # A settle lets go of the pending wake and asks it again, so what moved is
+    # the wake it orders rather than ``peer_wakes``.
+    assert (after.peer_wakes, effects) != (before.peer_wakes, ())
+
+
+def test_the_tail_stamps_state_since_for_an_arm_that_only_set_the_state() -> None:
+    after, _ = _apply(_one_node(), StateChanged(ROOT, AgentState.THINKING), 7.0)
+
+    assert after.nodes[ROOT].state is AgentState.THINKING
+    assert after.nodes[ROOT].state_since == 7.0
+
+
+def test_the_tail_writes_nodes_for_an_arm_that_wrote_none() -> None:
+    """
+    ``DecisionRaised`` writes only decisions; the tail is what stops its recalled
+    asker being recalled (``_no_longer_recalled``).
+    """
+    root: NodeId = ("cr", None)
+    recalled, _ = _apply(
+        Snapshot.empty(),
+        SessionRecalled("cr", "an earlier task", "claude-opus-5", Recalled()),
+        1.0,
+    )
+    assert recalled.nodes[root].recalled is not None
+
+    after, _ = _apply(
+        recalled, DecisionRaised(root, _decision(asker=root), request_id="rq", at=2.0), 2.0
+    )
+
+    assert "d-1" in after.decisions
+    assert after.nodes[root].recalled is None
+
+
+_REPO = pathlib.Path(__file__).resolve().parents[1]
+_CITATION = re.compile(r"`store\.([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)")
+# Names cited for not existing, with where.
+_CITED_AS_ABSENT = {
+    # The design sketch's call, which the store was built not to have.
+    ("pptmstr/intents.py", "set_pending"),
+}
+
+
+def _resolves(dotted: str) -> bool:
+    """
+    Whether ``store.<dotted>`` names something where it is defined: the longest
+    run of module names, then a name that module defines at its top level, then
+    attributes of that. A name a module only imports is not cited there, so
+    ``_apply``'s imports of its helpers do not stand in for the helpers.
+    """
+    import importlib
+    import importlib.util
+
+    module, parts = "pptmstr.store", dotted.split(".")
+    while (
+        parts
+        and hasattr(importlib.import_module(module), "__path__")
+        and importlib.util.find_spec(f"{module}.{parts[0]}") is not None
+    ):
+        module = f"{module}.{parts.pop(0)}"
+    if not parts:
+        return True
+    imported = importlib.import_module(module)
+    source = pathlib.Path(imported.__file__ or "").read_text(encoding="utf-8")
+    defined = {
+        target.id
+        for node in ast.parse(source).body
+        for target in (
+            [ast.Name(node.name)]
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+            else (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else [node.target] if isinstance(node, ast.AnnAssign) else []
+            )
+        )
+        if isinstance(target, ast.Name)
+    }
+    if parts[0] not in defined:
+        return False
+    found: object = imported
+    for part in parts:
+        if not hasattr(found, part):
+            return False
+        found = getattr(found, part)
+    return True
+
+
+def test_every_citation_of_a_store_name_names_one_that_exists() -> None:
+    """
+    A helper that moves between the store's modules leaves its citations in
+    comments and docstrings behind, and nothing else would notice: a citation
+    of the package's name for a helper that now lives in one of its modules
+    cites nothing, or cites only the import that lets ``_apply`` call it.
+    ``store.py`` is a path, not a name, and is not read here.
+    """
+    stale = [
+        f"{where}:{line}: store.{dotted}"
+        for root in ("pptmstr", "tests", "scripts")
+        for path in sorted((_REPO / root).rglob("*.py"))
+        if "__pycache__" not in path.parts
+        for where in [str(path.relative_to(_REPO))]
+        for line, text in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        for dotted in _CITATION.findall(text)
+        if dotted != "py" and not dotted.startswith("py.")
+        if (where, dotted) not in _CITED_AS_ABSENT and not _resolves(dotted)
+    ]
+    assert not stale, "\n".join(stale)

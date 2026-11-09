@@ -779,7 +779,7 @@ def test_a_task_claimed_and_completed_keeps_who_did_it_and_what_they_said() -> N
 
 def test_a_completion_by_an_address_that_does_not_hold_the_claim_is_not_applied() -> None:
     """
-    One reducer refuses this (``store._ownership_refusal``), so it never logs it.
+    One reducer refuses this (``store.tasks._ownership_refusal``), so it never logs it.
     A log that holds it was written by two, and the fold does not pick one.
     """
     theirs = Completed(at=12.0, task_id="t-1", by="builder-2", result="done", basis="run")
@@ -932,7 +932,7 @@ def test_the_operators_amendment_is_one_writers_at_any_point_and_a_contest_takes
 
 def test_an_agents_amendment_is_one_writers_only_from_a_declarer_that_never_held_the_task() -> None:
     """
-    ``store._amender_refusal``, on what the records carry. One reducer turns away an
+    ``store.tasks._amender_refusal``, on what the records carry. One reducer turns away an
     amendment by an agent that did not declare the task, and by a declarer that has
     held it at any time -- holding it, finished, or long since given back and the
     task amended since, which is the case ``released_by`` forgets and ``held_by``
@@ -1056,7 +1056,7 @@ def test_a_withdrawal_finishes_a_task_for_nobody_with_the_declarers_reason(
 
 def test_a_withdrawal_by_anyone_but_the_declarer_is_not_one_writers() -> None:
     """
-    ``store._withdrawer_refusal``: the declarer or its session's root, and
+    ``store.tasks._withdrawer_refusal``: the declarer or its session's root, and
     nobody else -- the holder included, and another session's root.
     """
     for by, by_id in (
@@ -1085,7 +1085,7 @@ def test_the_root_withdraws_for_its_declarer_and_restores_as_the_lead(
 ) -> None:
     """
     The root of the declarer's session is admitted on the store's terms
-    (``store._withdrawer_refusal``), and the task restores saying it was the
+    (``store.tasks._withdrawer_refusal``), and the task restores saying it was the
     lead: the result's label is the lead's, so the reason is not the declarer's.
     """
     out = WithdrawnByDeclarer(at=20.0, task_id="t-1", by="lead", reason="moved on", by_id=("s",))
@@ -1187,7 +1187,7 @@ def test_nothing_the_holder_does_after_a_withdrawal_is_one_writers() -> None:
 
 
 def test_a_claim_by_the_agent_that_amended_the_task_is_not_one_writers() -> None:
-    """``store._claim_refusal``: the agent that wrote a version is not then bound by it."""
+    """``store.tasks._claim_refusal``: the agent that wrote a version is not then bound by it."""
     amended = Amended(at=11.0, task_id="t-1", detail="new", by="lead")
     takes_it = Claimed(at=12.0, task_id="t-1", by="lead")
 

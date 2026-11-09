@@ -15,7 +15,7 @@ presentation.
 
 The store holds a single fleet-wide ``tasks`` map and a single ``concerns`` map --
 there is one ``Store`` for every session (app.py) -- so the session scoping happens
-here, and ``store._pick_claim`` applies the same predicate (``Task.belongs_to``) so
+here, and ``store.tasks._pick_claim`` applies the same predicate (``Task.belongs_to``) so
 a worker cannot claim a task this module would not have shown it.
 
 The facts stay in ``model.py``: ``Task.blocked_on`` is the dependency graph's answer
@@ -416,7 +416,7 @@ def board_tasks(snap: Snapshot, session_id: str) -> tuple[BoardTask, ...]:
     """
     The tasks declared by one session, oldest first.
 
-    Scoped by ``Task.belongs_to``, which is the same predicate ``store._pick_claim``
+    Scoped by ``Task.belongs_to``, which is the same predicate ``store.tasks._pick_claim``
     applies -- so a worker is handed only tasks this function would have shown it.
     Ordered by declaration rather than by state so a row does not jump when somebody
     claims it: the board is read while work moves.
@@ -496,7 +496,7 @@ def _holder_left_behind(snap: Snapshot, task: Task, session_id: str) -> bool:
     Whether ``task``, a row of ``session_id``'s board, is held by an agent of an
     earlier run of that session (``Snapshot.of_earlier_run``).
 
-    **The row's copy of ``store._may_reclaim``**, asked for the root of
+    **The row's copy of ``store.tasks._may_reclaim``**, asked for the root of
     ``session_id``: true means that root's ``release_task`` on this row is one
     the store takes, and the bus offers it on nothing else. A copy and not a
     call, because ``store`` imports this module. Kept in step by a test that

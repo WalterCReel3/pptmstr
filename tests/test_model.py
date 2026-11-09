@@ -47,7 +47,7 @@ from pptmstr.sandbox import containment_settings
 def test_a_padded_declaration_cannot_miss_the_overlap_check() -> None:
     """
     The declaring caller is a model that chooses its own spelling. If padding
-    survived, ``store._auto_depends`` would hold two spellings of one file against
+    survived, ``store.tasks._auto_depends`` would hold two spellings of one file against
     each other and find no collision -- the concurrent write ``touches`` exists to
     prevent. ``test_a_caller_cannot_evade_the_overlap_check_with_its_own_spelling``
     pins this through the bus; this pins the function the bus reaches.

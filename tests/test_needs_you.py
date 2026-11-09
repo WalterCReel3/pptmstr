@@ -704,7 +704,7 @@ def test_an_asker_of_an_earlier_run_in_this_window_is_gone_and_not_merely_stoppe
 
 
 def test_every_fate_has_a_wording_for_the_row_and_only_a_working_asker_has_none() -> None:
-    from pptmstr.store import _FATE_TEXT
+    from pptmstr.store.owing import _FATE_TEXT
 
     assert set(_FATE_TEXT) == set(AskerFate)
     assert [fate for fate, text in _FATE_TEXT.items() if text is None] == [AskerFate.LIVE]

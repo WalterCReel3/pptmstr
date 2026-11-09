@@ -27,13 +27,13 @@ from .templates import by_name
 # Two different situations reach this and the snapshot cannot tell them apart: a
 # node `AgentRemoved` pruned (which leaves the tasks it claimed behind), and one
 # that has not spawned yet (the store files a concern to an unknown recipient
-# deliberately -- store.py's ConcernPosted arm). Neither leaves a record, so a
+# deliberately -- the ConcernPosted arm of ``store._apply``). Neither leaves a record, so a
 # label reading "gone" or "not started" would assert a cause on a coin flip. It
 # says only what is known: nothing here answers to this id.
 UNKNOWN = "(unknown)"
 
 # What qualifies a node belonging to a different session than the board showing it.
-# Reachable because the task map is fleet-wide and ``store._pick_claim`` applies no
+# Reachable because the task map is fleet-wide and ``store.tasks._pick_claim`` applies no
 # session filter, so a worker in one session can claim work another declared.
 #
 # It says "another session" rather than anything suggesting the node is unknown or
@@ -59,7 +59,7 @@ def role_name(snap: Snapshot, node: NodeId, session_id: str) -> str:
 
     ``session_id`` is required rather than inferred because a role name is only
     meaningful relative to a board. Every node here is a role of *its own*
-    session. ``store._pick_claim`` and the restore both keep a task among its
+    session. ``store.tasks._pick_claim`` and the restore both keep a task among its
     own session's agents, so a node from elsewhere on this board is a snapshot
     the store did not build -- and it would otherwise render as this team's own
     member. "lead" is the worst case: it is the one name an operator would never
