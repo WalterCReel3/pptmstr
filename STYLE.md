@@ -189,8 +189,8 @@ this or X breaks", the design is wrong, not the comment. `TaskReleased` had to n
 `UnstampedCall` rather than guessing a sender. A default would silently attribute
 someone's message to a plausible-looking node, which is worse than a crash.
 
-**A duplicated constant with no test pinning it.** `approval.py` spells the bus
-server name rather than importing it, so the policy stays free of SDK imports. That
+**A duplicated constant with no test pinning it.** `gate/tools.py` spells the bus
+server name rather than importing it, so the gate stays free of SDK imports. That
 duplication is deliberate *and* pinned by a test that fails if the two lists drift.
 Deliberate duplication is fine; unpinned duplication is not.
 
@@ -243,7 +243,7 @@ distinction is tense, not subject matter. A live constraint earns a comment; the
 history of a defect does not.
 
 The exception is a decision whose *reasoning* is not visible from the result. When
-a module says why it takes the harder of two reasonable paths — why `approval.py`
+a module says why it takes the harder of two reasonable paths — why `gate/`
 has no SDK import, why the bus handler refuses instead of defaulting — that is not
 archaeology, it is the constraint that will otherwise be optimised away by the next
 reader.

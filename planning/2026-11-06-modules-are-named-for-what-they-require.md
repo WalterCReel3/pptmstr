@@ -474,6 +474,35 @@ Deferred: B9 stage 2 and B6's methods-to-functions step.
 - `test_board_pane.py:3289` cites `store._restore`, which does not exist.
 - `effects.py:622` cites `bus.wake_lines`, which does not exist.
 
+## Round 4 outcomes (2026-11-09)
+
+Every step of the build order above is committed, each after a full suite. The last
+commits are 870423b (B9), db28483 and daa199a (B6 steps 8 and 7), 5a547fb and e2cbf78
+(B5's two `gate/` steps). Where the build differs from the designs:
+
+- **B6 step 8 also moved `app`'s channel-id mint.** The design's move table left it
+  out, but its pin I1 and its claim that only `commandrun` mints with its own
+  randomness assume it moved. `ids.channel()` now mints it.
+- **B6 step 7:** `restore_all`, `ChannelLog` and `Swept` stay in `channels/log`. They
+  compute nothing on disk, but they name `journal.files.Unlisted`, and moving them
+  would make `facts` import a disk reader. `owes_close` moved with `judge`.
+- **B5 R2 is refuted, not passed.** The design held, by reading, that the import
+  cycle is empty after the gate's leaves move. A cycle search over every edge kind
+  leaves `{command, model}`, through `command`'s `TYPE_CHECKING` import of `NodeId`,
+  which is deliberate and predates B5. `test_layers` pins that pair as the only cycle
+  outside ui, with that edge typing-only. Removing it is not scheduled.
+- **The store's disk rule follows function-local imports beyond the store.** B5
+  step 4's builder found that a disk read behind a function-local import in
+  `gate.rows` evaded the rule, which followed only eager edges outside the store. A
+  lazy import runs when the store calls the function, so the walk now follows lazy
+  edges everywhere and leaves out only `TYPE_CHECKING`. It found no new edge.
+  `STORE_DISK_EXCEPTIONS` is empty.
+- **B9:** no helper needs `Draft` or `Step`, so `store/step.py` does not exist.
+  `_allowance` is in `store/owing`, and `_FINAL_STATES` is in `store/nodes`.
+
+Still held for the operator: B9 stage 2, the open `case _` in `_peer_waking` and
+`_moved`, and B6's methods-to-functions step (waiting on H+ → P).
+
 ## Defects found on the way
 
 These are not refactor scope. Round 1 takes the first four.

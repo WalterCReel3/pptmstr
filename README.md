@@ -784,12 +784,12 @@ Read [orchestrator-design.md](orchestrator-design.md) §1 (invariants) and §3
 | Path | |
 |---|---|
 | [pptmstr/model.py](pptmstr/model.py) | Immutable records: `AgentRecord`, `Snapshot`, `ContextSnapshot` |
-| [pptmstr/store.py](pptmstr/store.py) | Copy-on-write store; the single audit point for every mutation |
+| [pptmstr/store/](pptmstr/store/) | Copy-on-write store; `_apply` in `__init__` is the single audit point for every mutation, and its helpers live by entity |
 | [pptmstr/intents.py](pptmstr/intents.py) | Every way the world can change, as values |
 | [pptmstr/bridge.py](pptmstr/bridge.py) | The only place threads and asyncio meet |
 | [pptmstr/transcript.py](pptmstr/transcript.py) | Append-only per-agent output buffer |
 | [pptmstr/pool.py](pptmstr/pool.py) | Bounded concurrency; over-cap sessions queue |
-| [pptmstr/approval.py](pptmstr/approval.py) | Classification, summaries and diffs for the gate |
+| [pptmstr/gate/](pptmstr/gate/) | The gate: policy, tool tables, classification, rows, reach, diffs and the sandbox settings |
 | [pptmstr/ui/](pptmstr/ui/) | Fleet rail, inbox, detail, health, transcript pane, launcher, shared widgets |
 | [pptmstr/ui/typeset/](pptmstr/ui/typeset/) | The one package that imports `imscribe`: the gate, fonts, roles, themes, held views, the diff model |
 | [pptmstr/theme.py](pptmstr/theme.py) | Semantic colour roles; light, dark, high-contrast, and six discretionary |
