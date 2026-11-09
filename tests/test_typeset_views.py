@@ -30,6 +30,7 @@ import pytest
 from imscribe import BlockKind, Diff, Face, RowKind, registered_fonts, unregister_font
 
 from pptmstr import approval, theme
+from pptmstr.gate.diff import render_texts
 from pptmstr.model import NodeId, PendingApproval
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import Kind, Part, Role, RoleStyle, Slot, gate, roles, themes, views
@@ -103,7 +104,7 @@ def pending(tool_name: str, raw_args: dict[str, Any], ident: str = "a1") -> Pend
         raw_args=raw_args,
         summary="",
         requested_at=0.0,
-        diff=approval.render_texts(tool_name, texts),
+        diff=render_texts(tool_name, texts),
         texts=texts,
     )
 

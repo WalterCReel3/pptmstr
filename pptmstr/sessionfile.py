@@ -67,7 +67,7 @@ from pathlib import Path
 from typing import Any
 
 from . import jsonfields, settings
-from .approval import Policy
+from .gate.policy import Policy
 from .journal import files
 from .ondisk import create_once, read_regular, replace
 

@@ -53,7 +53,7 @@ from imgui_bundle import imgui
 
 from .. import settings as settings_mod
 from .. import theme as theme_mod
-from ..approval import DiffText
+from ..gate.diff import DiffText
 from ..settings import Settings
 from . import typeset, widgets
 

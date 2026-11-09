@@ -408,3 +408,17 @@ upvotes, derived from a relative "5 months ago" — approximate).
 · [`2026-08-15-a-task-reaches-the-board-without-a-decision.md`](2026-08-15-a-task-reaches-the-board-without-a-decision.md)
 · [`archive/2026-08-17-a-session-premise-is-a-place-not-a-message.md`](archive/2026-08-17-a-session-premise-is-a-place-not-a-message.md)
 · `notes/2026-08-31-the-instrument-is-the-product.md` (untracked, undecided).
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._AUTO` | `gate.tools.AUTO` |
+| `approval._REVIEW` | `gate.tools.REVIEW` |
+| `approval._BUS_AUTO` | `gate.tools.BUS_AUTO` |
+| `approval._BUS_POST` | `gate.tools._BUS_POST` |

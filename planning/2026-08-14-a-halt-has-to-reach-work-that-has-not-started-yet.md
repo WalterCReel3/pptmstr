@@ -381,3 +381,14 @@ so those citations describe the tree rather than HEAD.
 | 4 | Gate's per-tool halt policy (refuse `claim_task`, allow `complete_task`/`release_task`) | The whole of layer 5 |
 | 5 | Keep `task_id` from `task_started` (`driver.py:415`) | One dict write; the only per-sub-agent handle that exists. Not needed by this design — needed by any design that wants to stop *one* sub-agent |
 | — | A `HALTED` `AgentState`, a `HALTED` `TaskState`, a snapshot copy of the latch | All three are derived duplicates. Do not add them |
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._REVIEW` | `gate.tools.REVIEW` |

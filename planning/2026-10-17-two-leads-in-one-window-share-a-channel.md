@@ -512,3 +512,16 @@ All of this comes from reading and from the 2026-10-17 run's two message folders
 written for it. The symbols cited were checked by grep on 2026-10-17 and nothing more. Whether a
 model uses a peer channel well (answers needs-answer, threads with `re`, raises a decision instead
 of relaying one) is unknown until one is built and run.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._REVIEW` | `gate.tools.REVIEW` |
+| `approval._BUS_AUTO` | `gate.tools.BUS_AUTO` |
+| `approval._AUTONOMOUS_AUTO` | `gate.tools.AUTONOMOUS_AUTO` |

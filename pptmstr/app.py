@@ -54,7 +54,6 @@ from . import (
 from . import brief as brief_mod
 from . import settings as settings_mod
 from . import version as version_mod
-from .approval import Policy, requires_containment
 from .bridge import Bridge
 from .channels import facts as channel_facts
 from .channels import log as channel_log
@@ -77,6 +76,7 @@ from .command import Withdrawn as CommandWithdrawnEnd
 from .driver import AgentSession, UncontainedAutonomy
 from .fake_driver import FakeDriver
 from .figures import render as figure_render
+from .gate.policy import Policy, requires_containment
 from .intents import (
     BoardRestored,
     ChannelClosed,

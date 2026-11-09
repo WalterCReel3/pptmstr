@@ -813,3 +813,19 @@ already red; this change neither fixes nor worsens that in kind.
 assertion here is at the level of the gate's verdicts and the classifier's arguments, which
 is where the decision was taken. Whether it feels different to operate is the thing the
 operator is about to find out, and this record does not predict it.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval.Policy` | `gate.policy.Policy` |
+| `approval.inherits_to_subagents` | `gate.policy.inherits_to_subagents` |
+| `approval._AUTO` | `gate.tools.AUTO` |
+| `approval._REVIEW` | `gate.tools.REVIEW` |
+| `approval._BUS_AUTO` | `gate.tools.BUS_AUTO` |
+| `approval._BUS_DECLARE` | `gate.tools._BUS_DECLARE` |

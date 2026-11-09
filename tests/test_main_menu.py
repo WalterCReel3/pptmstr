@@ -19,7 +19,7 @@ from imgui_bundle import imgui
 
 from pptmstr import app
 from pptmstr import settings as settings_mod
-from pptmstr.approval import Policy
+from pptmstr.gate.policy import Policy
 from pptmstr.intents import AgentFinished, AgentSpawned, StateChanged
 from pptmstr.model import AgentState, NodeId
 from pptmstr.settings import Settings

@@ -1260,7 +1260,7 @@ def test_with_a_branch_typed_the_buttons_stay_under_the_body_and_on_the_display(
     warning are drawn in the scrolling body, so on a short display the body scrolls
     and the launch button is still on screen and live.
     """
-    from pptmstr.approval import Policy
+    from pptmstr.gate.policy import Policy
     from tests.test_launcher import A_PREMISE, _modal_rect, _RealFrames, _settled
 
     (repo / "new.txt").write_text("n\n")

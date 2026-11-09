@@ -98,7 +98,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, assert_never
 
 from . import sessionfile
-from .approval import Policy
+from .gate.policy import Policy
 from .intents import (
     AgentFinished,
     AgentRemoved,

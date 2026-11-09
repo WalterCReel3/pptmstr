@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pptmstr.approval import Policy
+from pptmstr.gate.policy import Policy
 from pptmstr.model import EndedHow, LaunchSpec, NodeId, Recalled, Snapshot
 from pptmstr.store import Store
 from pptmstr.ui import health, session_menu

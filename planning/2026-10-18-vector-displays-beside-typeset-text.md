@@ -2304,3 +2304,16 @@ not the 2x §10 recorded at 0.5 s.
 - `MAX_NATURAL_PIXELS` (4096x4096) is an area cap from the raster. The display
   list checks each side only. It still refuses layouts, so it is a cap and was
   kept.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._AUTO` | `gate.tools.AUTO` |
+| `approval._REVIEW` | `gate.tools.REVIEW` |
+| `approval._BUS_AUTO` | `gate.tools.BUS_AUTO` |

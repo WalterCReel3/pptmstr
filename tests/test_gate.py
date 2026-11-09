@@ -16,9 +16,10 @@ from pathlib import Path
 import pytest
 
 from pptmstr import driver as driver_module
-from pptmstr.approval import Disposition, Policy, classify
+from pptmstr.approval import classify
 from pptmstr.bridge import Bridge, Decision
 from pptmstr.driver import AgentSession
+from pptmstr.gate.policy import Disposition, Policy
 from pptmstr.model import AgentState
 from pptmstr.store import Store
 
@@ -841,7 +842,7 @@ def test_a_forged_edit_stamp_does_not_reach_the_concern(bridge: Bridge) -> None:
 
 # -- the spawn join (§3) -------------------------------------------------------
 #
-# `Agent` is in _REVIEW, so a spawn always passes through the gate with a human in
+# `Agent` is in REVIEW, so a spawn always passes through the gate with a human in
 # it. Nothing drove _pre_tool_use for an Agent call before these tests, which is why
 # an entry could be left behind by a refusal without anything noticing.
 
@@ -1403,7 +1404,7 @@ def test_nothing_but_the_operator_changes_the_policy(
     assert session.policy is Policy.PERMISSIVE
 
     # A message to another agent. It changes what that agent does next, which
-    # is why `_REVIEW` gates the send rather than the read -- and gating it is
+    # is why `REVIEW` gates the send rather than the read -- and gating it is
     # not the same fact as ending this session's own phase.
     message = bridge.submit(
         session._pre_tool_use(

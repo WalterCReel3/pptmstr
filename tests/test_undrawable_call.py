@@ -35,6 +35,7 @@ import pytest
 from pptmstr import app, approval
 from pptmstr.bridge import Bridge, Decision
 from pptmstr.driver import AgentSession
+from pptmstr.gate.diff import render_texts
 from pptmstr.intents import AgentSpawned, ApprovalRequested
 from pptmstr.model import NodeId, PendingApproval, Snapshot
 from pptmstr.pool import SessionPool
@@ -69,7 +70,7 @@ def parked(tool_name: str, raw_args: Mapping[str, Any], ident: str = "p1") -> Pe
         raw_args=raw_args,
         summary=approval.summarize(tool_name, raw_args),
         requested_at=0.0,
-        diff=approval.render_texts(tool_name, texts),
+        diff=render_texts(tool_name, texts),
         texts=texts,
     )
 

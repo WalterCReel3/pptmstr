@@ -435,3 +435,14 @@ append-only. If anything ever emits `AgentRemoved`, board ordinals shift and the
 driver's do not, and the address has to move onto `AgentRecord`. Pinned by a test
 that drives a real session and a real store over one sequence; the board derivation
 can be broken with every `driver.py` test still passing.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._REVIEW` | `gate.tools.REVIEW` |

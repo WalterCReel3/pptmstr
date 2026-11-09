@@ -246,3 +246,14 @@ this note is from reading**, by agents with no shell: no test was written to rep
 `driver.py`, `bridge.py`, `app.py`, `approval.py`, `rail.py`, `projects.py`, `focus.py`,
 `health.py` and `mock_cards.py` are unmodified and those citations are against committed
 code.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._REVIEW` | `gate.tools.REVIEW` |

@@ -160,3 +160,14 @@ The real rename of the operator's `~/.config/pptmstr/boards/…` into `sessions/
 restore; everything drawn (the closed card, the fold row, the menu, the form); cards appearing
 after a real restart with no CLI process behind them; a real resume from a card, a live widen,
 and "Continue as autonomous…" ending the live run.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval.requires_containment` | `gate.policy.requires_containment` |

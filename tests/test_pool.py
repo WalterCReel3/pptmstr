@@ -1300,8 +1300,8 @@ def test_closing_a_held_relaunch_says_that_it_was_discarded(bridge: Bridge) -> N
 
 
 def _contained_autonomous(bridge: Bridge, cwd: Path, **kwargs):
-    from pptmstr.approval import Policy
     from pptmstr.driver import AgentSession
+    from pptmstr.gate.policy import Policy
     from pptmstr.sandbox import containment_settings
 
     return AgentSession(

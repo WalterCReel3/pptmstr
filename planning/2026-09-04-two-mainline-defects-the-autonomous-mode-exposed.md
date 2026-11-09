@@ -261,3 +261,14 @@ predicate. The two halves of that record's reasoning come apart cleanly:
 between nested admissions and the `_pending_spawns` ledger under concurrency is unmeasured. And it
 observed the CLI, not pptmstr's gate — the events are what `AgentSession` would receive, but the
 run did not go through `_gate_tool_use`.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._REVIEW` | `gate.tools.REVIEW` |

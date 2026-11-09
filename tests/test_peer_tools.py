@@ -1999,8 +1999,8 @@ def test_a_reasoned_withdrawal_parks_and_only_an_approval_sends_its_reason(
     other lead reads the reason; refused, it never runs, and nothing is
     withdrawn or told.
     """
-    from pptmstr.approval import Policy
     from pptmstr.bridge import Decision
+    from pptmstr.gate.policy import Policy
     from tests.test_gate import decision_of
 
     store = _hub_store()
@@ -2039,7 +2039,7 @@ def test_a_reasoned_withdrawal_parks_and_only_an_approval_sends_its_reason(
 def test_a_withdrawal_with_no_reason_is_not_parked_and_tells_that_none_was_given(
     args: dict[str, object],
 ) -> None:
-    from pptmstr.approval import Policy
+    from pptmstr.gate.policy import Policy
     from tests.test_gate import decision_of
 
     store = _hub_store()

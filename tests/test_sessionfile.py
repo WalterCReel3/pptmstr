@@ -27,7 +27,7 @@ from typing import Any
 import pytest
 
 from pptmstr import ondisk, sessionfile, settings
-from pptmstr.approval import Policy
+from pptmstr.gate.policy import Policy
 from pptmstr.journal import files as journal_files
 from pptmstr.sessionfile import (
     FORMAT,

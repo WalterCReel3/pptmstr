@@ -657,3 +657,14 @@ There are also 13 docstring citations of `channels.`/`channels.py` inside `pptms
 - The SDK's own use of the session id was not checked: `ids.session()` must keep `str(uuid4())`
   exactly, because a resume passes the SDK's id back through.
 - B7's and B9's designs were read for their overlap with this one, not reviewed.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval.peer_channel` | `gate.tools.peer_channel` |

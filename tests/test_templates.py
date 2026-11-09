@@ -14,7 +14,7 @@ import re
 import pytest
 
 from pptmstr import templates
-from pptmstr.approval import Policy
+from pptmstr.gate.policy import Policy
 from pptmstr.templates import (
     BUS_TOOL_NAMES,
     COMMAND_HEADING,

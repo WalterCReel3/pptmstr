@@ -17,9 +17,9 @@ from unittest.mock import MagicMock
 import pytest
 from imgui_bundle import imgui
 
-from pptmstr.approval import Policy
 from pptmstr.bridge import Bridge
 from pptmstr.effects import SessionDetachSettled
+from pptmstr.gate.policy import Policy
 from pptmstr.intents import (
     AgentFinished,
     AgentSpawned,

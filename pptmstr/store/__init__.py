@@ -27,7 +27,6 @@ from types import MappingProxyType
 from typing import assert_never
 
 from .. import drawable
-from ..approval import Policy
 from ..board.digest import digest
 from ..board.rows import board_concerns, board_tasks
 from ..channels.records import EVERY_CHANNEL, Channel, PeerRefusal, PeerWithdrawRefusal
@@ -50,6 +49,7 @@ from ..effects import (
     WakeReason,
     peer_identity,
 )
+from ..gate.policy import Policy
 from ..intents import (
     AgentFinished,
     AgentRemoved,

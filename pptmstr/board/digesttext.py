@@ -93,7 +93,7 @@ def _digest_text(digest: Digest, budget: int | None = None) -> str:
     approval it is the text of a call nobody has approved: another agent's concern
     still in review, a command not yet run. This tool is auto-approved on the
     grounds that everything it returns was reviewed or is the caller's own board
-    (``approval._BUS_AUTO``), and one summary would make it a way round the gate.
+    (``gate.tools.BUS_AUTO``), and one summary would make it a way round the gate.
     The operator's pane shows them.
 
     Says nothing about clock time. The stamps behind "since" order events inside

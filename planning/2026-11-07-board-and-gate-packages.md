@@ -391,3 +391,29 @@ None of these are B5 scope.
   - 7 of the top 10 import `approval`.
 - Relayed and narrowed: the read side does not take in the panes, and `gate/` does not take
   `shellscan` or `gate_menu`.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval.Policy` | `gate.policy.Policy` |
+| `approval.requires_containment` | `gate.policy.requires_containment` |
+| `approval._AUTO` | `gate.tools.AUTO` |
+| `approval._REVIEW` | `gate.tools.REVIEW` |
+| `approval._BUS_AUTO` | `gate.tools.BUS_AUTO` |
+| `approval._AUTONOMOUS_AUTO` | `gate.tools.AUTONOMOUS_AUTO` |
+| `approval._FILE_READS` | `gate.tools.FILE_READS` |
+| `approval._TREE_READS` | `gate.tools.TREE_READS` |
+| `approval._BUS_SERVER` | `gate.tools._BUS_SERVER` |
+| `approval._BUS_WITHDRAW_PEER` | `gate.tools._BUS_WITHDRAW_PEER` |
+| `approval._dry_run` | `gate.tools._dry_run` |
+| `approval._reviewed_by_arguments` | `gate.tools._reviewed_by_arguments` |
+| `approval.DiffText` | `gate.diff.DiffText` |
+| `approval._FileState` | `gate.diff._FileState` |
+| `approval._edit_refusal` | `gate.diff._edit_refusal` |
+| `approval._unified` | `gate.diff._unified` |

@@ -276,3 +276,15 @@ thing being gated cannot be the thing that decides whether it needs gating.
   operator ask for it. Leaning off, weakly.
 - **Has batch approval actually been used for a full session?** If Shift+A is
   adequate in practice this is not worth building, and that has not been tested.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._AUTO` | `gate.tools.AUTO` |
+| `approval._REVIEW` | `gate.tools.REVIEW` |

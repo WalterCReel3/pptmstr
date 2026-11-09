@@ -396,3 +396,15 @@ not go in the prose. That section is why the whole of the fix is a set membershi
 **Not built:** the meter, the board's operator surface (now `2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md`
 and built separately), and the structured fields under "What a declaration must carry".
 The last is a schema change this row did not ask for; `detail` carries that as prose today.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._REVIEW` | `gate.tools.REVIEW` |
+| `approval._BUS_AUTO` | `gate.tools.BUS_AUTO` |

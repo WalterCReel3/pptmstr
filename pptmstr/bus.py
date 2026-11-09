@@ -489,7 +489,7 @@ def _stated_not_run(args: dict[str, Any], has_result: bool) -> tuple[str | None,
 
     **Every doubt resolves toward the weaker claim, and none of them refuses.** A
     refused completion strands a claim and everything waiting on it
-    (``approval._BUS_AUTO``), and here there is always an honest thing to store
+    (``gate.tools.BUS_AUTO``), and here there is always an honest thing to store
     instead:
 
     - both given: the list stands and ``all_run`` is dropped, since a claimer that

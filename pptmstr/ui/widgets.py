@@ -20,7 +20,8 @@ from dataclasses import dataclass
 
 from imgui_bundle import imgui
 
-from ..approval import Disposition, Policy, classify
+from ..approval import classify
+from ..gate.policy import Disposition, Policy
 from ..model import AgentRecord, AgentState, ContextSnapshot, EndedHow, TranscriptPresence
 from ..theme import STATE_GLYPH, STATE_LABEL, Color, LinkInks, P, dialog_colors, faded, link_inks
 

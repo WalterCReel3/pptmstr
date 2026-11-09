@@ -581,3 +581,14 @@ Gaps in what was run:
 
 The EoP quotes were read from the source. The Lo Russo, PAIP, lis.py, PEP 544 and cppreference
 quotes are relayed.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval.requires_containment` | `gate.policy.requires_containment` |

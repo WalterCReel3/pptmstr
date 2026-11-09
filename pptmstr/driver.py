@@ -56,22 +56,19 @@ from claude_agent_sdk.types import SystemPromptCustom, SystemPromptPreset
 
 from . import commandbus, ids, plugins
 from .approval import (
-    Disposition,
-    Policy,
     classify,
     diff_texts,
-    inherits_to_subagents,
     is_edit,
     records_read,
     records_written,
-    render_texts,
-    requires_containment,
     summarize,
 )
 from .bridge import Bridge
 from .bus import CALLED_AT_KEY, EDITED_KEY, FROM_KEY, SERVER_NAME, build_server, offered_tools
 from .cli_version import BelowFloor, MeetsFloor, Unreadable, VersionRead, check_floor
 from .figures import fences
+from .gate.diff import render_texts
+from .gate.policy import Disposition, Policy, inherits_to_subagents, requires_containment
 from .intents import (
     AgentFinished,
     AgentResumed,
@@ -1405,12 +1402,12 @@ class AgentSession:
         The policy a call classifies under, given the node that made it.
 
         Whether a sub-agent inherits is the rung's own answer, read from
-        ``approval.inherits_to_subagents``. Both widened rungs inherit, by different
+        ``gate.policy.inherits_to_subagents``. Both widened rungs inherit, by different
         routes: ``AUTONOMOUS`` because the sandbox is per CLI process and a sub-agent
         shares its parent's, ``PERMISSIVE`` because ``shellscan`` is re-run per
         command and its verdict does not weaken with fan-out. What still costs an
         approval under both is the spawn itself at ``PERMISSIVE`` -- ``Task``/
-        ``Agent`` stay in ``_REVIEW`` there -- so agent count is operator-bounded one
+        ``Agent`` stay in ``REVIEW`` there -- so agent count is operator-bounded one
         at a time, under a ``subagent_cap`` no policy can widen.
 
         The rung decides and this function applies it, rather than the branch living
@@ -2097,7 +2094,7 @@ class AgentSession:
         runs the tool -- and so fires the SubagentStart this pairs with -- only
         after the hook permits it, so an id recorded any earlier belongs to a call
         that may still be denied, cancelled, or overtaken by another spawn while a
-        human sits in the gate. `Agent` is in `_REVIEW`, so that gap is a human's
+        human sits in the gate. `Agent` is in `REVIEW`, so that gap is a human's
         latency rather than a scheduling accident.
 
         Appended rather than assigned: several calls can be admitted before the

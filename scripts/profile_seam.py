@@ -50,7 +50,8 @@ sys.path.insert(0, str(ROOT))
 import imgui_bundle  # noqa: E402
 from imgui_bundle import imgui  # noqa: E402
 
-from pptmstr import approval, pairing, theme, version  # noqa: E402
+from pptmstr import pairing, theme, version  # noqa: E402
+from pptmstr.gate.diff import DiffText, render_texts  # noqa: E402
 from pptmstr.ui import typeset  # noqa: E402
 
 SAMPLE = ROOT / ".deps" / "imscribe" / "demo" / "sample.md"
@@ -163,8 +164,8 @@ def profile_diff(lines: int) -> list[str]:
     after = "".join(
         f"line {n} of the file as it {'is now' if n % 7 == 0 else 'was'}\n" for n in range(lines)
     )
-    texts = (approval.DiffText("/tmp/x.py", before, after),)
-    unified = approval.render_texts("Write", texts)
+    texts = (DiffText("/tmp/x.py", before, after),)
+    unified = render_texts("Write", texts)
     rows = unified.splitlines()
     views = typeset.ViewCache()
     first = frame(lambda: typeset.diff(views, "diff", texts))

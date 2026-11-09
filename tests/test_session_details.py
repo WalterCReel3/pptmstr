@@ -19,7 +19,7 @@ import pytest
 from imgui_bundle import imgui
 
 from pptmstr import boardlog, boardsync, brief, sessionfile
-from pptmstr.approval import Policy
+from pptmstr.gate.policy import Policy
 from pptmstr.intents import (
     AgentFinished,
     AgentSpawned,

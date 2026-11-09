@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 from imgui_bundle import imgui
 
-from ..approval import Policy
+from ..gate.policy import Policy
 from ..model import AgentRecord, AgentState, EndedHow, LaunchSpec, NodeId, Snapshot
 from ..theme import STATE_GLYPH, STATE_LABEL, Color, P
 from . import gate_menu, projects, session_details, session_menu

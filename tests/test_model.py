@@ -21,8 +21,9 @@ import inspect
 from collections.abc import Callable
 from typing import Any
 
-from pptmstr.approval import Policy, classify
+from pptmstr.approval import classify
 from pptmstr.driver import AgentSession
+from pptmstr.gate.policy import Policy
 from pptmstr.model import (
     BEFORE_RESTART,
     CLOSED_BY_OPERATOR,

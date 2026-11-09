@@ -32,9 +32,9 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from pptmstr.approval import Policy, requires_containment
 from pptmstr.bridge import Bridge
 from pptmstr.driver import AgentSession, Translator, UncontainedAutonomy, _tool_topic
+from pptmstr.gate.policy import Policy, requires_containment
 from pptmstr.intents import (
     AgentFinished,
     AgentSpawned,
@@ -3803,15 +3803,15 @@ def test_nothing_parks_under_the_autonomous_policy(tmp_path: Path, monkeypatch) 
     A park here is not a degraded mode. `APPROVAL_TIMEOUT_S` is six hours and the
     CLI is blocked on the hook's answer for all of it, so one reachable path makes
     the session hang rather than run unattended -- which is why this enumerates the
-    sets instead of sampling them, and reads them off `approval` so a tool added
+    sets instead of sampling them, and reads them off `gate.tools` so a tool added
     there is swept in without anyone remembering to add it here.
     """
-    from pptmstr import approval
+    from pptmstr.gate.tools import AUTO, BUS_AUTO, REVIEW
 
     _forbid_parking(monkeypatch)
     session = _autonomous(tmp_path)
     names = [
-        *sorted(approval._AUTO | approval._REVIEW | approval._BUS_AUTO),
+        *sorted(AUTO | REVIEW | BUS_AUTO),
         "SomeFutureTool",
         "mcp__other_server__do_thing",
         "mcp__pptmstr__invent_a_task",
@@ -4610,7 +4610,7 @@ def test_an_uncontained_session_cannot_be_widened_to_the_autonomous_rung() -> No
 
 def test_the_live_refusal_asks_the_rung_and_not_its_name() -> None:
     """
-    The same predicate the start path uses, `approval.requires_containment`, so a
+    The same predicate the start path uses, `gate.policy.requires_containment`, so a
     rung added later is refused or admitted here by the answer it already had to
     give there. Every rung is tried on an uncontained session and on a contained
     one; the contained column is what makes this a check on the pair rather than

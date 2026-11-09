@@ -27,6 +27,8 @@ import pytest
 
 from pptmstr import approval, fake_driver
 from pptmstr.bridge import Bridge
+from pptmstr.gate.diff import render_texts
+from pptmstr.gate.tools import _BUS_DECLARE, _BUS_POST
 from pptmstr.intents import AgentSpawned, ApprovalRequested, ApprovalResolved, StateChanged
 from pptmstr.model import AgentState, NodeId, PendingApproval, QuestionPending, Snapshot
 from pptmstr.store import Store
@@ -77,7 +79,7 @@ def parked(tool_name: str, raw_args: Mapping[str, Any], ident: str = "p1") -> Pe
         raw_args=raw_args,
         summary=approval.summarize(tool_name, raw_args),
         requested_at=0.0,
-        diff=approval.render_texts(tool_name, texts),
+        diff=render_texts(tool_name, texts),
         texts=texts,
     )
 
@@ -207,11 +209,11 @@ def said(monkeypatch: pytest.MonkeyPatch, seam: Any) -> list[str]:
 
 def test_the_bus_tool_names_are_the_ones_the_gate_parks() -> None:
     """
-    The pane spells the two names rather than importing a private of ``approval``.
+    The pane spells the two names rather than importing a private of ``gate.tools``.
     A drift would send a parked concern down the arguments branch, one escaped line.
     """
-    assert inbox._POST_CONCERN == approval._BUS_POST
-    assert inbox._DECLARE_TASK == approval._BUS_DECLARE
+    assert inbox._POST_CONCERN == _BUS_POST
+    assert inbox._DECLARE_TASK == _BUS_DECLARE
 
 
 def test_a_concern_reads_as_who_and_what_and_then_its_body() -> None:

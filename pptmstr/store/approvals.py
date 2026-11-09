@@ -12,16 +12,17 @@ import dataclasses
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from ..approval import Summary, peer_channel, summary_of
+from ..approval import Summary, summary_of
 from ..channels.records import WITHDRAW_PEER_TOOL, PeerRefusal
 from ..effects import peer_forms, peer_identity
+from ..gate.tools import peer_channel
 from ..model import AgentRecord, NodeId, PendingApproval, Snapshot, Task, TaskId, TaskState
 
 
 def _peer_row(snap: Snapshot, pending: PendingApproval) -> PendingApproval:
     """
     ``pending`` with its queue row naming the session it would reach now, when
-    it is a call that reaches another team's lead (``approval.peer_channel``),
+    it is a call that reaches another team's lead (``gate.tools.peer_channel``),
     and as it was otherwise.
 
     The driver summarises a call before the store has seen it, and only the

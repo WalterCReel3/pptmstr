@@ -45,7 +45,7 @@ from imgui_bundle import imgui
 
 from .. import approval
 from ..addresses import role_name
-from ..approval import DiffText, command_shown, diff_line_kind, edited_provenance
+from ..approval import command_shown, edited_provenance
 from ..bridge import Bridge
 from ..command import (
     COMMAND_TAG,
@@ -58,6 +58,8 @@ from ..command import (
 )
 from ..commandrun import environment_changes, kill_line, look_line
 from ..effects import peer_identity, peer_text
+from ..gate.diff import DiffText, diff_line_kind
+from ..gate.tools import states_provenance
 from ..intents import HeldMailDismissed, PeerQuestionDismissed, WakeChainReleased
 from ..model import (
     AgentRecord,
@@ -121,7 +123,7 @@ _QUALIFIER_W = 150.0
 _SMALL_FONT = 12.5
 
 # The two spellings the CLI uses for "start a sub-agent". Both are in
-# ``approval._REVIEW``, so both park, and a marker that knew only one would be
+# ``gate.tools.REVIEW``, so both park, and a marker that knew only one would be
 # silently absent for half the spawns.
 _SPAWN_TOOLS = frozenset({"Agent", "Task"})
 
@@ -181,7 +183,7 @@ _WITHHELD_UNPARSED = (
 )
 _NOT_ON_SCREEN = "the body above is not on screen - approve is held until it is"
 
-# The bus tools' names as the CLI spells them. ``approval.py`` owns the spelling and
+# The bus tools' names as the CLI spells them. ``gate/tools.py`` owns the spelling and
 # keeps it private; tests/test_inbox_typeset.py fails if these two drift from it.
 _POST_CONCERN = "mcp__pptmstr__post_concern"
 _DECLARE_TASK = "mcp__pptmstr__declare_task"
@@ -1774,7 +1776,7 @@ def edit_provenance(state: review.ReviewState, pending: PendingApproval) -> str 
     arguments, so asked only of a declaration with a draft: the tool is checked
     before anything is parsed, because the open editor asks this every frame.
     """
-    if not approval.states_provenance(pending.tool_name):
+    if not states_provenance(pending.tool_name):
         return None
     draft = state.edits.get(pending.id)
     parsed = None if draft is None else review.parse_edit(draft)

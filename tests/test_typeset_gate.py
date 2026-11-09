@@ -1012,10 +1012,10 @@ def test_a_view_held_from_one_display_density_is_made_again_at_another(seam: Any
     not run on a display whose density is not 1**, and what the library
     draws there nobody has measured.
     """
-    from pptmstr import approval
+    from pptmstr.gate.diff import DiffText
     from tests.test_typeset_views import frame
 
-    texts = (approval.DiffText("one\n", "two\n", "x.py"),)
+    texts = (DiffText("one\n", "two\n", "x.py"),)
     cache = typeset.ViewCache()
     io = seam.get_io()
     was = (float(io.display_framebuffer_scale.x), float(io.display_framebuffer_scale.y))

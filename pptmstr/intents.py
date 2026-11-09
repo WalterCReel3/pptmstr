@@ -29,10 +29,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .approval import Policy
 from .boardlog import Board, Clock
 from .channels.records import Channel, ChannelId, ChannelScope
 from .command import Command, CommandId, End
+from .gate.policy import Policy
 from .model import (
     AgentState,
     Basis,

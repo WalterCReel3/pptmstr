@@ -22,7 +22,6 @@ from typing import Any
 import pytest
 
 from pptmstr import boardlog
-from pptmstr.approval import Policy
 from pptmstr.board.rows import board_concerns, board_tasks
 from pptmstr.boardlog import Clock, RestoredConcern, RestoredTask
 from pptmstr.command import (
@@ -63,6 +62,7 @@ from pptmstr.effects import (
     TaskWriteSettled,
     WakeReason,
 )
+from pptmstr.gate.policy import Policy
 from pptmstr.intents import (
     AgentFinished,
     AgentRemoved,

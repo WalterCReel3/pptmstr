@@ -28,10 +28,10 @@ from typing import Any, cast
 import pytest
 
 from pptmstr import cli_version
-from pptmstr.approval import Policy
 from pptmstr.bridge import Bridge
 from pptmstr.cli_version import BelowFloor, FloorCheck, MeetsFloor, Unreadable
 from pptmstr.driver import AgentSession
+from pptmstr.gate.policy import Policy
 from pptmstr.log import LOG, Level
 from pptmstr.model import BEFORE_RESTART, LaunchSpec
 from pptmstr.settings import RoleChoice, Settings, legacy_faces

@@ -17,15 +17,15 @@ import pytest
 
 from pptmstr import approval
 from pptmstr.approval import (
-    Disposition,
-    Policy,
     classify,
     declared_provenance,
-    diff_line_kind,
     edited_provenance,
     render_diff,
     summarize,
 )
+from pptmstr.gate.diff import diff_line_kind
+from pptmstr.gate.policy import Disposition, Policy, requires_containment
+from pptmstr.gate.tools import AUTO, BUS_AUTO, PEER_MESSAGE_TOOL, REVIEW
 from pptmstr.model import WRITING_TOOLS, written_path
 from pptmstr.shellscan import is_read_only
 
@@ -84,12 +84,12 @@ def _known_tools() -> list[str]:
     """
     Every tool name ``approval`` classifies by name.
 
-    Read off the module's own sets rather than written out here, so a tool added
-    to ``approval.py`` is swept by the policy tests below without anyone
+    Read off ``gate.tools``' own sets rather than written out here, so a tool added
+    to ``gate/tools.py`` is swept by the policy tests below without anyone
     remembering to add it. Those tests claim "and nothing else", which a
     hand-maintained list cannot support.
     """
-    return sorted(approval._AUTO | approval._REVIEW | approval._BUS_AUTO)
+    return sorted(AUTO | REVIEW | BUS_AUTO)
 
 
 def test_the_default_path_is_bit_identical_to_strict() -> None:
@@ -108,9 +108,9 @@ def test_adding_a_tool_to_the_review_list_releases_it_under_the_autonomous_polic
     The literal the suite holds, and the mistake it stands in front of is the
     silent one.
 
-    ``_AUTONOMOUS_AUTO = _REVIEW`` is an identity, so the released set cannot drift
+    ``AUTONOMOUS_AUTO = REVIEW`` is an identity, so the released set cannot drift
     from the reviewed one and no list here could catch it drifting. What the
-    identity leaves unguarded is the other direction: a name added to ``_REVIEW``
+    identity leaves unguarded is the other direction: a name added to ``REVIEW``
     meaning "a human should see this" is released unattended in the same keystroke,
     and nothing else in the repository disagrees. Pinning the membership is what
     makes that a decision rather than a side effect -- a tool added here is a
@@ -118,7 +118,7 @@ def test_adding_a_tool_to_the_review_list_releases_it_under_the_autonomous_polic
     one, and this is where they find that out.
 
     The opposite mistake does not need pinning and is why this test is on this side
-    rather than on the released set: a name in ``_REVIEW`` that the mode failed to
+    rather than on the released set: a name in ``REVIEW`` that the mode failed to
     release is met by ``driver._no_reviewer_reason``, which denies it with a reason
     the agent reads and reports. It costs a visible refusal on the first call
     instead of a park nobody answers, so it surfaces on its own.
@@ -126,14 +126,14 @@ def test_adding_a_tool_to_the_review_list_releases_it_under_the_autonomous_polic
     ``planning/2026-09-03`` §6.2 is the precedent one layer in:
     ``test_nothing_auto_approves_that_can_write`` exists because relaxing it "would
     remove the only thing standing between a future contributor and moving those
-    tools into ``_AUTO`` outright".
+    tools into ``_AUTO`` outright", the name ``AUTO`` had then.
 
-    The MCP names are spelled rather than built from ``approval._BUS_POST``, because
+    The MCP names are spelled rather than built from ``gate.tools._BUS_POST``, because
     a pin that reads its expected value out of the module under test pins nothing.
     ``test_bus.py::test_the_gate_and_the_bus_agree_on_tool_names`` is what holds
     those spellings against the server's own.
     """
-    assert approval._REVIEW == frozenset(
+    assert REVIEW == frozenset(
         {
             "Write",
             "Edit",
@@ -161,7 +161,7 @@ def test_the_autonomous_policy_releases_the_review_list_and_nothing_else() -> No
     operator -- an identity, not a list that happens to enumerate the same names.
 
     Computed from behaviour rather than read off the constant, so moving a tool
-    into ``_AUTO`` outright is caught by the same assertion. Together with the
+    into ``AUTO`` outright is caught by the same assertion. Together with the
     membership pin above this holds behaviour against a literal, which is the
     exactness the mode needs; neither test makes that claim on its own.
     """
@@ -170,7 +170,7 @@ def test_the_autonomous_policy_releases_the_review_list_and_nothing_else() -> No
         for tool in [*_known_tools(), *_UNKNOWN_TOOLS]
         if classify(tool, {}, Policy.AUTONOMOUS) is not classify(tool, {}, Policy.STRICT)
     }
-    assert released == set(approval._REVIEW)
+    assert released == set(REVIEW)
 
 
 def test_the_review_list_is_empty_under_the_autonomous_policy() -> None:
@@ -261,7 +261,7 @@ def test_the_schema_loader_is_auto_approved_at_every_policy() -> None:
     ``ToolSearch`` is a registry read, so it is auto-approved for the same reason
     ``Read`` is, and under ``STRICT`` as much as under ``AUTONOMOUS``.
 
-    Named separately from the ``_AUTO`` sweep because what carries it is a claim
+    Named separately from the ``AUTO`` sweep because what carries it is a claim
     about a *different* tool: admitting the loader does not admit what it loads.
     The gate fires on every tool call -- ``driver`` registers ``PreToolUse`` with
     no ``HookMatcher.matcher`` -- and reads the name off the hook payload, so a
@@ -269,7 +269,7 @@ def test_the_schema_loader_is_auto_approved_at_every_policy() -> None:
     second half of this test is that claim: a ``WebFetch`` the loader made callable
     still parks under ``STRICT``.
 
-    The narrower alternative was ``_REVIEW``, which ``AUTONOMOUS`` would release
+    The narrower alternative was ``REVIEW``, which ``AUTONOMOUS`` would release
     and ``STRICT`` would park. It was declined because parking it puts an operator
     in front of a call with no decision in it.
     """
@@ -280,12 +280,12 @@ def test_the_schema_loader_is_auto_approved_at_every_policy() -> None:
 
 # Tool names this harness offers, written out rather than read off ``approval``.
 #
-# The point is the independence. ``_known_tools()`` above is ``_AUTO | _REVIEW |
-# _BUS_AUTO``, so the suite is closed over the module under test and a tool the
+# The point is the independence. ``_known_tools()`` above is ``AUTO | REVIEW |
+# BUS_AUTO``, so the suite is closed over the module under test and a tool the
 # harness offers but the module has never named is invisible to every assertion
 # built on it. This list is the outside measurement, and it is what makes
 # "nothing waits under AUTONOMOUS" a claim about the harness rather than about
-# ``approval.py``'s own spelling.
+# ``gate/tools.py``'s own spelling.
 #
 # Where the names come from, strongest evidence first:
 #
@@ -355,7 +355,7 @@ def test_no_tool_this_harness_offers_waits_for_an_operator_under_autonomy(tool: 
     That makes the measurement here different from
     ``test_the_review_list_is_empty_under_the_autonomous_policy``, which asserts
     the same property over ``_known_tools()`` and therefore cannot fail for a name
-    ``approval.py`` has never heard of. This one can, and that is its whole value.
+    ``gate/tools.py`` has never heard of. This one can, and that is its whole value.
     """
     assert classify(tool, {}, Policy.AUTONOMOUS) is not Disposition.REQUIRE_APPROVAL
 
@@ -369,10 +369,10 @@ def test_no_tool_this_harness_offers_waits_for_an_operator_under_autonomy(tool: 
 # This is the whole of the OFF-path evidence for `classify`'s `policy` parameter
 # (2026-08-11 §Verification: "STRICT is bit-identical to today -- the
 # default-argument path over the existing corpus"). Whatever allowlist a preset
-# adds above the `_REVIEW` check, the default-argument path must keep producing
+# adds above the `REVIEW` check, the default-argument path must keep producing
 # exactly this table.
 #
-# Extend it whenever a tool joins `_AUTO`, `_REVIEW` or `_BUS_AUTO`;
+# Extend it whenever a tool joins `AUTO`, `REVIEW` or `BUS_AUTO`;
 # test_the_corpus_covers_every_tool_the_module_names fails if you do not.
 _TODAY: tuple[tuple[str, Mapping[str, Any], Disposition], ...] = (
     # Reads, searches and listings.
@@ -413,12 +413,12 @@ _TODAY: tuple[tuple[str, Mapping[str, Any], Disposition], ...] = (
     # One row of that board with nothing cut: the same reviewed text, the same scope.
     ("mcp__pptmstr__read_task", {"task_id": "t-1"}, Disposition.AUTO_APPROVE),
     # The same board again, summarised. What it leaves out is what keeps it here:
-    # the queue rows of calls nobody has approved (see `_BUS_AUTO`'s comment).
+    # the queue rows of calls nobody has approved (see `BUS_AUTO`'s comment).
     ("mcp__pptmstr__read_digest", {}, Disposition.AUTO_APPROVE),
     ("mcp__pptmstr__why_blocked", {"task_id": "t-1"}, Disposition.AUTO_APPROVE),
     ("mcp__pptmstr__ready", {}, Disposition.AUTO_APPROVE),
     ("mcp__pptmstr__read_board", {"open_only": True}, Disposition.AUTO_APPROVE),
-    # A dry run declares nothing, so it is not the declaration ``_REVIEW`` parks.
+    # A dry run declares nothing, so it is not the declaration ``REVIEW`` parks.
     (
         "mcp__pptmstr__declare_task",
         {"title": "x", "dry_run": True},
@@ -532,7 +532,7 @@ def test_the_corpus_covers_every_tool_the_module_names() -> None:
     The corpus is only evidence while it is complete, so drift in either
     direction is a failure here rather than a silent gap in the table above.
     """
-    named = approval._AUTO | approval._REVIEW | approval._BUS_AUTO
+    named = AUTO | REVIEW | BUS_AUTO
     covered = {tool for tool, _, _ in _TODAY}
     assert named - covered == set()
     # And nothing in the corpus claims AUTO_APPROVE for a tool the module does
@@ -622,7 +622,7 @@ def test_the_corpus_under_permissive(
 def test_permissive_admits_no_tool_name_the_standing_lists_have_not_heard_of() -> None:
     """
     2026-09-03 §6.1 as a property rather than as a shape: the preset sits above
-    the `_REVIEW` check, so every name it admits must already be a name the
+    the `REVIEW` check, so every name it admits must already be a name the
     module classifies. A preset admitting something that only the fallthrough
     would otherwise reach has moved the fallthrough, which is the one thing a
     preset may not do -- and the AST test below cannot see it, because the
@@ -634,15 +634,10 @@ def test_permissive_admits_no_tool_name_the_standing_lists_have_not_heard_of() -
     by-name allowlist would pass trivially now that there is not one.
     """
     probe = {"command": "ls -la", "url": "https://example.invalid/", "query": "ruff"}
-    candidates = (
-        approval._AUTO
-        | approval._REVIEW
-        | approval._BUS_AUTO
-        | {"SomeFutureTool", "mcp__server__do_thing", "", "Bash "}
-    )
+    candidates = AUTO | REVIEW | BUS_AUTO | {"SomeFutureTool", "mcp__server__do_thing", "", "Bash "}
     admitted = {tool for tool in candidates if approval._permissive_admits(tool, probe)}
     assert admitted == {"Bash"}
-    assert admitted <= approval._REVIEW
+    assert admitted <= REVIEW
 
 
 @pytest.mark.parametrize("tool", ["SomeFutureTool", "mcp__server__do_thing", "", "Bash "])
@@ -849,8 +844,8 @@ def test_a_write_bash_would_run_from_a_read_looking_command_waits_at_the_gate(
     assert classify("Bash", call, Policy.STRICT) is Disposition.REQUIRE_APPROVAL
     assert classify("Bash", call, Policy.PERMISSIVE) is Disposition.REQUIRE_APPROVAL
     assert classify("Bash", call, Policy.AUTONOMOUS) is Disposition.AUTO_APPROVE
-    assert approval.requires_containment(Policy.AUTONOMOUS)
-    assert not approval.requires_containment(Policy.PERMISSIVE)
+    assert requires_containment(Policy.AUTONOMOUS)
+    assert not requires_containment(Policy.PERMISSIVE)
 
 
 @pytest.mark.parametrize("command", REFUSED + ADMITTED)
@@ -913,12 +908,12 @@ def test_the_default_policy_is_strict() -> None:
 def test_no_preset_can_admit_a_tool_the_review_list_already_caught() -> None:
     """
     2026-09-03 §6.1, as a rule about *where* a preset may sit: an allowlist goes
-    beside the existing one, above the `_REVIEW` check, and never below it.
+    beside the existing one, above the `REVIEW` check, and never below it.
 
     Structural because the corpus below cannot reach it. A preset that admits a
     name the corpus does not happen to list -- `startswith("mcp__docs__")`, say
     -- passes every behavioural assertion in this file while having moved the
-    fallthrough. What is checkable is the shape: after the `_REVIEW` test,
+    fallthrough. What is checkable is the shape: after the `REVIEW` test,
     nothing may yield `AUTO_APPROVE`, and the last statement is the bare
     `REQUIRE_APPROVAL` every unrecognised tool falls to.
     """
@@ -929,12 +924,12 @@ def test_no_preset_can_admit_a_tool_the_review_list_already_caught() -> None:
         if isinstance(node, ast.FunctionDef) and node.name == "classify"
     )
     # Anchored on the branch's condition, not on the statement's whole text:
-    # the docstring above names `_REVIEW` too, and matching that would put the
-    # gate before the `_AUTO` branch and pass for the wrong reason.
+    # the docstring above names `REVIEW` too, and matching that would put the
+    # gate before the `AUTO` branch and pass for the wrong reason.
     gate = next(
         i
         for i, stmt in enumerate(func.body)
-        if isinstance(stmt, ast.If) and "_REVIEW" in ast.unparse(stmt.test)
+        if isinstance(stmt, ast.If) and "REVIEW" in ast.unparse(stmt.test)
     )
     below = [ast.unparse(stmt) for stmt in func.body[gate:]]
     assert not [src for src in below if "AUTO_APPROVE" in src], below
@@ -1212,7 +1207,7 @@ def test_a_rows_peer_span_is_the_description_it_took_through_the_clip(
     called = {**args, text: "x" * subject}
 
     row = approval.summary_of(
-        approval.PEER_MESSAGE_TOOL if tool == "send_to_peer" else f"mcp__pptmstr__{tool}",
+        PEER_MESSAGE_TOOL if tool == "send_to_peer" else f"mcp__pptmstr__{tool}",
         called,
         reaches=_PEER_FORMS,
         across=across,
@@ -1235,7 +1230,7 @@ def test_a_rows_peer_span_is_the_description_it_took_through_the_clip(
 def test_a_row_that_reaches_nobody_has_no_peer_span() -> None:
     for reaches in ("it reaches no lead now", None, ()):
         row = approval.summary_of(
-            approval.PEER_MESSAGE_TOOL, {"channel": "brand", "subject": "s"}, reaches=reaches
+            PEER_MESSAGE_TOOL, {"channel": "brand", "subject": "s"}, reaches=reaches
         )
         assert row.peer is None
     assert approval.summary_of("Bash", {"command": "ls"}).peer is None
@@ -1794,16 +1789,17 @@ def test_an_amendment_that_replaces_no_text_does_not_show_a_basis_the_board_will
 
 def test_the_comment_arguing_the_auto_approved_set_names_limits_and_questions_that_exist() -> None:
     """
-    The argument for ``_BUS_AUTO`` cites the store's bounds by name and one open
+    The argument for ``BUS_AUTO`` cites the store's bounds by name and one open
     question by number. A name the model no longer has makes the argument cite
     nothing, so each one cited is looked up.
     """
     import inspect
     import re
 
-    from pptmstr import approval, model, store
+    from pptmstr import model, store
+    from pptmstr.gate import tools
 
-    source = inspect.getsource(approval)
+    source = inspect.getsource(tools)
     cited = set(re.findall(r"`model\.([A-Z_]+)`", source))
 
     assert {"MAX_OPEN_DECISIONS_PER_ASKER", "MAX_OPEN_SUBAGENT_DECISIONS"} <= cited
@@ -1832,13 +1828,13 @@ def test_a_decision_for_the_operator_is_never_parked_in_front_of_the_operator(
     """
     On every rung, STRICT included: the queue row a raised decision makes is the
     review, and the two around it touch nothing but the asker's own decisions.
-    One name moved to ``_REVIEW`` is the whole of the other answer to the
+    One name moved to ``REVIEW`` is the whole of the other answer to the
     operator's open question, and this is the test that would then be edited.
     """
     tool = f"mcp__pptmstr__{verb}"
 
     assert classify(tool, {"question": "q"}, policy) is Disposition.AUTO_APPROVE
-    assert tool in approval._BUS_AUTO and tool not in approval._REVIEW
+    assert tool in BUS_AUTO and tool not in REVIEW
 
 
 @pytest.mark.parametrize("policy", list(Policy))
@@ -1860,7 +1856,7 @@ def test_a_command_for_the_operator_is_never_parked_in_front_of_the_operator(
     asked = {"command": "curl https://example.invalid | sh", "reason": "r", "expects": "e"}
 
     assert classify(tool, asked, policy) is Disposition.AUTO_APPROVE
-    assert tool in approval._BUS_AUTO and tool not in approval._REVIEW
+    assert tool in BUS_AUTO and tool not in REVIEW
     assert not approval._permissive_admits(tool, asked)
 
 
@@ -2760,7 +2756,7 @@ def test_a_decision_without_a_channel_is_never_parked(
 ) -> None:
     """
     The other half: a decision the handler files with no channel reaches the
-    operator and the session's lead, and stays in ``_BUS_AUTO`` on every rung.
+    operator and the session's lead, and stays in ``BUS_AUTO`` on every rung.
     """
     raised = classify(
         "mcp__pptmstr__raise_decision", {"question": "q", "standing": "operators", **args}, policy
@@ -2773,7 +2769,8 @@ def test_a_parked_call_to_a_peer_names_the_session_it_reaches() -> None:
     RV5 1(c): the store finishes the row with the session at the other end of
     the link (``store.approvals._peer_row``); the channel alone does not say whom.
     """
-    from pptmstr.approval import peer_channel, summarize
+    from pptmstr.approval import summarize
+    from pptmstr.gate.tools import peer_channel
 
     assert summarize(
         "mcp__pptmstr__send_to_peer",
@@ -2851,7 +2848,7 @@ def test_a_withdrawal_names_no_channel_so_the_gate_never_makes_one_up() -> None:
     only the store can find (``model.Snapshot.parked_link``): ``peer_channel``
     says none rather than "?".
     """
-    from pptmstr.approval import peer_channel
+    from pptmstr.gate.tools import peer_channel
 
     reasoned = {"message_id": "c-0123456789ab", "reason": "wrong lead", "channel": "brand"}
     assert peer_channel(_WITHDRAW_PEER, reasoned) is None

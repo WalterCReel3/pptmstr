@@ -32,8 +32,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import brief
-from .approval import diff_texts, render_texts, summarize
+from .approval import diff_texts, summarize
 from .bridge import Bridge
+from .gate.diff import render_texts
 from .intents import (
     AgentFinished,
     AgentSpawned,
@@ -91,7 +92,7 @@ _CWDS = (
 )
 
 # The bus tools as the gate sees them, spelled here rather than imported from
-# pptmstr.bus for the reason approval.py spells them: bus.py pulls in the SDK, and
+# pptmstr.bus for the reason gate/tools.py spells them: bus.py pulls in the SDK, and
 # this module's premise is that it runs without one. Pinned to ``bus.qualified`` by
 # tests/test_fake_fixtures.py.
 POST_CONCERN = "mcp__pptmstr__post_concern"

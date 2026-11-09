@@ -437,3 +437,20 @@ a commit of its own.
   would fit the same split (`commandreplies`, or into `commandtext`). That is out of B7's scope as
   written. It is recorded here so that the asymmetry with the bus is a choice and not an
   oversight.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._BUS_AMEND` | `gate.tools._BUS_AMEND` |
+| `approval._BUS_DECIDE` | `gate.tools._BUS_DECIDE` |
+| `approval._BUS_DECLARE` | `gate.tools._BUS_DECLARE` |
+| `approval._BUS_PEER` | `gate.tools._BUS_PEER` |
+| `approval._BUS_POST` | `gate.tools._BUS_POST` |
+| `approval._BUS_WITHDRAW` | `gate.tools._BUS_WITHDRAW` |
+| `approval._BUS_WITHDRAW_PEER` | `gate.tools._BUS_WITHDRAW_PEER` |

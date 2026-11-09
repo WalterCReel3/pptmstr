@@ -13,9 +13,9 @@ from collections.abc import Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from types import MappingProxyType
 
-from ..approval import peer_channel
 from ..channels.records import WITHDRAW_PEER_TOOL, Channel, ChannelId
 from ..effects import Effect, SessionWoken, WakeReason
+from ..gate.tools import peer_channel
 from ..intents import (
     ApprovalResolved,
     BoardRestored,
@@ -467,7 +467,7 @@ def _moved(
     """
     Every link among ``wakes`` that ``intent`` moved, which starts its chain
     again. **Only the operator acting on that link moves it**: an approval or
-    a refusal of a parked call that reaches across it (``approval.peer_channel``,
+    a refusal of a parked call that reaches across it (``gate.tools.peer_channel``,
     or for a withdrawal, which names no channel, the withdrawn message's link
     as ``Snapshot.parked_link`` finds it), an answer or a dismissal of a decision raised
     on it, an edit or a withdrawal of a message sent over it that changed the

@@ -56,7 +56,7 @@ from typing import assert_never
 from imgui_bundle import imgui
 
 from .. import cli_version, templates
-from ..approval import Policy, requires_containment
+from ..gate.policy import Policy, requires_containment
 from ..model import LaunchSpec
 from ..model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
 from ..sessionfile import UnknownPolicy

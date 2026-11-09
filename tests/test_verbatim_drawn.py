@@ -479,7 +479,7 @@ def test_a_resume_box_opens_on_the_message_written_out_where_no_box_takes_it(
     string to its first NUL. It opens on what it can show, and what is sent is
     what it shows; a message every box takes is opened on as it was sent.
     """
-    from pptmstr.approval import Policy
+    from pptmstr.gate.policy import Policy
     from pptmstr.ui.resume_form import ResumeForms
 
     def opened(message: str) -> str:

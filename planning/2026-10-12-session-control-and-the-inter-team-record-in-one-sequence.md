@@ -438,3 +438,14 @@ run's reproductions. None was deleted.
   grown and the whole-suite count above is the current evidence.
 - Still unbuilt and unchanged: everything in "The postmortems' recommendations" marked not
   built, and Q1–Q10, none of which has been answered.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._BUS_AUTO` | `gate.tools.BUS_AUTO` |

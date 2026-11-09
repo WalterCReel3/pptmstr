@@ -1865,7 +1865,7 @@ def result_heading(row: BoardTask) -> str:
 
     Attributed rather than bare because a result is the claimer's own report of its
     own work, and it reached the board without the review a specification and a
-    note both had (``approval._BUS_AUTO``). The operator reading it here is the
+    note both had (``gate.tools.BUS_AUTO``). The operator reading it here is the
     first person to see it.
 
     On a row the operator closed it is the operator's and reports no work, and

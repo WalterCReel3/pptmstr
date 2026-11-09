@@ -1474,7 +1474,7 @@ def test_a_call_parked_on_another_name_or_by_a_non_member_is_not_the_links() -> 
 
 def test_a_parked_withdrawal_is_the_operators_move_on_the_withdrawn_messages_link() -> None:
     """
-    Today a withdrawal never parks (``approval._BUS_AUTO``). Once one carrying
+    Today a withdrawal never parks (``gate.tools.BUS_AUTO``). Once one carrying
     a reason does (P3-fix), it is on the operator, on its message's link.
     """
     snap, cid = _asked()
@@ -1483,10 +1483,10 @@ def test_a_parked_withdrawal_is_the_operators_move_on_the_withdrawn_messages_lin
 
 
 def test_the_withdrawal_tool_name_is_the_one_the_gate_knows() -> None:
-    from pptmstr import approval
+    from pptmstr.gate.tools import _BUS_SERVER, BUS_AUTO
 
-    assert WITHDRAW_PEER_TOOL in approval._BUS_AUTO
-    assert WITHDRAW_PEER_TOOL == f"mcp__{approval._BUS_SERVER}__withdraw_peer_message"
+    assert WITHDRAW_PEER_TOOL in BUS_AUTO
+    assert WITHDRAW_PEER_TOOL == f"mcp__{_BUS_SERVER}__withdraw_peer_message"
 
 
 def test_a_held_wake_is_the_operators_move_from_when_it_was_held() -> None:

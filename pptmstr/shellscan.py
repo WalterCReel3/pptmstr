@@ -335,7 +335,7 @@ class _Rule:
 #
 # The 09-17 shrink was argued from danger alone, before any of these rows had
 # been measured against what a session actually runs. `Read`, `Glob` and
-# `Grep` auto-approve natively at every policy (`approval._AUTO`), so the
+# `Grep` auto-approve natively at every policy (`gate.tools.AUTO`), so the
 # reasoning was that the Bash table only has to cover what those three cannot
 # do -- which is `git`, plus trivial inspection -- and that search and
 # traversal binaries buy a session almost nothing on top of that. Measured

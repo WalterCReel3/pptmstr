@@ -24,7 +24,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from pptmstr import cli_version, sandbox, templates
-from pptmstr.approval import Policy
+from pptmstr.gate.policy import Policy
 from pptmstr.model import LaunchSpec
 from pptmstr.model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
 from pptmstr.sessions import Overlay, SessionMark, SessionRow, load_overlay, overlay_path
@@ -1811,7 +1811,7 @@ def test_the_dial_does_not_understate_what_the_top_rung_grants(
     The hazard is a description narrower than the grant, which is worse than none: an
     operator who reads "run Bash unattended" and chooses it has consented to one tool
     and been given every tool the gate would have held. ``AUTONOMOUS`` releases the
-    whole of ``approval._REVIEW``, so the screen has to name more than one kind.
+    whole of ``gate.tools.REVIEW``, so the screen has to name more than one kind.
 
     The line under the dial is the alarm, and it names two kinds -- files written
     and commands run -- in one sentence the operator cannot miss. The whole of what
@@ -5940,7 +5940,7 @@ def test_a_click_on_a_row_in_the_drawn_list_fills_the_combos_from_its_record(
 # checkout: the rung granted, whether the mode is engaged, the hold on a
 # two-line premise and on a one-line one, and the spec's rung and whether it
 # carries containment. Spelled out rather than derived from
-# ``approval.requires_containment``, so a change to that rule or to how the
+# ``gate.policy.requires_containment``, so a change to that rule or to how the
 # launcher reads it shows up here as a row that moved.
 _PER_RUNG = {
     (Policy.STRICT, "allowed"): (Policy.STRICT, False, None, None, Policy.STRICT, False),

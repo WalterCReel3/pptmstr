@@ -170,7 +170,7 @@ def _board_line(
 
     **A result and a list of what was not run are the two paragraphs here no
     operator saw first, under any policy.** Both ride ``complete_task``, which the
-    gate never parks (``approval._BUS_AUTO``). A specification and a note are parked
+    gate never parks (``gate.tools.BUS_AUTO``). A specification and a note are parked
     at ``declare_task`` and ``post_concern`` wherever those are reviewed, which is
     not every rung. Each is the account of the agent its heading names, and a
     reader should weigh it as that.
@@ -603,7 +603,7 @@ def _reasons_text(
     says so beside its sender's basis, since that basis was given for the words the
     sender wrote. Whether an operator saw a body first depends on the policy:
     ``post_concern`` is parked wherever it is reviewed and is not under the rung
-    that releases it (``approval._AUTONOMOUS_AUTO``). So a body is quoted line by
+    that releases it (``gate.tools.AUTONOMOUS_AUTO``). So a body is quoted line by
     line like every other text an agent wrote (``_quoted``).
 
     **``budget`` bounds the bodies and never the attributions.** Under a whole-board

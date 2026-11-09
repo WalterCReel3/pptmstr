@@ -3,7 +3,7 @@ The layer rules the tree states in prose, checked against its imports.
 
 Each rule below was a sentence in a docstring, in ``STYLE.md`` or in a planning
 record, and nothing held the code to it (``planning/2026-11-06-modules-are-named-
-for-what-they-require.md``, T3, T7 and A7). Eleven are checked here:
+for-what-they-require.md``, T3, T7 and A7). Thirteen are checked here:
 
 1. A module whose docstring says it imports no ImGui imports no ``imgui_bundle``,
    directly in any form, and does not reach it through the imports that run when
@@ -22,14 +22,17 @@ for-what-they-require.md``, T3, T7 and A7). Eleven are checked here:
    module that imports ``uuid`` or ``secrets`` (B6).
 9. ``pptmstr.channels`` imports nothing, ``channels.records`` imports nothing from
    pptmstr, only ``app`` imports ``channels.log``, and a name ``records`` defines
-   is imported from ``records`` alone (B6). ``channels.facts`` reaches a disk
-   reader only through the edges the store reaches and B5 removes, and nothing
-   importing it runs starts a thread.
+   is imported from ``records`` alone (B6). ``channels.facts`` reaches no disk
+   reader, and nothing importing it runs starts a thread.
 10. ``pptmstr.board`` imports nothing, ``board.words`` imports nothing from
     pptmstr when it runs, and a name ``words`` defines is imported from ``words``
     alone (B5).
 11. Only ``pptmstr.store`` imports a module of ``pptmstr.store``: ``_apply`` is the
     one door into the step its modules are parts of (B9).
+12. ``gate.policy``, ``gate.tools`` and ``gate.diff`` import nothing from
+    pptmstr, and a name one of them defines is imported from it alone (B5).
+13. Among the modules outside ``pptmstr/ui``, the one import cycle is ``command``
+    and ``model``, and ``command`` imports ``model`` under ``TYPE_CHECKING`` only.
 
 **Read from the source, never imported.** Every import is collected with ``ast``,
 including those inside a function (``lazy``) and those under ``if TYPE_CHECKING:``
@@ -627,18 +630,10 @@ def store_disk_edges(
 # B5 is planning/2026-11-07-board-and-gate-packages.md, which deletes approval for gate/
 # and leaves the store importing only its pure modules.
 STORE_DISK_EXCEPTIONS: dict[tuple[str, str], str] = {
-    # store/__init__.py for Policy; store/approvals.py for Summary, peer_channel and
-    # summary_of; store/waking.py for peer_channel.
+    # store/approvals.py for Summary and summary_of.
     ("pptmstr.approval", STORE): "approval's render_diff reads the file a write targets"
     " (``_read``); B5 removes it",
-    # intents.py:32, for Policy.
-    ("pptmstr.approval", "pptmstr.intents"): "intents carries a Policy; B5 removes it",
-    # model.py:28, for DiffText, Policy and peer_channel.
-    ("pptmstr.approval", "pptmstr.model"): "model's records carry a Policy and a DiffText;"
-    " B5 removes it",
-    # templates.py:34, for Policy.
-    ("pptmstr.approval", "pptmstr.templates"): "a template names its Policy; B5 removes it",
-    # approval.py:29, for config_dir, which approval's records reach resolves.
+    # approval.py:30, for config_dir, which approval's records reach resolves.
     ("pptmstr.settings", "pptmstr.approval"): "settings reads and saves settings.json;"
     " B5 removes it with approval",
     # settings.py:28, for replace, which save writes settings.json through.
@@ -988,8 +983,9 @@ BOARD = "pptmstr.board"
 def test_naming_imports_nothing_from_pptmstr() -> None:
     """
     What lets the driver and the board log name agents without importing
-    ``board``. ``model`` reaches ``board`` through ``approval``'s lazy imports,
-    so one edge into the package of any kind is the edge back.
+    ``board``. ``board.rows`` reaches ``naming`` through ``addresses``, and the
+    board log and the store's restore import it, so one edge into the package of
+    any kind is a way back.
     """
     found = [edge for edge in imports_of("pptmstr.naming") if edge.target.startswith("pptmstr")]
     assert not found, ", ".join(f"{edge.target} ({edge.kind}, line {edge.line})" for edge in found)
@@ -1149,23 +1145,19 @@ def _is_channel_facts(module: str) -> bool:
     return module == CHANNEL_FACTS
 
 
-def test_channel_facts_reach_no_disk_reader_but_through_the_stores_edges() -> None:
+def test_channel_facts_reach_no_disk_reader() -> None:
     """
     ``facts`` is the half of a link's log with no disk. Importing it runs
-    ``intents`` and ``model``, which reach ``approval`` and through it the disk
-    (``STORE_DISK_EXCEPTIONS``), so those edges are allowed here for the reason
-    they are allowed there, and B5 removes them from both. Any other edge to a
-    reader -- ``facts`` importing ``journal.files``, ``settings`` or ``log`` in any
-    form -- is new and fails.
+    ``intents`` and ``model``, which import the gate's leaves and no reader, so
+    any edge to a reader -- ``facts`` importing ``journal.files``, ``settings`` or
+    ``log`` in any form, or ``model`` importing ``approval`` -- fails.
     """
     readers = disk_readers()
     assert CHANNEL_FACTS in modules() and CHANNEL_FACTS not in readers
     found = disk_edges(imports(), readers, frozenset(modules()), _is_channel_facts, CHANNEL_FACTS)
-    allowed = {key for key in STORE_DISK_EXCEPTIONS if key[1] != STORE}
-    new = set(found) - allowed
-    assert not new, "importing channels.facts reaches a disk reader: " + "; ".join(
+    assert not found, "importing channels.facts reaches a disk reader: " + "; ".join(
         f"{reader} imported by {importer}, by " + " -> ".join(found[(reader, importer)])
-        for reader, importer in sorted(new)
+        for reader, importer in sorted(found)
     )
 
 
@@ -1236,10 +1228,10 @@ BOARD_WORDS = "pptmstr.board.words"
 
 def test_the_board_package_imports_nothing() -> None:
     """
-    ``approval`` imports ``board.words`` from inside the cycle through ``model``,
-    and importing it runs ``board/__init__`` first. An import there would bring
-    ``rows`` -- and ``model`` -- with it, so the package's ``__init__`` is a
-    docstring only.
+    ``approval``'s queue rows, the bus and the board's text import
+    ``board.words``, and importing it runs ``board/__init__`` first. An import
+    there would bring ``rows`` -- and ``model`` -- to each of them with the words,
+    so the package's ``__init__`` is a docstring only.
     """
     found = imports_of(BOARD)
     assert not found, ", ".join(f"{edge.target} ({edge.kind}, line {edge.line})" for edge in found)
@@ -1248,8 +1240,8 @@ def test_the_board_package_imports_nothing() -> None:
 def test_board_words_import_nothing_from_pptmstr_when_they_run() -> None:
     """
     ``Basis`` is named in an annotation and read as ``.value``, so it is imported
-    under ``TYPE_CHECKING`` only. An eager or lazy edge into the package is the one
-    that runs, and the one that would close the loop through ``model``.
+    under ``TYPE_CHECKING`` only. An eager or lazy edge into the package is one
+    that runs, and every importer of the words would run it too.
     """
     found = [
         edge
@@ -1276,3 +1268,162 @@ def test_nothing_reaches_a_board_word_through_another_module() -> None:
         and _from(module, modules()[module].name == "__init__.py", node) != BOARD_WORDS
     ]
     assert not found, "imports a board word through another module: " + ", ".join(found)
+
+
+# -- 12. gate: the leaves the records import -------------------------------------
+
+GATE_LEAVES = ("pptmstr.gate.policy", "pptmstr.gate.tools", "pptmstr.gate.diff")
+
+# gate/__init__.py: why ``model`` may import them.
+_GATE_LEAVES_CLAIM = Claim("pptmstr/gate/__init__.py", "Each imports nothing from pptmstr")
+
+
+def test_the_gate_package_still_says_its_leaves_import_nothing() -> None:
+    assert _GATE_LEAVES_CLAIM.holds(), (
+        f"{_GATE_LEAVES_CLAIM.file} no longer says {_GATE_LEAVES_CLAIM.words!r}: restore it,"
+        f" or delete the claim with the rule it states"
+    )
+
+
+@pytest.mark.parametrize("module", GATE_LEAVES)
+def test_a_gate_leaf_imports_nothing_from_pptmstr(module: str) -> None:
+    """
+    ``model``, ``intents``, ``templates`` and the store import these, so an edge
+    into the package of any kind, a ``TYPE_CHECKING`` one included, is a way back
+    into ``model``.
+    """
+    assert module in modules(), f"{module} is gone: delete it from GATE_LEAVES"
+    found = [edge for edge in imports_of(module) if edge.target.startswith("pptmstr")]
+    assert not found, ", ".join(f"{edge.target} ({edge.kind}, line {edge.line})" for edge in found)
+
+
+def test_the_gate_package_imports_nothing() -> None:
+    """
+    Importing a leaf runs ``gate/__init__`` first, so an import there is an
+    import of every leaf.
+    """
+    found = imports_of("pptmstr.gate")
+    assert not found, ", ".join(f"{edge.target} ({edge.kind}, line {edge.line})" for edge in found)
+
+
+@pytest.mark.parametrize("home", GATE_LEAVES)
+def test_nothing_reaches_a_gate_leaf_name_through_another_module(home: str) -> None:
+    """
+    No shim: ``approval`` imports the leaves and re-exports nothing, so every
+    module imports ``Policy``, ``DiffText``, the tool tables and the rest from the
+    leaf that defines them.
+    """
+    defined = _defined_at_top(home)
+    assert defined, f"{home} defines nothing"
+    found = [
+        f"{module} line {node.lineno}: {alias.name} from {_from(module, False, node)}"
+        for module in modules()
+        for node in ast.walk(tree_of(module))
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name in defined
+        and _from(module, modules()[module].name == "__init__.py", node) != home
+    ]
+    assert not found, f"imports a name {home} defines through another module: " + ", ".join(found)
+
+
+# -- 13. the one cycle outside ui ----------------------------------------------------
+
+# The import cycle among modules outside ui, over every kind of edge. ``command``
+# names ``NodeId`` in annotations and imports it under ``TYPE_CHECKING`` (command.py:28-31),
+# and ``model`` imports ``command`` when it runs. Any other cycle, or the edge from
+# ``command`` turning eager or lazy, fails.
+CYCLE_OUTSIDE_UI = frozenset({"pptmstr.command", "pptmstr.model"})
+CYCLE_TYPING_EDGE = ("pptmstr.command", "pptmstr.model")
+
+
+def strongly_connected(edges: Iterator[tuple[str, str]]) -> list[frozenset[str]]:
+    """
+    The components of more than one module in the graph ``edges`` draws, by
+    Tarjan's algorithm, iteratively so the tree's depth cannot reach the
+    recursion limit.
+    """
+    graph: dict[str, set[str]] = {}
+    for source, sink in edges:
+        if source != sink:
+            graph.setdefault(source, set()).add(sink)
+            graph.setdefault(sink, set())
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    found: list[frozenset[str]] = []
+    for root in sorted(graph):
+        if root in index:
+            continue
+        work = [(root, iter(sorted(graph[root])))]
+        index[root] = low[root] = len(index)
+        stack.append(root)
+        on_stack.add(root)
+        while work:
+            node, targets = work[-1]
+            target = next(targets, None)
+            if target is None:
+                work.pop()
+                if work:
+                    low[work[-1][0]] = min(low[work[-1][0]], low[node])
+                if low[node] == index[node]:
+                    component: set[str] = set()
+                    while True:
+                        member = stack.pop()
+                        on_stack.discard(member)
+                        component.add(member)
+                        if member == node:
+                            break
+                    if len(component) > 1:
+                        found.append(frozenset(component))
+            elif target not in index:
+                index[target] = low[target] = len(index)
+                stack.append(target)
+                on_stack.add(target)
+                work.append((target, iter(sorted(graph[target]))))
+            elif target in on_stack:
+                low[node] = min(low[node], index[target])
+    return found
+
+
+def test_the_cycle_search_finds_each_cycle_and_nothing_else() -> None:
+    edges = [
+        ("a", "b"),
+        ("b", "c"),
+        ("c", "a"),
+        ("c", "d"),
+        ("d", "e"),
+        ("e", "d"),
+        ("f", "f"),
+        ("f", "a"),
+    ]
+    assert sorted(strongly_connected(iter(edges)), key=sorted) == [
+        frozenset({"a", "b", "c"}),
+        frozenset({"d", "e"}),
+    ]
+
+
+def test_the_one_cycle_outside_ui_is_command_and_model() -> None:
+    """
+    Over every kind of edge, since a lazy or ``TYPE_CHECKING`` edge is still
+    one module needing another. A cycle wholly inside ``pptmstr/ui`` is not this
+    rule's; one through a module outside it is.
+    """
+    known = modules()
+    cycles = [
+        component
+        for component in strongly_connected(
+            (edge.source, edge.target) for edge in imports() if edge.target in known
+        )
+        if not all(is_ui(module) for module in component)
+    ]
+    assert cycles == [CYCLE_OUTSIDE_UI], "the import cycles outside ui are " + "; ".join(
+        "{" + ", ".join(sorted(component)) + "}" for component in cycles
+    )
+    source, target = CYCLE_TYPING_EDGE
+    kinds = {edge.kind for edge in imports_of(source) if edge.target == target}
+    assert kinds == {"typing"}, (
+        f"{source} imports {target} as {sorted(kinds)}: only under TYPE_CHECKING does the"
+        f" cycle stay out of what runs"
+    )

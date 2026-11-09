@@ -20,7 +20,9 @@ import pytest
 
 from pptmstr import approval as approval_mod
 from pptmstr import theme as theme_mod
-from pptmstr.approval import DiffText, summarize
+from pptmstr.approval import summarize
+from pptmstr.gate.diff import DiffText, render_texts
+from pptmstr.gate.tools import _BUS_DECLARE, _BUS_POST
 from pptmstr.model import (
     AgentRecord,
     AgentState,
@@ -885,7 +887,7 @@ def test_this_pane_and_the_inbox_row_read_one_table() -> None:
     two ways. There is one table, the row's, and this pane asks it.
     """
     assert not hasattr(detail, "_PROSE_ARGUMENT")
-    assert {approval_mod._BUS_POST, approval_mod._BUS_DECLARE} <= inbox.DESCRIBED.keys()
+    assert {_BUS_POST, _BUS_DECLARE} <= inbox.DESCRIBED.keys()
     for tool, (name, _) in inbox.DESCRIBED.items():
         described = inbox.describe(
             PendingApproval(
@@ -1319,7 +1321,7 @@ def parked(tool: str, args: dict[str, object], pid: str = "p1") -> ApprovalNeede
             raw_args=args,
             summary=summarize(tool, args),
             requested_at=1.0,
-            diff=approval_mod.render_texts(tool, texts),
+            diff=render_texts(tool, texts),
             texts=texts,
         ),
     )

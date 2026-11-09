@@ -82,18 +82,13 @@ from typing import Any, assert_never
 from imgui_bundle import imgui
 
 from .. import drawable
-from ..approval import (
-    PEER_DECISION_TOOL,
-    PEER_MESSAGE_TOOL,
-    DiffText,
-    command_shown,
-    declared_provenance,
-    diff_line_kind,
-)
+from ..approval import command_shown, declared_provenance
 from ..bridge import Bridge
 from ..channels.records import WITHDRAW_PEER_TOOL, Channel, ThreadMark, ThreadWakeHeld
 from ..command import CommandId
 from ..effects import peer_identity, peer_text
+from ..gate.diff import DiffText, diff_line_kind
+from ..gate.tools import PEER_DECISION_TOOL, PEER_MESSAGE_TOOL
 from ..ids import is_concern_id
 from ..model import (
     Answered,

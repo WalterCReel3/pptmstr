@@ -114,14 +114,13 @@ from claude_agent_sdk import (  # noqa: E402
     tool,
 )
 
-from pptmstr import approval  # noqa: E402
+from pptmstr.gate.tools import AUTO, BUS_AUTO, REVIEW  # noqa: E402
 
-# The three sets `classify` dispatches on, unioned. Read off the private names
-# because the module exposes no accessor for them, and the measurement is
-# precisely "what does this module hold" -- a public wrapper would be a second
-# place for the answer to be wrong. `approval` imports no SDK, so pulling it in
-# here costs the probe nothing.
-CLASSIFIED = approval._AUTO | approval._REVIEW | approval._BUS_AUTO
+# The three sets `classify` dispatches on, unioned, read off the module that
+# holds them: the measurement is precisely "what does this module hold".
+# `gate.tools` imports nothing from pptmstr and no SDK, so pulling it in here
+# costs the probe nothing.
+CLASSIFIED = AUTO | REVIEW | BUS_AUTO
 
 REPORT_TOOL = "mcp__probe__report"
 SPAWN_TOOLS = ("Task", "Agent")
@@ -809,9 +808,7 @@ def report_findings(workspace: Path) -> None:
     print(f"  {'':<24}carries the canary: {INITIAL_CANARY in initial}")
 
     print("\n=== 7. which offered tool names has `approval` never heard of? ===")
-    print(
-        f"  classified by pptmstr.approval (_AUTO | _REVIEW | _BUS_AUTO): {len(CLASSIFIED)} names"
-    )
+    print(f"  classified by pptmstr.gate.tools (AUTO | REVIEW | BUS_AUTO): {len(CLASSIFIED)} names")
 
     print("\n  -- root/lead: the full offered array, off the init message --")
     if not observed["inits"]:

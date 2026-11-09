@@ -122,7 +122,7 @@ from claude_agent_sdk import (  # noqa: E402
 )
 
 from pptmstr import tree  # noqa: E402
-from pptmstr.approval import Policy, classify  # noqa: E402
+from pptmstr.approval import classify  # noqa: E402
 from pptmstr.bridge import Bridge, Decision  # noqa: E402
 from pptmstr.cli_version import (  # noqa: E402
     SANDBOX_FLOOR,
@@ -131,6 +131,7 @@ from pptmstr.cli_version import (  # noqa: E402
     resolve_cli_path,
 )
 from pptmstr.driver import AgentSession, _escapes_write_region  # noqa: E402
+from pptmstr.gate.policy import Policy  # noqa: E402
 from pptmstr.intents import AgentFinished, StateChanged, UsageAccrued  # noqa: E402
 from pptmstr.model import AgentState, ApprovalNeeded  # noqa: E402
 from pptmstr.sandbox import containment_settings  # noqa: E402

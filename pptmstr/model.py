@@ -24,7 +24,6 @@ from types import MappingProxyType
 from typing import Any, ClassVar
 
 from . import drawable, ids
-from .approval import DiffText, Policy, peer_channel
 from .channels.records import (
     EVERY_CHANNEL,
     LINK_MEMBERS,
@@ -51,6 +50,9 @@ from .command import (
     RequestRefusal,
     command_refusal,
 )
+from .gate.diff import DiffText
+from .gate.policy import Policy
+from .gate.tools import peer_channel
 from .transcript import Transcript
 
 # (session_id, agent_id). Root sessions have agent_id None; sub-agents carry the
@@ -361,7 +363,7 @@ class PendingApproval:
     diff: str | None = None
     # The before/after texts ``diff`` was rendered from; None exactly when the tool
     # has nothing diff-shaped. Both are carried although one follows from the other:
-    # ``diff`` is ``approval.render_texts`` of this, and deriving it on read would put
+    # ``diff`` is ``gate.diff.render_texts`` of this, and deriving it on read would put
     # ``difflib`` over a whole file on the frame path for as long as the call is
     # parked. Built from one ``approval.diff_texts`` call at the construction site,
     # so the two cannot describe different reads of the file.
@@ -4045,7 +4047,7 @@ class Snapshot:
     def parked_link(self, pending: PendingApproval) -> ChannelId | None:
         """
         The link a parked call would act on across, or None for a call that
-        acts on none: a send or a channel decision (``approval.peer_channel``)
+        acts on none: a send or a channel decision (``gate.tools.peer_channel``)
         on the live link of that name that the caller's session is a member
         of, or a withdrawal (``WITHDRAW_PEER_TOOL``) of a peer message the
         caller sent, on that message's link while it is live and the caller's

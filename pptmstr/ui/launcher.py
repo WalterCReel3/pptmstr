@@ -38,7 +38,8 @@ from .. import brief as brief_mod
 from .. import cli_version, drawable, sandbox, sessionfile, templates, tree
 from .. import sessions as sessions_mod
 from .. import worktree as worktree_mod
-from ..approval import Disposition, Policy, classify, requires_containment
+from ..approval import classify
+from ..gate.policy import Disposition, Policy, requires_containment
 from ..model import LaunchSpec, NewWorktree
 from ..model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
 from ..sessions import Overlay, SessionRow
@@ -49,7 +50,7 @@ from .widgets import Help, Notice, Tone
 TITLE = "New Task"
 
 # The rungs of the dial, read off the enum rather than listed, so a preset renamed
-# or added in approval.py cannot leave a stale second copy here. The consequence is
+# or added in gate/policy.py cannot leave a stale second copy here. The consequence is
 # that every member is offerable at launch: a preset that must not be is a
 # distinction `Policy` does not currently draw, and adding one means drawing it here
 # too.
@@ -2973,7 +2974,7 @@ class LauncherState:
         # ``PERMISSIVE`` is deliberately outside that pairing and carries no
         # containment. What the sandbox bounds is writes and network, which that rung
         # already refuses syntactically, so pairing them would cost the operator
-        # working invocations to buy the gate nothing. See ``approval.Policy``.
+        # working invocations to buy the gate nothing. See ``gate.policy.Policy``.
         engaged = (
             requires_containment(self.policy)
             and self._read_refusal(directory, resolved_cwd) is None

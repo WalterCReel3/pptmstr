@@ -22,10 +22,11 @@ from typing import Any
 import pytest
 
 from pptmstr import approval
-from pptmstr.approval import DiffText, diff_texts, render_diff, render_texts
+from pptmstr.approval import diff_texts, render_diff
 from pptmstr.bridge import Bridge
 from pptmstr.driver import AgentSession
 from pptmstr.fake_driver import FakeDriver
+from pptmstr.gate.diff import DiffText, render_texts
 from pptmstr.intents import ApprovalRequested
 from pptmstr.model import PendingApproval
 

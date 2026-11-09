@@ -309,3 +309,15 @@ written, but no fixture covers it. Not fixed.
   killed it. Nothing in the checkout was touched.
 - Agent addresses on the bus and on the board disagreed all session in the app hosting it
   (`builder-22` on the board, unroutable): the defect `board.address_for` fixes, seen live.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._REVIEW` | `gate.tools.REVIEW` |
+| `approval._BUS_AUTO` | `gate.tools.BUS_AUTO` |

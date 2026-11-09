@@ -142,7 +142,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from ... import theme as ui_theme
-from ...approval import DiffText
+from ...gate.diff import DiffText
 from ...model import PendingApproval
 from . import gate, roles, themes, views
 from .roles import Role

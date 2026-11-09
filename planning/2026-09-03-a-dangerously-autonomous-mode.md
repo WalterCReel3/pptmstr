@@ -1359,3 +1359,17 @@ as driver semantics (thread it through the launch, `AgentSession.__init__` and `
 the control in FOCUS/HEALTH beside the spend figure it constrains. With an operator watching, visible
 spend was an acceptable downgrade from invisible spend. Unattended, it is the same gap as the
 declaration volume above: nothing bounds it.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._AUTO` | `gate.tools.AUTO` |
+| `approval._REVIEW` | `gate.tools.REVIEW` |
+| `approval._BUS_AUTO` | `gate.tools.BUS_AUTO` |
+| `approval._BUS_DECLARE` | `gate.tools._BUS_DECLARE` |

@@ -22,7 +22,7 @@ from imgui_bundle import imgui as real_imgui
 
 from pptmstr import brief as brief_mod
 from pptmstr import cli_version, sandbox, templates
-from pptmstr.approval import Policy
+from pptmstr.gate.policy import Policy
 from pptmstr.model_catalog import DEFAULT_MODEL
 from pptmstr.sessionfile import UnknownPolicy
 from pptmstr.ui import gate_menu, launcher, resume_form, widgets

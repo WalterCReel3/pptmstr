@@ -1111,30 +1111,38 @@ def test_the_tree_does_not_reshuffle_when_a_node_wakes() -> None:
 
 def test_the_gate_and_the_bus_agree_on_tool_names() -> None:
     """
-    approval.py spells the server name rather than importing it, so that the policy
+    gate/tools.py spells the server name rather than importing it, so that the policy
     stays free of SDK imports. That is a deliberate duplication, and this is what
     keeps the two copies honest.
     """
-    from pptmstr import approval
     from pptmstr.bus import BUS_TOOLS, COMMAND_TOOLS, PEER_TOOLS, offered_tools, qualified
+    from pptmstr.gate.tools import (
+        _BUS_AMEND,
+        _BUS_DECLARE,
+        _BUS_PEER,
+        _BUS_POST,
+        _BUS_WITHDRAW,
+        BUS_AUTO,
+        REVIEW,
+    )
 
-    assert approval._BUS_POST == qualified("post_concern")
-    assert approval._BUS_DECLARE == qualified("declare_task")
-    assert approval._BUS_AMEND == qualified("amend_task")
-    assert approval._BUS_PEER == qualified("send_to_peer")
-    assert approval._BUS_WITHDRAW == qualified("withdraw_task")
+    assert _BUS_POST == qualified("post_concern")
+    assert _BUS_DECLARE == qualified("declare_task")
+    assert _BUS_AMEND == qualified("amend_task")
+    assert _BUS_PEER == qualified("send_to_peer")
+    assert _BUS_WITHDRAW == qualified("withdraw_task")
     reviewed = {
-        approval._BUS_POST,
-        approval._BUS_DECLARE,
-        approval._BUS_AMEND,
-        approval._BUS_PEER,
-        approval._BUS_WITHDRAW,
+        _BUS_POST,
+        _BUS_DECLARE,
+        _BUS_AMEND,
+        _BUS_PEER,
+        _BUS_WITHDRAW,
     }
     # Every name a server can have, which is a contained session's list: the gate's
     # policy is not told which session is asking and names the command tools for
     # all of them.
-    assert approval._BUS_AUTO | reviewed == set(offered_tools(True))
-    assert approval._BUS_AUTO - set(BUS_TOOLS) == set(COMMAND_TOOLS) | {
+    assert BUS_AUTO | reviewed == set(offered_tools(True))
+    assert BUS_AUTO - set(BUS_TOOLS) == set(COMMAND_TOOLS) | {
         qualified("read_peer_messages"),
         qualified("withdraw_peer_message"),
     }
@@ -1143,9 +1151,9 @@ def test_the_gate_and_the_bus_agree_on_tool_names() -> None:
         qualified("read_peer_messages"),
         qualified("withdraw_peer_message"),
     }
-    assert {qualified(f"{verb}_decision") for verb in ("raise", "withdraw")} <= approval._BUS_AUTO
-    assert qualified("read_decisions") in approval._BUS_AUTO
-    assert reviewed <= approval._REVIEW and not reviewed & approval._BUS_AUTO
+    assert {qualified(f"{verb}_decision") for verb in ("raise", "withdraw")} <= BUS_AUTO
+    assert qualified("read_decisions") in BUS_AUTO
+    assert reviewed <= REVIEW and not reviewed & BUS_AUTO
 
 
 @pytest.mark.parametrize("contained", [False, True])
@@ -1182,8 +1190,9 @@ def test_the_stamped_names_are_read_off_the_table_and_the_peer_names_are_on_it()
 
 
 def test_a_message_between_agents_is_reviewed() -> None:
-    from pptmstr.approval import Disposition, classify
+    from pptmstr.approval import classify
     from pptmstr.bus import qualified
+    from pptmstr.gate.policy import Disposition
 
     assert classify(qualified("post_concern"), {}) is Disposition.REQUIRE_APPROVAL
 
@@ -1194,15 +1203,17 @@ def test_a_declaration_is_reviewed() -> None:
     is where the decision belongs. It was previously auto-approved on the premise
     that the board had already been approved -- and nothing had ever approved it.
     """
-    from pptmstr.approval import Disposition, classify
+    from pptmstr.approval import classify
     from pptmstr.bus import qualified
+    from pptmstr.gate.policy import Disposition
 
     assert classify(qualified("declare_task"), {}) is Disposition.REQUIRE_APPROVAL
 
 
 def test_coordination_is_not_reviewed() -> None:
-    from pptmstr.approval import Disposition, classify
+    from pptmstr.approval import classify
     from pptmstr.bus import qualified
+    from pptmstr.gate.policy import Disposition
 
     # Bookkeeping about work whose existence is now a decision the operator made at
     # declaration. Parking these would make the operator a bottleneck on a worker
@@ -1217,7 +1228,7 @@ def test_coordination_is_not_reviewed() -> None:
         "complete_task",
         "release_task",
         # The operator is the only reader of what these three carry, so their
-        # queue row is the review (``approval._BUS_AUTO``).
+        # queue row is the review (``gate.tools.BUS_AUTO``).
         "raise_decision",
         "read_decisions",
         "withdraw_decision",
@@ -1884,14 +1895,14 @@ def test_a_declaration_is_reviewed_by_policy_and_not_by_accident() -> None:
     """
     `classify` is fail-closed, so a tool in neither set requires approval anyway --
     which makes the behavioural assertion above pass whether the decision was made
-    or merely not made. `_REVIEW`'s own comment says the list must read as a
+    or merely not made. `REVIEW`'s own comment says the list must read as a
     decision rather than as whatever was left over, and this is what holds it to
     that: membership, not outcome.
     """
-    from pptmstr import approval
+    from pptmstr.gate.tools import _BUS_DECLARE, BUS_AUTO, REVIEW
 
-    assert approval._BUS_DECLARE in approval._REVIEW
-    assert approval._BUS_DECLARE not in approval._BUS_AUTO
+    assert _BUS_DECLARE in REVIEW
+    assert _BUS_DECLARE not in BUS_AUTO
 
 
 # -- the board read carries the specification --------------------------------------

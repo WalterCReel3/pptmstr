@@ -7,6 +7,9 @@ resolves the paths a reading call names, because where a path leads is a fact
 about the disk and not about its spelling. Neither writes.
 Everything here decides *whether* a tool call needs a human and *what the human
 should be shown* -- the parking and awaiting live in the driver and the Bridge.
+The rungs, the tool tables and the diff texts it works with are
+``gate.policy``, ``gate.tools`` and ``gate.diff``, which import nothing from
+pptmstr.
 
 The classification rule is fail-closed. An unrecognised tool requires approval,
 because the tool this orchestrator has never heard of is precisely the one that
@@ -16,8 +19,6 @@ allowlist the first time the SDK adds a tool.
 
 from __future__ import annotations
 
-import difflib
-import enum
 import json
 import os
 import shlex
@@ -28,430 +29,30 @@ from typing import TYPE_CHECKING, Any, assert_never
 
 from . import settings
 from .commandtext import visible
+from .gate.diff import DiffText, _edit_refusal, _FileState, render_texts
+from .gate.policy import Disposition, Policy
+from .gate.tools import (
+    _BUS_AMEND,
+    _BUS_DECLARE,
+    _BUS_PEER,
+    _BUS_POST,
+    _BUS_WITHDRAW,
+    _BUS_WITHDRAW_PEER,
+    AUTO,
+    AUTONOMOUS_AUTO,
+    BUS_AUTO,
+    FILE_READS,
+    REVIEW,
+    TREE_READS,
+    _dry_run,
+    _reviewed_by_arguments,
+    states_provenance,
+)
 from .plugins import SKILLS as _SHIPPED_SKILLS
 from .shellscan import _split_segments, is_read_only
 
 if TYPE_CHECKING:
     from .model import Provenance
-
-
-class Disposition(enum.Enum):
-    AUTO_APPROVE = "auto_approve"
-    REQUIRE_APPROVAL = "require_approval"
-    DENY = "deny"
-
-
-class Policy(enum.Enum):
-    """
-    How much a session's gate admits without an operator.
-
-    An enum rather than a ``bool research_mode`` because the recorded preference
-    (2026-08-11 §"Two corrections", point 2) is to build the general shape -- a
-    policy value on the session -- and ship presets over it, so that a second
-    preset is a member here rather than a retrofit around a boolean.
-
-    The members are rungs on a ladder of postures (2026-08-22; 2026-09-03 §7),
-    not alternatives. A rung names the posture and never the permission, and none
-    is named "read-only" or "safe": mutation and egress are independent axes, and
-    one reassuring word over both is what lets something mutation-free and
-    egress-positive onto an allowlist without a reviewer noticing (2026-08-11
-    §"The reframe"). A posture name cannot carry a scope, so each rung states its
-    own.
-
-    A parameter of ``classify`` rather than module state: this module's purity is
-    the reason the dial is built over the gate at all, and a mode that worked by
-    mutating a global would make every test here order-dependent.
-
-    **The two widened rungs rest on different things, and neither subsumes the
-    other.** ``PERMISSIVE`` rests on a syntactic claim about the command -- it is
-    decidable, fail-closed, and needs no containment, which is why it is the rung
-    that survives where a sandbox breaks the work. ``AUTONOMOUS`` abandons the
-    claim about the command entirely and rests on a bound around the process, so
-    it cannot start without one. That is why the ladder is ordered by how much is
-    released and not by how much is trusted.
-    """
-
-    # Today's behaviour, and the default: everything off the standing allowlist
-    # waits for an operator.
-    STRICT = "strict"
-    # Adds shellscan-passing `Bash`, and nothing else. Writes, spawns, messages,
-    # `WebFetch`, `WebSearch` and unknown tools park as they do under `STRICT`.
-    # Pinned row by row by test_the_corpus_under_permissive.
-    #
-    # Egress stays denied because `WebFetch` pairs with an admitted `cat` of any
-    # absolute path into an unattended read-then-send. Context still reaches the
-    # API, as it does under `STRICT` (2026-09-03 §8b.8).
-    #
-    # Deliberately not paired with containment, and the reason is a cost
-    # judgement rather than a claim that containment buys nothing. What the
-    # sandbox bounds is writes and network, which this rung already refuses
-    # syntactically. On the read axis it adds exactly one thing: a deny at
-    # `sandbox.DENIED_CREDENTIAL_FILES`' four prefixes, since upstream's sandbox
-    # read policy is the rest of the computer. Four paths against a rung whose
-    # read reach is the filesystem, and whether that key is honoured at all is
-    # unmeasured -- 2026-09-03 §11 U1's residue, with
-    # `scripts/verify_read_bound.py`'s K arms as the instrument and no recorded
-    # run. Against that sits a real operator cost: an X server connection and a
-    # venv interpreter both break under the sandbox, which is what this rung
-    # exists to survive.
-    #
-    # The two routes do not share a downstream enforcer, so no parity argument
-    # is available here. Measured 2026-09-23: the CLI's `Read` refuses
-    # `/proc/self/environ` outright while an admitted `cat` returns it, so this
-    # rung reaches bytes `STRICT` cannot (2026-09-03 §12 U11). That is a reach
-    # containment would not close either -- the sandbox's read policy covers
-    # `/proc` -- which is why it is recorded rather than answered by flipping
-    # `requires_containment`.
-    #
-    # Rungs above this one carry their warning in their own name.
-    PERMISSIVE = "permissive"
-    # Named for the mode rather than for a tool, because what it releases is the
-    # whole of ``_REVIEW``: under it the set of calls that would have waited for a
-    # human is empty, and the only thing still reaching ``REQUIRE_APPROVAL`` is a
-    # tool nobody has heard of.
-    #
-    # Containment under it is no longer the allowlist's width. ``Bash`` and its
-    # children are bounded by the CLI's sandbox; the write tools run inside the CLI
-    # process, which that sandbox does not cover, and are bounded instead to the
-    # session's directory by the driver's gate. The two halves are one decision --
-    # widening here without that write-region check leaves the CLI-process writers
-    # unbounded, which is why `driver.AgentSession` refuses to start under this rung
-    # with no containment configured. ``WebFetch``/``WebSearch`` are bounded by
-    # neither, and are released anyway: what a URL and a prompt can carry out is
-    # small beside an unattended agent that cannot read documentation.
-    AUTONOMOUS = "autonomous"
-
-
-# The bus server's name, spelled here rather than imported from pptmstr.bus:
-# approval.py is deliberately free of SDK imports so the policy can be tested and
-# reasoned about on its own, and bus.py pulls in claude_agent_sdk. The pair is
-# pinned by a test rather than by an import.
-_BUS_SERVER = "pptmstr"
-_BUS_POST = f"mcp__{_BUS_SERVER}__post_concern"
-_BUS_DECLARE = f"mcp__{_BUS_SERVER}__declare_task"
-_BUS_AMEND = f"mcp__{_BUS_SERVER}__amend_task"
-_BUS_PEER = f"mcp__{_BUS_SERVER}__send_to_peer"
-_BUS_DECIDE = f"mcp__{_BUS_SERVER}__raise_decision"
-_BUS_WITHDRAW = f"mcp__{_BUS_SERVER}__withdraw_task"
-_BUS_WITHDRAW_PEER = f"mcp__{_BUS_SERVER}__withdraw_peer_message"
-
-# The two calls across a link that name their channel (``peer_channel``), by
-# the names the gate is handed, for a reader that says which a parked call is.
-# The third, a withdrawal, names none: ``records.WITHDRAW_PEER_TOOL``.
-PEER_MESSAGE_TOOL = _BUS_PEER
-PEER_DECISION_TOOL = _BUS_DECIDE
-
-# Reads, searches and listings. Cheap, reversible, and they do not leave the box.
-# The four that name a path are admitted by name and then measured by
-# ``records_read``, which is where one of them stops being admitted.
-_AUTO = frozenset(
-    {
-        "Read",
-        "Glob",
-        "Grep",
-        "NotebookRead",
-        "TodoWrite",
-        "ListMcpResources",
-        "ReadMcpResource",
-        # A registry read. ``ToolSearch`` returns the JSON schema of a tool this
-        # session already holds; it calls nothing and changes nothing outside the
-        # model's context, which is what ``_AUTO``'s first sentence asks for.
-        #
-        # What it makes callable is judged on its own name and not on this one. The
-        # driver registers ``PreToolUse`` with no ``HookMatcher.matcher``, so the
-        # gate fires on every tool call, and ``driver._gate_tool_use`` reads the name
-        # off the hook payload and consults no record of which schemas were loaded.
-        # A schema loaded here therefore reaches ``classify`` exactly as if it had
-        # been offered up front -- under ``STRICT`` a loaded ``WebFetch`` still
-        # parks, and a loaded tool this build has never named still falls through
-        # fail-closed.
-        #
-        # It is not the ``ReadMcpResource``/``ListMcpResources`` case, which
-        # driver.py records as a wart rather than a pattern: those return *data*
-        # from a server this process cannot enumerate, so their answer is never
-        # classified. This returns a name the gate will judge before it runs.
-        #
-        # The live consequence, which is a reason to keep ``_AUTO`` narrow rather
-        # than a reason to refuse the loader: a deferred tool is unreachable while
-        # this is denied, so admitting it makes whatever ``_AUTO`` already holds
-        # reachable in fact rather than only on paper.
-        "ToolSearch",
-    }
-)
-
-# Mutating, or reaching the network. Named explicitly so the list reads as a
-# decision rather than as whatever happened to be left over. Each reason below is
-# a reason to put the call in front of the operator, so each holds exactly while
-# there is one: ``AUTONOMOUS`` releases this whole list.
-_REVIEW = frozenset(
-    {
-        "Write",
-        "Edit",
-        "MultiEdit",
-        "NotebookEdit",
-        "Bash",
-        "BashOutput",
-        "KillShell",
-        "WebFetch",
-        "WebSearch",
-        "Task",
-        "Agent",
-        # A message between agents is reviewed for the same reason a write is: it
-        # changes what another agent does next. Gating the *send* rather than the
-        # read is what gives rejection somewhere to go -- permissionDecisionReason
-        # reaches the agent that wrote the message and could revise it, whereas the
-        # recipient could only be told about a message it never saw (§2.7).
-        #
-        # Nothing new is needed to review one. A parked post_concern is an ordinary
-        # PendingApproval: it queues by wait time with everything else, and
-        # edit-then-approve rewrites the body through updatedInput (§5.3).
-        _BUS_POST,
-        # A declaration is where work comes into existence, so it is where the
-        # decision belongs. Everything downstream -- which agent claims it, how many
-        # run at once, what each writes -- is bookkeeping about work whose existence
-        # was never in question, and everything upstream is a lead thinking, which
-        # is free.
-        #
-        # The recorded cost is real and was accepted with the unit: on the baseline
-        # run this fires once per declaration, which was six times inside five
-        # minutes at a moment when the operator had said one line. The alternatives
-        # were a budget set at launch and a per-plan gate, and both were declined.
-        #
-        # It reuses the same machinery post_concern does, and gains something
-        # post_concern does not need: editing a parked declaration through
-        # updatedInput rewrites `detail`, `depends_on` and `touches` before the task
-        # lands. That is what makes this a scoping moment rather than only a binary
-        # one -- the operator sets the size, not just the yes.
-        _BUS_DECLARE,
-        # An amendment is a declaration made a second time: it sets what an agent
-        # is held to, so it meets whatever a declaration meets on the same rung,
-        # by being in the same set. Parked, it is edited through updatedInput like
-        # one, and the handler drops the amender's basis from an edited call.
-        #
-        # Under ``AUTONOMOUS`` that is no review at all. This whole set is
-        # released there, so an agent's amendment lands unseen, as its declaration
-        # did. What stands on that rung is the reducer's rule and not this gate:
-        # only the agent that declared a task and never held it may amend it, it
-        # may not then claim it, and the text it replaced is kept as a version
-        # (``store.tasks._amender_refusal``, ``store.tasks._claim_refusal``).
-        _BUS_AMEND,
-        # A message to another team's lead is a message between agents, reviewed
-        # for ``post_concern``'s reason, and gated by the *sender's* rung: each
-        # side's own rung governs (the 2026-10-17 plan, Decided 1), so a lead on
-        # a reviewed rung parks its send here whatever rung the other lead is on,
-        # and work it asks for parks again at the other board's ``declare_task``.
-        _BUS_PEER,
-        # A withdrawal undoes a declaration: it ends work the operator approved
-        # when it was declared, lets go of every task waiting on it, and turns
-        # away the holder's result. So it meets what a declaration meets, and
-        # parked it is one press for the operator where the alternative before it
-        # existed was the operator finding the row and closing it by hand. What
-        # stands under ``AUTONOMOUS`` is the reducer's rule: only while it is
-        # unfinished, and only by the task's declarer, or by the root of the
-        # declarer's session once the declarer has stopped -- a sub-agent whose
-        # record is terminal, or an agent of an earlier run -- and no agent it
-        # could not take the claim back from holds it
-        # (``store.tasks._withdrawer_refusal``, ``store.tasks._has_stopped``,
-        # ``store.tasks._may_take_claim``).
-        _BUS_WITHDRAW,
-    }
-)
-
-# What the autonomous policy releases is the review list itself. Written as that
-# identity rather than as a set that happens to enumerate the same names: the
-# property the mode needs is that nothing under it waits for a human, and a copy
-# would go quietly false the first time a tool joins ``_REVIEW`` -- which is the
-# moment the mode would start parking again with nothing in the repository
-# disagreeing. The identity is asserted through ``classify`` in
-# tests/test_approval.py, so the branch order in ``classify`` is covered with it.
-_AUTONOMOUS_AUTO = _REVIEW
-
-# Coordination that reads or reserves, but does not reach another agent or the
-# world. Auto-approving these is what keeps the operator a bottleneck on decisions
-# rather than on bookkeeping -- a worker taking the next item off a board the
-# operator already approved is not a second decision.
-#
-# That sentence is the whole of the rule and it is why `declare_task` is no longer
-# in this set: it was auto-approved on the premise that the board had already been
-# approved, and nothing had ever approved it. The ones that remain are the ones the
-# premise actually holds for, in one of two shapes: bookkeeping about a task whose
-# existence the operator decided at declaration, or -- `read_inbox` -- reading
-# messages that were already reviewed at the send.
-#
-# **"Decided at declaration" and "reviewed at the send" are true of the rungs that
-# park those calls, and only of them.** `declare_task`, `amend_task` and
-# `post_concern` are in ``_REVIEW``, which ``STRICT`` and ``PERMISSIVE`` hold and
-# ``AUTONOMOUS`` releases whole. A specification an agent amended was approved at
-# the amendment as it was at the declaration, and "at declaration" below covers
-# both. Under ``AUTONOMOUS`` no operator saw the specification or the concern, and
-# every read below hands on text nobody reviewed. That is the rung's stated cost and
-# not a hole in this set: the reads carry exactly as much review as the writes were
-# given, and wherever "approved" or "reviewed" is said below it means on a rung that
-# asks.
-#
-# `read_peer_messages` is `read_inbox` for the messages another team's lead sent:
-# reviewed at the send, on the sender's rung, which may not be the reader's. A
-# lead on a reviewed rung reading a peer on ``AUTONOMOUS`` is handed text no
-# operator saw. That is Decided 1's rule -- each side's rung governs its own
-# acts -- and the text is quoted as the peer's and never as an instruction
-# (`channels.text._peer_messages_text`), so it moves nothing onto the reader's board but
-# through a `declare_task` the reader's own rung parks.
-#
-# `read_task` is `read_board` for one row, with the texts a board read cuts, and
-# is here on `read_board`'s grounds exactly: it returns a specification approved
-# at its declaration and notes reviewed at their send, scoped to the caller's own
-# board.
-#
-# **`release_task` is bookkeeping on the caller's own claim, with one exception
-# that rides the same auto-approved name on every rung, ``STRICT`` included.** The
-# root of a session may release a claim that is not its own when the holder is an
-# agent of an earlier run of that session (`store.tasks._may_reclaim`): it puts another
-# agent's task back on the board, and no operator is asked. It is here because
-# what it undoes is a claim nothing running will ever finish or give back, it
-# gives the root nothing but the task's return to PENDING -- the root cannot
-# complete it in the holder's place -- and parking it would leave the row stuck
-# until somebody answered. Whether the root should have that release at all is
-# question 6 of
-# `planning/2026-10-12-session-control-and-the-inter-team-record-in-one-sequence.md`,
-# which the operator has not answered; it is built as the lead recommended there,
-# and taking the two lines out of the reducer's `TaskReleased` arm is the whole
-# of the other answer.
-#
-# `read_digest` is here on those grounds too, and by leaving one thing out. Three of
-# its slots are the caller's own board again: tasks approved at declaration,
-# results as `read_board` already shows them, concerns reviewed at their send. The
-# fourth, what is waiting on the operator, is drawn from the approval queue --
-# calls nobody has approved yet -- so the tool reports who is waiting and for what
-# kind of thing and never the queue row (`board.digesttext._digest_text`). With the row in it
-# this would be a read that hands one agent another's unreviewed message.
-#
-# **`complete_task` is where the premise is thinnest on every rung, and it is stated
-# rather than hidden.** A completion may carry two pieces of prose, a `result` and a
-# `not_run` list, and the board then shows both to every agent on it. Neither is
-# parked under any policy, so they are the prose on the board that no operator saw
-# before it landed even where every declaration and every concern was reviewed. It
-# stays here because what the gate would be deciding is whether work already done
-# may be recorded as done, and a parked or refused completion strands a claim and
-# everything waiting on it. Both are rendered as the claimer's own account for that
-# reason, and quoted line by line so neither can be read as a line the board wrote
-# (`board.text._board_line`, `replies._quoted`).
-#
-# **The three decision tools are here because a decision is addressed to the
-# operator, and one of them is not private to the operator.** `raise_decision` puts
-# its text in the operator's own queue, and parking it would put a message for the
-# operator in front of the operator to ask whether the operator may see it: the
-# queue row is the review. `withdraw_decision` removes the asker's own row.
-#
-# **Except a decision raised on a channel, which this set does not admit.** With a
-# `channel` argument the lead of the session at the other end of that link reads
-# the decision whole as soon as the store files it (`model.Snapshot
-# .channel_decision_readable`), before the operator has looked at the queue row,
-# so the row reviews nothing that reader sees. That call is text from one team's
-# lead to another's, and it is gated as `send_to_peer` is: parked on the rungs
-# that park `_BUS_PEER`, released where it is released (`_reviewed_by_arguments`).
-# Without a channel it is the call this paragraph describes, on every rung.
-#
-# The text has a second reader inside the session too. The root of a session reads
-# every decision raised in it (`model.Snapshot.decisions_readable_by`), and
-# `read_decisions` hands it the question, what happens if it goes unanswered, the
-# evidence and the recommendation whole -- up to four texts of
-# `model.MAX_DECISION_TEXT_CHARS` that a sub-agent wrote and no operator approved
-# before the lead could read them. So on the rungs that park `post_concern`, a
-# sub-agent's `raise_decision` is words to its lead that are not parked. It is the
-# second such text on the board beside `complete_task`'s result, and it is held
-# the same way: quoted line by line behind the asker's name, never as a line the
-# tool wrote (`decisiontext._decision_whole`), with the operator looking at the same words
-# in the queue. No board or digest read shows a question (`board.digesttext._digest_text`), so
-# without a channel the lead is the only agent it reaches; with one, the other
-# link's lead is a second, and that call parks as above. What bounds the three is
-# the store: an agent may have `model.MAX_OPEN_DECISIONS_PER_ASKER` open, a session's sub-agents
-# `model.MAX_OPEN_SUBAGENT_DECISIONS` between them, and only the operator's own
-# intent ends one with an answer.
-#
-# **Both halves are decisions taken without the operator.** That a raise runs
-# without sign-off is question 8, and that the session root reads its workers'
-# decisions is question 4, of
-# `planning/2026-10-12-session-control-and-the-inter-team-record-in-one-sequence.md`;
-# the operator has answered neither, and each was built as recommended there. Put
-# together they open the unparked channel above, which neither question asked
-# about on its own. Moving `raise_decision` to ``_REVIEW`` closes it on the rungs
-# that review a concern, and is the whole of the other answer to question 8;
-# narrowing `decisions_readable_by` to the asker is the other answer to question 4.
-#
-# **The three command tools are here on the decision tools' grounds, and on every
-# rung.** `request_command` asks the operator to run a command outside the
-# sandbox. Its only reader before anything happens is the operator, in a row of
-# its own kind, so parking it would put a request for the operator in front of
-# the operator to ask whether the operator may see it; and the asker was told to
-# carry on, which a parked call does not let it do. The row is the review:
-# nothing runs on this call, and nothing runs at all until the operator presses
-# twice on the exact string, which only an intent naming no node can start
-# (`store.commands._approved`). `withdraw_command` removes the asker's own row.
-#
-# `read_commands` hands text to a second reader, as `read_decisions` does: a
-# session's root reads every command asked in it
-# (`model.Snapshot.commands_readable_by`), so a sub-agent's command, reason and
-# expectation reach its lead unparked, and so does the end of what the command
-# printed -- bytes of a program the operator chose to run, which may be the
-# contents of a file an agent wrote. Each is quoted behind a mark of its own
-# and never as a line the tool wrote (`commandbus`), and what bounds them is the
-# store: `command.MAX_OPEN_PER_ASKER` open for an agent and
-# `command.MAX_OPEN_SUBAGENTS` across a session's sub-agents.
-#
-# Named here for every session and offered to a contained one alone: the server
-# of a session with no containment does not have the three (`bus.build_server`),
-# so on it these names admit a call that reaches no tool.
-#
-# **`withdraw_peer_message` is here on `withdraw_decision`'s grounds, without a
-# reason.** It takes back a message the caller's own lead sent, which only that
-# sender may (`store.mail._message_withdrawal_refusal`), so like `withdraw_decision`
-# it removes the asker's own act. Parking it would leave a question the sender
-# has disowned open for the other lead while the operator gets to the row,
-# which is the case-study failure the tool exists to end.
-#
-# **Except a withdrawal that gives a reason, which this set does not admit.**
-# The reason is quoted to the recipient when it had read the message
-# (`channels.text._withdrawn_message_lines`): it is text from one team's lead to
-# another's, and so a send, gated by the sender's rung as `send_to_peer` is
-# (Decided 1) -- parked on the rungs that park `_BUS_PEER`, released where it
-# is released (`_reviewed_by_arguments`). It is not moved to ``_REVIEW``,
-# which would park the bare withdrawal too: that one carries no words, so it
-# stays auto on every rung and ends the question at once.
-#
-# `why_blocked` and `ready` are `read_board` asked a narrower question, and change
-# nothing. About the caller's own board they hand back ids, titles, states and
-# holders a board read already shows. **They also say one thing a board read does
-# not, and that is accepted rather than overlooked.** Asked about any id,
-# `why_blocked` says whether a task of another session in this process holds it
-# (`board.graphtext._why_blocked_text`, `_hop_state`, `_root_needs`), so an agent can
-# test ids against other sessions' boards with no review. The reason it stays:
-# ids within one local pptmstr process are not secret -- task ids are one
-# namespace for every session in it, a declaration already learns that an id is
-# taken, and a board row already says a dependency is "held elsewhere"
-# (`board.foreign_wait_label`) -- and nothing but the id's existence is said: no
-# title, specification, holder or state of that task.
-
-_BUS_AUTO = frozenset(
-    {
-        f"mcp__{_BUS_SERVER}__read_inbox",
-        f"mcp__{_BUS_SERVER}__read_peer_messages",
-        _BUS_WITHDRAW_PEER,
-        f"mcp__{_BUS_SERVER}__read_board",
-        f"mcp__{_BUS_SERVER}__read_task",
-        f"mcp__{_BUS_SERVER}__read_digest",
-        f"mcp__{_BUS_SERVER}__why_blocked",
-        f"mcp__{_BUS_SERVER}__ready",
-        f"mcp__{_BUS_SERVER}__claim_task",
-        f"mcp__{_BUS_SERVER}__complete_task",
-        f"mcp__{_BUS_SERVER}__release_task",
-        f"mcp__{_BUS_SERVER}__raise_decision",
-        f"mcp__{_BUS_SERVER}__read_decisions",
-        f"mcp__{_BUS_SERVER}__withdraw_decision",
-        f"mcp__{_BUS_SERVER}__request_command",
-        f"mcp__{_BUS_SERVER}__read_commands",
-        f"mcp__{_BUS_SERVER}__withdraw_command",
-    }
-)
 
 
 def _shipped_skill(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
@@ -480,26 +81,20 @@ def _shipped_skill(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
 # -- another session's records ----------------------------------------------------
 
 # The two directories pptmstr keeps sessions' records under, as names beneath
-# ``settings.config_dir()``. Spelled here rather than imported: ``sessionfile``
-# imports ``Policy`` from this module and ``boardsync`` imports ``sessionfile``,
-# so either import closes a cycle. tests/test_approval.py holds both to
-# ``sessionfile.root()`` and ``boardsync.legacy_root()``.
+# ``settings.config_dir()``. Spelled here rather than imported: the store imports
+# this module, and ``sessionfile`` and ``boardsync`` read the disk, so a top-level
+# import of either adds disk readers to what importing the store runs
+# (``STORE_DISK_EXCEPTIONS`` in tests/test_layers.py). Neither closes a cycle.
+# tests/test_approval.py holds both to ``sessionfile.root()`` and
+# ``boardsync.legacy_root()``.
 _RECORD_ROOTS = ("sessions", "boards")
 
 # Where briefs are written (``brief.default_root``), spelled here for the same
-# reason: ``brief`` imports ``boardlog``, which imports ``model``, which imports
-# this module. A root for ``records_written`` and not for ``records_read``: a
+# reason: ``brief`` reads the disk. A root for ``records_written`` and not for ``records_read``: a
 # worker reads its premises and a fork reads its parent's, and only pptmstr
 # appends to them, so a tool call that writes one has rewritten what a session
 # acted on. tests/test_approval.py holds it to ``brief.default_root()``.
 _WRITE_ONLY_ROOTS = ("briefs",)
-
-# The tools that read one file, by the argument that names it.
-_FILE_READS: Mapping[str, str] = {"Read": "file_path", "NotebookRead": "notebook_path"}
-
-# The tools that read a tree: everything their ``path`` holds may come back, so a
-# ``path`` that contains the records is a read of them.
-_TREE_READS = frozenset({"Glob", "Grep"})
 
 # What makes a word a pattern over file names rather than one name: to bash, and
 # to the CLI's ``Glob``, which reads braces as well.
@@ -758,15 +353,15 @@ def _named_places(
                 found.append(place)
         return found
 
-    if tool_name in _FILE_READS:
-        raw = tool_input.get(_FILE_READS[tool_name])
+    if tool_name in FILE_READS:
+        raw = tool_input.get(FILE_READS[tool_name])
         # No path is a call the tool refuses for want of one, and reads nothing.
         if raw is None:
             return []
         files = placed(raw, [base])
         return None if files is None else [(place, False) for place in files]
 
-    if tool_name in _TREE_READS:
+    if tool_name in TREE_READS:
         # An absent ``path`` is the working directory, to both tools.
         trees = placed(tool_input.get("path") or ".", [base])
         pattern = tool_input.get("pattern")
@@ -845,7 +440,7 @@ def records_read(
     URL, and ``Bash`` under ``AUTONOMOUS``, where the command is not one
     ``shellscan`` read and the sandbox is the bound.
     """
-    if tool_name not in _FILE_READS and tool_name not in _TREE_READS and tool_name != "Bash":
+    if tool_name not in FILE_READS and tool_name not in TREE_READS and tool_name != "Bash":
         return None
     whose = "another session's" if session_id else "a session's"
     unplaced = (
@@ -924,7 +519,7 @@ def records_written(
     Decided before the call runs, with ``records_read``'s limits: a component that
     becomes a symlink afterwards, and a hard link, are not seen.
     """
-    # Imported here because ``model`` imports ``Policy`` from this module.
+    # Imported here for the reason ``summarize`` gives.
     from .model import written_path
 
     raw = written_path(tool_name, tool_input)
@@ -972,7 +567,7 @@ def _permissive_admits(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
     """
     Whether ``PERMISSIVE`` admits a call that ``STRICT`` would park.
 
-    Answers only about the widening. Everything ``_AUTO`` and ``_BUS_AUTO``
+    Answers only about the widening. Everything ``AUTO`` and ``BUS_AUTO``
     already admit is decided before this is reached, and everything this
     returns False for falls through to the unchanged classification.
     """
@@ -983,46 +578,6 @@ def _permissive_admits(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
     # table has not read, so there is nothing to admit. Coercing it with `str()`
     # would classify the repr rather than the command that runs.
     return isinstance(command, str) and is_read_only(command)
-
-
-def _reviewed_by_arguments(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
-    """
-    Whether a call whose name is in ``_BUS_AUTO`` is reviewed anyway, for what its
-    arguments make it: a ``raise_decision`` that names a channel, or a
-    ``withdraw_peer_message`` that gives a reason, either of which hands text to
-    another team's lead (see ``_BUS_AUTO``'s comment). Such a call is classified
-    as ``_BUS_PEER`` is, on every rung.
-
-    "Names a channel" and "gives a reason" are the handlers' own readings of
-    the argument (``bus.raise_decision``, ``bus.withdraw_peer_message``):
-    anything but absent, None or blank. A value the handler then refuses parks
-    too, which costs a review of a call that does nothing; reading it any
-    narrower here would let a value the two read differently through unparked.
-    """
-    if tool_name == _BUS_DECIDE:
-        return bool(str(tool_input.get("channel") or "").strip())
-    if tool_name == _BUS_WITHDRAW_PEER:
-        return bool(str(tool_input.get("reason") or "").strip())
-    return False
-
-
-def peer_channel(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
-    """
-    The channel a call names to reach another team's lead on, or None for a
-    call that names none: ``send_to_peer``'s, and a ``raise_decision`` that
-    names one (``_reviewed_by_arguments``). Read as the handler reads it,
-    stripped. The store asks it of a parked call to name, on its row, the
-    session the call would reach (``summarize``'s ``reaches``).
-
-    None for a ``withdraw_peer_message``, which reaches another team's lead
-    too but names no channel: it acts on the link of the message it names,
-    which only the store holds (``model.Snapshot.parked_link``).
-    """
-    if tool_name == _BUS_PEER or (
-        tool_name == _BUS_DECIDE and _reviewed_by_arguments(tool_name, tool_input)
-    ):
-        return str(tool_input.get("channel") or "?").strip() or "?"
-    return None
 
 
 def _policy_admits(policy: Policy, tool_name: str, tool_input: Mapping[str, Any]) -> bool:
@@ -1047,119 +602,8 @@ def _policy_admits(policy: Policy, tool_name: str, tool_input: Mapping[str, Any]
         case Policy.PERMISSIVE:
             return _permissive_admits(tool_name, tool_input)
         case Policy.AUTONOMOUS:
-            return tool_name in _AUTONOMOUS_AUTO or _reviewed_by_arguments(tool_name, tool_input)
+            return tool_name in AUTONOMOUS_AUTO or _reviewed_by_arguments(tool_name, tool_input)
     assert_never(policy)
-
-
-def requires_containment(policy: Policy) -> bool:
-    """
-    Whether a session may not start under this rung without a containment settings blob.
-
-    The ladder's cap, expressed as a property of the rung rather than as a name
-    checked at the one place that enforces it. A rung releases writes and spawns
-    only by taking this on: the allowlist stops being what bounds the session, so
-    something else has to be, and the sandbox is the only other thing there is.
-
-    ``test_a_rung_that_releases_writes_pays_for_it_with_containment`` is what makes
-    that a rule rather than a description -- it reads both answers off this module,
-    so a fourth rung that released writes and returned False here would fail before
-    it could put a reassuring line on the launcher.
-
-    ``PERMISSIVE`` returns False and is not an oversight, but it rests on a cost
-    judgement rather than on containment being free of value. What the sandbox bounds
-    is writes and network, which that rung already refuses syntactically. Reads are
-    the axis it opens, and containment bounds those only at
-    ``sandbox.DENIED_CREDENTIAL_FILES``' four prefixes -- narrow but not nothing, and
-    itself unmeasured (2026-09-03 §11 U1). Set against an X server connection and a
-    venv interpreter that stop working under the sandbox, the rung declines the trade
-    and states its cost rather than claiming there is none.
-
-    **The reach this leaves open is real and is recorded at §12 U11**: an admitted
-    ``cat`` returns ``/proc/self/environ``, which the CLI's ``Read`` refuses. Flipping
-    this to True would not close it, because the sandbox's read policy is the whole
-    computer minus those four prefixes and ``/proc`` is not among them. So U11 is a
-    reason to know what the rung reaches, not a reason to change this answer.
-    """
-    match policy:
-        case Policy.STRICT:
-            return False
-        case Policy.PERMISSIVE:
-            return False
-        case Policy.AUTONOMOUS:
-            return True
-    assert_never(policy)
-
-
-def inherits_to_subagents(policy: Policy) -> bool:
-    """
-    Whether a sub-agent is gated by its session's policy or falls back to ``STRICT``.
-
-    A property of the rung, so it lives beside the rung rather than in the driver:
-    it is decided by what the rung rests on, and ``assert_never`` makes a third
-    widened rung say which answer it takes.
-
-    Both widened rungs inherit, and they get there by different routes because they
-    rest on different things.
-
-    ``AUTONOMOUS`` inherits because sandbox configuration is per CLI process and a
-    sub-agent shares its parent's, so each additional agent has the same bounded
-    reach as the first (2026-09-03 §8, reversing 2026-08-11 §4 for that rung).
-
-    ``PERMISSIVE`` inherits because its claim is per *command*: ``shellscan`` is
-    re-run, fail-closed, against every call a sub-agent makes, exactly as it is for
-    the root. Nothing about that verdict weakens with fan-out. 2026-08-11 §4 argued
-    the other way on the grounds that one approval would relax the gate for an
-    unbounded number of downstream calls, and that is no longer the shape of the
-    tree: ``Task``/``Agent`` stay in ``_REVIEW`` under this rung, so every agent
-    costs its own approval, and ``subagent_cap``'s deny runs ahead of ``classify``
-    where no policy can widen it (2026-09-24, amending 2026-09-17 §4).
-
-    What fan-out multiplies under either rung is volume, and the volume that matters
-    here is calls that auto-approve and so construct no ``PendingApproval``: they are
-    in the transcript but are not reviewable as decisions. ``subagent_cap`` is the
-    only thing bounding that, since the automatic revoke was removed on 2026-09-21.
-
-    A property of the rung, so it lives beside the rung rather than in the driver:
-    it is decided by what the rung rests on, and ``assert_never`` makes a fourth rung
-    say which answer it takes rather than inheriting one by position.
-    """
-    match policy:
-        case Policy.STRICT:
-            return False
-        case Policy.PERMISSIVE:
-            return True
-        case Policy.AUTONOMOUS:
-            return True
-    assert_never(policy)
-
-
-def _dry_run(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
-    """
-    Whether a call is a ``declare_task`` dry run, which declares nothing.
-
-    ``declare_task`` is in ``_REVIEW`` because a declaration is where work comes
-    into existence. A dry run brings nothing into existence -- the handler reads
-    the board and answers, and emits no write (``bus.declare_task``) -- so it is a
-    lead thinking, which that comment calls free, and parking it would put an
-    operator press in front of every plan a lead checks.
-
-    Only a JSON ``true``. The handler also reads ``"true"`` and ``"yes"`` as a dry
-    run (``model.stated_flag``), but admitting by a second reading of the same
-    argument is how the two would come to disagree, and the cost of the narrower
-    one is only that a spelled-out flag parks: a call admitted here that the
-    handler took as a real declaration would put work on the board unreviewed. A
-    spelling that parks is shown on its row as the dry run it is (``summarize``).
-
-    **What a dry run tells its caller is more than a board read, and that is
-    accepted.** For a duplicate id it says whether the id is a task of another
-    session in this process, and names that session when the operator has taken
-    it off the fleet (``TaskWriteSettled.held_off_fleet``). A real declaration
-    says the same, but parks first under ``STRICT`` and ``PERMISSIVE``; this one
-    does not. It stays auto-approved on ``_BUS_AUTO``'s grounds for
-    ``why_blocked``: ids within one local process are not secret, and nothing of
-    the other task but its id and its session's is said.
-    """
-    return tool_name == _BUS_DECLARE and tool_input.get("dry_run") is True
 
 
 def classify(
@@ -1190,7 +634,7 @@ def classify(
     site passing two positional arguments gets exactly today's answers.
 
     A policy widens the allowlist and nothing else. It may only add *above* the
-    ``_REVIEW`` check and may not touch the final ``REQUIRE_APPROVAL``, which is
+    ``REVIEW`` check and may not touch the final ``REQUIRE_APPROVAL``, which is
     reached at every policy: the tool this build has never heard of is the one that
     must not run unreviewed, whatever the operator asked for (2026-09-03 §6.1).
     Under ``AUTONOMOUS`` that final arm, a read of another session's records and
@@ -1217,14 +661,14 @@ def classify(
     """
     if records_written(tool_name, tool_input, cwd=cwd) is not None:
         return Disposition.REQUIRE_APPROVAL
-    reads = tool_name in _FILE_READS or tool_name in _TREE_READS
+    reads = tool_name in FILE_READS or tool_name in TREE_READS
     if reads or (tool_name == "Bash" and policy is Policy.PERMISSIVE):
         if records_read(tool_name, tool_input, session_id=session_id, cwd=cwd) is not None:
             return Disposition.REQUIRE_APPROVAL
     reviewed_anyway = _reviewed_by_arguments(tool_name, tool_input)
     if (
-        tool_name in _AUTO
-        or (tool_name in _BUS_AUTO and not reviewed_anyway)
+        tool_name in AUTO
+        or (tool_name in BUS_AUTO and not reviewed_anyway)
         or _dry_run(tool_name, tool_input)
     ):
         return Disposition.AUTO_APPROVE
@@ -1232,7 +676,7 @@ def classify(
         return Disposition.AUTO_APPROVE
     if _policy_admits(policy, tool_name, tool_input):
         return Disposition.AUTO_APPROVE
-    if tool_name in _REVIEW or reviewed_anyway:
+    if tool_name in REVIEW or reviewed_anyway:
         return Disposition.REQUIRE_APPROVAL
     # Unknown, including every MCP tool this build has never seen.
     return Disposition.REQUIRE_APPROVAL
@@ -1378,10 +822,10 @@ def summary_of(
     row runs them, whole, since the row is cut only past the head; None when
     ``reaches`` is a sentence saying why nobody is reached.
     """
-    # ``model`` is imported here because it imports ``Policy`` from this module, so
-    # a top-level import closes a cycle. ``board.words`` imports nothing from
-    # pptmstr at runtime and closes none; it sits beside the one function that
-    # reads it. Neither pulls in the SDK.
+    # Imported inside the function by placement only: ``model`` imports the gate's
+    # leaves and not this module, and ``board.words`` imports nothing from pptmstr
+    # at runtime, so a top-level import of either closes no cycle. Neither pulls in
+    # the SDK.
     from .board.words import basis_label, incident_marker, property_label
     from .model import Basis, normalised_property, stated_flag, stated_incident
 
@@ -1602,15 +1046,6 @@ def _row_provenance(tool_input: Mapping[str, Any]) -> str:
     return f"; charter: {asked.inside_charter.value} on #{asked.channel}"
 
 
-def states_provenance(tool_name: str) -> bool:
-    """
-    Whether a call of ``tool_name`` can state a provenance: a declaration, and
-    nothing else. Asked before anything reads the arguments, so a pane can skip
-    serialising a call that has none -- a whole-file Write, every frame.
-    """
-    return tool_name == _BUS_DECLARE
-
-
 @dataclass(frozen=True, slots=True)
 class _Refused:
     """
@@ -1752,40 +1187,6 @@ def declared_provenance(tool_name: str, tool_input: Mapping[str, Any]) -> str | 
     return None if asked is None else asked.said()
 
 
-@dataclass(frozen=True, slots=True)
-class DiffText:
-    """
-    One before/after pair a parked call would produce, as texts rather than a diff.
-
-    Defined here rather than beside ``PendingApproval``: ``model`` imports this
-    module, so the record sits on the side of that edge that both can reach.
-
-    ``before`` and ``after`` are either **the whole file** -- so a line number counted
-    in them is the file's -- or **fragments**, the call's own strings diffed alone.
-    They are fragments whenever ``will_not_apply`` is set, and for every ``MultiEdit``
-    part, whose label is ``edit N`` rather than a path.
-    """
-
-    # None is "no such file", not "empty file": it is what puts ``/dev/null`` in the
-    # unified header. ``diff_texts`` never produces ``after=None`` -- no tool it knows
-    # deletes a file -- but the record can say it.
-    before: str | None
-    after: str | None
-    # The path exactly as the call gave it, or a stand-in when it gave none. Never
-    # decorated: ``render_diff`` writes it into the header verbatim.
-    label: str
-    # Why the texts are fragments: the gate's own read says this Edit has no place
-    # to land. One of four fixed phrases, because an operator acts differently on
-    # each -- see ``_edit_refusal``. A prediction from this read, not the tool's
-    # verdict.
-    will_not_apply: str | None = None
-    # The file exists and could not be read as UTF-8 text (binary, a directory, no
-    # permission). On a Write this is the only thing separating "replaces a file
-    # whose content could not be shown" from "creates a file": ``before`` is None
-    # in both, because the unified diff has always drawn them the same.
-    unreadable: bool = False
-
-
 def diff_texts(tool_name: str, tool_input: Mapping[str, Any]) -> tuple[DiffText, ...] | None:
     """
     The texts a call would turn into one another, or None when there is nothing
@@ -1855,23 +1256,6 @@ def diff_texts(tool_name: str, tool_input: Mapping[str, Any]) -> tuple[DiffText,
     return None
 
 
-def render_texts(tool_name: str, texts: tuple[DiffText, ...] | None) -> str | None:
-    """
-    The unified diff of ``diff_texts``' answer for the same call.
-
-    Separate from ``render_diff`` so a caller that keeps the texts can have both
-    from one read of the file. ``tool_name`` is needed because the two shapes join
-    differently and the bytes are relied on: a MultiEdit drops its empty parts and
-    is None when none are left, where a Write or an Edit that changes nothing is
-    the empty string.
-    """
-    if texts is None:
-        return None
-    if tool_name == "MultiEdit":
-        return "\n".join(p for p in map(_unified, texts) if p) or None
-    return "".join(map(_unified, texts))
-
-
 def render_diff(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
     """
     A unified diff of what the call would change, or None when there is nothing
@@ -1886,12 +1270,6 @@ def render_diff(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
     return render_texts(tool_name, diff_texts(tool_name, tool_input))
 
 
-class _FileState(enum.Enum):
-    READ = "read"
-    MISSING = "missing"
-    UNREADABLE = "unreadable"
-
-
 def _read(path: str) -> tuple[str | None, _FileState]:
     if not path:
         return None, _FileState.MISSING
@@ -1903,53 +1281,3 @@ def _read(path: str) -> tuple[str | None, _FileState]:
         return None, _FileState.MISSING
     except (OSError, UnicodeDecodeError, ValueError):
         return None, _FileState.UNREADABLE
-
-
-def _edit_refusal(state: _FileState, old_string: str) -> str:
-    """
-    Which of the four reasons an Edit has nowhere to land.
-
-    Ordered so the file's condition is named before the anchor's: an anchor cannot
-    be looked for in a file that was never read.
-    """
-    match state:
-        case _FileState.MISSING:
-            return "file not found"
-        case _FileState.UNREADABLE:
-            return "file is not readable as text"
-        case _FileState.READ:
-            return "old_string is empty" if not old_string else "anchor not found in file"
-        case _:
-            assert_never(state)
-
-
-def _unified(text: DiffText) -> str:
-    # The a/ b/ prefixes are a git convention for repo-relative paths; on an
-    # absolute path they produce "b//tmp/x", which reads as a typo in the header of
-    # every diff the operator sees.
-    prefix_a, prefix_b = ("", "") if text.label.startswith("/") else ("a/", "b/")
-    lines = difflib.unified_diff(
-        (text.before or "").splitlines(keepends=True),
-        (text.after or "").splitlines(keepends=True),
-        fromfile=f"{prefix_a}{text.label}" if text.before is not None else "/dev/null",
-        tofile=f"{prefix_b}{text.label}" if text.after is not None else "/dev/null",
-        n=3,
-    )
-    return "".join(lines)
-
-
-def diff_line_kind(line: str) -> str:
-    """
-    Classify a diff line for styling: 'add', 'remove', 'meta' or 'context'.
-
-    The caller keeps the leading +/- in the rendered text regardless of colour --
-    that gutter is the non-hue channel, and it is what keeps a diff readable in
-    high contrast and to a colour-deficient operator (design §6.1).
-    """
-    if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
-        return "meta"
-    if line.startswith("+"):
-        return "add"
-    if line.startswith("-"):
-        return "remove"
-    return "context"
