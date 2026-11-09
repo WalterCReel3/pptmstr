@@ -426,6 +426,14 @@ over `commands` meets D-c's purpose (no arm can change a persisted record unseen
 construction. Its one open edge is the `isinstance(intent, CommandsRestored)` test, and a test
 pins it.
 
+**D-c, clarified again (operator, 2026-11-09).** D-c governs Intent→facts maps. Intent→wakes
+maps (`store/waking._peer_waking` and `_moved`) keep their open default and are pinned by
+classification (`tests/test_waking_pins.py`), because their docstrings argue that most intents
+deliberately neither wake nor move. The test reads each function's cases by AST, holds them to a
+written HANDLED set, and requires HANDLED and IGNORED to partition `get_args(Intent)`, so a new
+intent fails until it is classified (decision 2 in
+`planning/2026-11-09-decisions-owed-after-round-4.md`).
+
 **D-d (operator, 2026-11-07).** Keep the functional style, and enforce its purity and
 exhaustiveness claims by test rather than prose:
 - `test_layers` follows imports transitively;
