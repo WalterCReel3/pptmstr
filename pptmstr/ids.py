@@ -1,5 +1,5 @@
 """
-Every id the bus mints, the form each is minted in, and the shapes ids are read
+Every id pptmstr mints, the form each is minted in, and the shapes ids are read
 back by.
 
 No import from pptmstr and no clock: a mint that needs the time is handed it.
@@ -98,6 +98,38 @@ def command(at: float) -> str:
     """
     stamp = time.strftime(ID_TIME_FORMAT, time.gmtime(at))
     return f"{COMMAND.prefix}{stamp}-{uuid.uuid4().hex[:ID_HEX_CHARS]}"
+
+
+def channel() -> str:
+    """
+    A linked channel's id, as ``str(uuid4())``: it names the link's log directory,
+    so it must pass ``channels.records.is_channel_name``.
+    """
+    return str(uuid.uuid4())
+
+
+def session() -> str:
+    """
+    A fresh session's id, as ``str(uuid4())`` exactly: the SDK is handed it as
+    the CLI's session id, and a resume passes it back.
+    """
+    return str(uuid.uuid4())
+
+
+def pending(session_id: str, tool_use_id: str) -> str:
+    """
+    The id a parked call waits under: the session's first eight characters, then
+    the call's tool_use_id, or eight hex digits for a call that has none.
+    """
+    return f"{session_id[:8]}-{tool_use_id or uuid.uuid4().hex[:8]}"
+
+
+def call_key(call_id: str) -> str:
+    """
+    The key a sub-agent's call holds its veto under: its tool_use_id, or an
+    ``anon-`` key and 32 hex digits for a call that has none.
+    """
+    return call_id or f"anon-{uuid.uuid4().hex}"
 
 
 # -- the shapes ids are read back by ----------------------------------------------

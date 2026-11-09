@@ -34,6 +34,10 @@ DECISION = re.compile(r"dq-[0-9a-f]{12}")
 TASK = re.compile(r"t-[0-9a-f]{8}")
 COMMAND = re.compile(r"cmd-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}")
 REQUEST = re.compile(r"req-[0-9a-f]{12}")
+# ``str(uuid4())`` exactly: a channel's id and a session's. A resume hands the
+# session's back to the CLI as the CLI's own.
+UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+CALL_KEY = re.compile(r"anon-[0-9a-f]{32}")
 
 
 @pytest.fixture
@@ -124,9 +128,100 @@ def test_a_channel_id_is_a_name_a_link_log_can_live_under() -> None:
         for _ in range(3)
     ]
 
-    ids = [m.channel_id for m in made if isinstance(m, ChannelLinked)]
-    assert len(set(ids)) == 3
-    assert all(is_channel_name(i) for i in ids), ids
+    minted = [m.channel_id for m in made if isinstance(m, ChannelLinked)]
+    assert len(set(minted)) == 3
+    assert all(is_channel_name(i) for i in minted), minted
+    assert all(UUID4.fullmatch(i) for i in minted), minted
+
+
+# -- the driver's ids, through the session that mints them -------------------------
+
+
+class _Parked(Exception):
+    pass
+
+
+def _parked_under(*tool_use_ids: str) -> tuple[str, list[str]]:
+    """
+    A fresh session's id and the pending id its gate parks each call under, in
+    order, each stopped at the park so no operator is needed.
+    """
+    import asyncio
+
+    from pptmstr.driver import AgentSession
+
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead")
+    seen: list[str] = []
+
+    def park(pending_id: str) -> Any:
+        seen.append(pending_id)
+        raise _Parked
+
+    bridge.park = park  # type: ignore[method-assign]
+    for tool_use_id in tool_use_ids:
+        with pytest.raises(_Parked):
+            asyncio.run(
+                session._park("Write", {"file_path": "/tmp/x"}, tool_use_id, session.node_id)
+            )
+    return session.session_id, seen
+
+
+def test_a_fresh_session_id_is_a_uuid4_string_and_a_resumed_one_is_kept() -> None:
+    from pptmstr.driver import AgentSession
+
+    made = [AgentSession(Bridge(), task="lead").session_id for _ in range(3)]
+    assert len(set(made)) == 3
+    assert all(UUID4.fullmatch(i) for i in made), made
+
+    resumed = AgentSession(Bridge(), task="lead", resume="the-cli-s-own-id")
+    assert resumed.session_id == "the-cli-s-own-id"
+
+
+def test_a_pending_id_is_the_sessions_first_eight_and_the_call_or_eight_hex() -> None:
+    """
+    A pending id is the key its future waits under in the bridge, so one
+    session's calls without a tool_use_id must not share one.
+    """
+    session_id, (named, *anonymous) = _parked_under("toolu_01ABC", "", "", "")
+    assert named == f"{session_id[:8]}-toolu_01ABC"
+
+    assert len(set(anonymous)) == 3
+    form = re.compile(rf"{re.escape(session_id[:8])}-[0-9a-f]{{8}}")
+    assert all(form.fullmatch(p) for p in anonymous), anonymous
+
+
+def test_a_subagent_call_without_a_tool_use_id_is_keyed_anon_and_32_hex() -> None:
+    """
+    The key a sub-agent's call holds its veto under while the gate runs: the
+    call's own tool_use_id when it has one, an ``anon-`` key otherwise.
+    """
+    import asyncio
+
+    from pptmstr.driver import AgentSession
+    from tests.test_driver import _fire_gate, _fire_start
+
+    session = AgentSession(Bridge(), task="lead")
+    held: list[set[str]] = []
+
+    async def gate(*_args: Any) -> dict[str, Any]:
+        held.append(set(session._subagent_in_flight["alpha-id"]))
+        return {}
+
+    session._gate_tool_use = gate  # type: ignore[method-assign]
+
+    async def drive() -> None:
+        await _fire_start(session, "alpha-id")
+        await _fire_gate(session, "alpha-id", call_id="tu-7")
+        for _ in range(3):
+            await _fire_gate(session, "alpha-id", call_id="")
+
+    asyncio.run(drive())
+
+    assert held[0] == {"tu-7"}
+    anon = [k for keys in held[1:] for k in keys if k != "tu-7"]
+    assert len(set(anon)) == 3
+    assert all(CALL_KEY.fullmatch(k) for k in anon), anon
 
 
 # -- request ids ------------------------------------------------------------------
@@ -170,8 +265,22 @@ _DRAWS = 500
         (ids.decision, DECISION),
         (ids.task, TASK),
         (lambda: ids.command(1_790_000_000.0), COMMAND),
+        (ids.channel, UUID4),
+        (ids.session, UUID4),
+        (lambda: ids.pending("0123abcd-rest", ""), re.compile(r"0123abcd-[0-9a-f]{8}")),
+        (lambda: ids.call_key(""), CALL_KEY),
     ],
-    ids=["request", "concern", "decision", "task", "command"],
+    ids=[
+        "request",
+        "concern",
+        "decision",
+        "task",
+        "command",
+        "channel",
+        "session",
+        "pending",
+        "call_key",
+    ],
 )
 def test_each_mint_is_its_pinned_form_and_does_not_repeat(mint: Any, form: re.Pattern[str]) -> None:
     drawn = [mint() for _ in range(_DRAWS)]

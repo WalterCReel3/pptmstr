@@ -20,7 +20,6 @@ import asyncio
 import json
 import re
 import time
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,7 +54,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import SystemPromptCustom, SystemPromptPreset
 
-from . import commandbus, plugins
+from . import commandbus, ids, plugins
 from .approval import (
     Disposition,
     Policy,
@@ -1107,7 +1106,7 @@ class AgentSession:
         # it, because a minted id would be a second candidate and the whole point of
         # this path is that the CLI is never handed two ids to choose between:
         # ``_options`` sets ``resume`` and omits ``session_id`` entirely.
-        self.session_id = resume or str(uuid.uuid4())
+        self.session_id = resume or ids.session()
         self.node_id: NodeId = (self.session_id, None)
         # Whether the CLI has named an id and it matched. Only a resumed session acts
         # on this; a fresh one supplied its own id and is not re-litigating it here.
@@ -1761,7 +1760,7 @@ class AgentSession:
         # veto lasts only as long as the gate does -- narrower than it should be, but a
         # veto that cannot be lowered is the failure worth avoiding.
         call_id = str(data.get("tool_use_id", ""))
-        key = call_id or f"anon-{uuid.uuid4().hex}"
+        key = ids.call_key(call_id)
 
         # Stamped on the way in and again on the way out of the gate. Neither stamp is
         # what keeps a long call alive -- the veto does that -- but a denied call gets no
@@ -2224,7 +2223,7 @@ class AgentSession:
         """
         texts = diff_texts(tool_name, tool_input)
         pending = PendingApproval(
-            id=f"{self.session_id[:8]}-{tool_use_id or uuid.uuid4().hex[:8]}",
+            id=ids.pending(self.session_id, tool_use_id),
             node=node,
             tool_name=tool_name,
             tool_use_id=tool_use_id,

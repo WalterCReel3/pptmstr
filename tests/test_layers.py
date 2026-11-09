@@ -1021,10 +1021,6 @@ _ENTROPY = frozenset({"uuid", "secrets"})
 # goes when its mints move (planning/2026-11-07-channels-and-ids-have-one-owner-
 # each.md, steps 1 and 8).
 MINTS_ELSEWHERE: dict[tuple[str, str], str] = {
-    # ``link_leads`` mints a channel's id; it moves with the channel steps.
-    ("pptmstr.app", "uuid"): "a channel id, not yet moved",
-    # The session id, a parked call's pending id and an anonymous call key: step 8.
-    ("pptmstr.driver", "uuid"): "driver's mints, step 8",
     # ``mint_tag`` is a capability secret for the runner protocol, not an id.
     ("pptmstr.commandrun", "secrets"): "a secret, not an id",
 }

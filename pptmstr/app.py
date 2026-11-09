@@ -22,7 +22,6 @@ import tempfile
 import threading
 import time
 import traceback
-import uuid
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, fields
@@ -41,6 +40,7 @@ from . import (
     drawable,
     effects,
     fleetsync,
+    ids,
     layout_ini,
     links,
     model_catalog,
@@ -1678,7 +1678,7 @@ def link_leads(
         LOG.warn("channel", f"#{name}: the leads were not linked: {refused}")
         return channel_log.Refused(refused)
     linked = ChannelLinked(
-        channel_id=str(uuid.uuid4()),
+        channel_id=ids.channel(),
         name=name,
         members=members,
         charter=charter,
