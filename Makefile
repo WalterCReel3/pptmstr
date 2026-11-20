@@ -1,4 +1,4 @@
-.PHONY: help bootstrap worktree lock lock-check lock-gate deps typeset-env probe smoke run shot shot-xvfb test lint format format-file typecheck typecheck-all verify check clean
+.PHONY: help bootstrap worktree lock lock-check lock-gate deps typeset-env probe smoke run shot shot-xvfb test test-serial lint format format-file typecheck typecheck-all verify check clean
 
 PY  := .venv/bin/python
 PIP := .venv/bin/python -m pip
@@ -258,7 +258,20 @@ OUT   ?= shots/shot.png
 shot-xvfb: venv-check         ## the same on a private Xvfb: FOCUS=BOARD OUT=shots/x.png
 	scripts/xvfb_shot.sh --out $(OUT) $(if $(FOCUS),--focus $(FOCUS)) $(SHOT_ARGS)
 
-test: venv-check   ## pytest; IMSCRIBE_NO_TYPESET=1 runs it without the typesetting library
+# Two passes, and both always run: everything not marked `serial` across one worker
+# per core (pytest-xdist, worksteal), then the `serial` tests in one process with
+# the machine to themselves. The target fails with the first pass's status if it
+# failed, else the second's. Exit 5 is pytest's "no tests collected", which the
+# second pass gives whenever nothing is marked serial, so it counts as a pass there
+# and only there. `test-serial` is the whole suite in one process.
+test: venv-check   ## pytest in parallel, then the serial-marked tests; IMSCRIBE_NO_TYPESET=1 runs it without the typesetting library
+	$(PY) -m pytest -q -n auto --dist worksteal -m "not serial"; parallel=$$?; \
+	$(PY) -m pytest -q -m serial; serial=$$?; \
+	if [ $$serial -eq 5 ]; then serial=0; fi; \
+	if [ $$parallel -ne 0 ]; then exit $$parallel; fi; \
+	exit $$serial
+
+test-serial: venv-check ## the whole suite in one process, as before the parallel run
 	$(PY) -m pytest -q
 
 lint: venv-check   ## ruff check + black --check
