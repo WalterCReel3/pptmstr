@@ -649,7 +649,7 @@ def test_a_build_older_than_the_stop_marker_reads_it_as_short_too() -> None:
     # Built directly: ``codec.kinds`` always adds the marker.
     by_name = {k: v for k, v in boardlog.KINDS.by_name.items() if v is not RecordingStopped}
     assert len(by_name) == len(boardlog.KINDS.by_name) - 1
-    older = codec.Kinds(by_name, boardlog.KINDS.hints)
+    older: codec.Kinds[boardlog.Record] = codec.Kinds(by_name, boardlog.KINDS.hints)
 
     read = codec.decode(text, older)
 
@@ -2264,7 +2264,7 @@ def test_a_build_older_than_decisions_reads_them_as_unrecognised_and_short() -> 
     assert {type(r).KIND for r in records} == names, "the names are the format"
     by_name = {kind: cls for kind, cls in boardlog.KINDS.by_name.items() if kind not in names}
     assert len(by_name) == len(boardlog.KINDS.by_name) - len(names)
-    older = codec.Kinds(by_name, boardlog.KINDS.hints)
+    older: codec.Kinds[boardlog.Record] = codec.Kinds(by_name, boardlog.KINDS.hints)
 
     read = [codec.decode(text, older) for text in texts]
 

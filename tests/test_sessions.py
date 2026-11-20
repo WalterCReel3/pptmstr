@@ -20,7 +20,6 @@ from pathlib import Path
 import pytest
 from claude_agent_sdk import SDKSessionInfo
 
-from pptmstr import ondisk
 from pptmstr import sessions as sessions_mod
 from pptmstr import settings as settings_mod
 from pptmstr.sessions import (
@@ -224,24 +223,25 @@ def test_a_save_flushes_the_written_bytes_to_the_device_before_the_rename(
 ) -> None:
     """
     A bookmark is made against a crash, so it has to survive one: the bytes reach
-    the device before the name moves onto them. Patched on ``ondisk.os``: the
-    primitive calls ``os.fsync`` and ``os.replace`` through the module.
+    the device before the name moves onto them. Patched on the ``os`` module
+    itself: ``ondisk`` calls ``os.fsync`` and ``os.replace`` through it, and it is
+    the same object as ``ondisk.os``.
     """
     path = tmp_path / "sessions.json"
     steps: list[tuple[object, ...]] = []
-    real_fsync, real_replace = ondisk.os.fsync, ondisk.os.replace
+    real_fsync, real_replace = os.fsync, os.replace
 
     def fsync(fd: int) -> None:
-        held = ondisk.os.fstat(fd)
-        steps.append(("fsync", held.st_ino, ondisk.os.pread(fd, held.st_size + 1, 0)))
+        held = os.fstat(fd)
+        steps.append(("fsync", held.st_ino, os.pread(fd, held.st_size + 1, 0)))
         real_fsync(fd)
 
-    def rename(src: str, dst: object) -> None:
+    def rename(src: str, dst: str | os.PathLike[str]) -> None:
         steps.append(("replace", dst))
         real_replace(src, dst)
 
-    monkeypatch.setattr(ondisk.os, "fsync", fsync)
-    monkeypatch.setattr(ondisk.os, "replace", rename)
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", rename)
 
     save_overlay(set_bookmark({}, "abc", True), path)
 

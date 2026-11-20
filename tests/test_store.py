@@ -6142,13 +6142,13 @@ def test_a_read_changes_nothing_but_the_delivery_stamp() -> None:
 
 def test_a_snapshot_with_no_open_decision_pays_nothing_for_the_projection() -> None:
     """``_owing_decisions`` hands back the snapshot it was given."""
-    from pptmstr import store as store_module
+    from pptmstr.store.owing import _owing_decisions
 
     world = dataclasses.replace(
         Snapshot.empty(), decisions={"d-1": _decision(outcome=Dismissed(1.0))}
     )
 
-    assert store_module._owing_decisions(world) is world
+    assert _owing_decisions(world) is world
 
 
 # -- a session recalled from its file, and a session off the fleet ------------------

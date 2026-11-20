@@ -309,7 +309,7 @@ def test_a_build_that_predates_peer_messages_reads_one_as_unrecognised_and_short
     texts = [codec.encode(record) for record in records]
     by_name = {kind: cls for kind, cls in boardlog.KINDS.by_name.items() if kind != "peer-posted"}
     assert len(by_name) == len(boardlog.KINDS.by_name) - 1
-    older = codec.Kinds(by_name, boardlog.KINDS.hints)
+    older: codec.Kinds[boardlog.Record] = codec.Kinds(by_name, boardlog.KINDS.hints)
 
     read = [codec.decode(text, older) for text in texts]
 

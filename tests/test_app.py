@@ -8308,8 +8308,8 @@ def test_a_command_record_that_cannot_be_queued_is_said_once_and_the_batch_is_ke
             raise AssertionError("nothing here gains an end")
 
     logged: list[tuple[str, str]] = []
-    monkeypatch.setattr(app.LOG, "error", lambda where, said: logged.append((where, said)))
-    monkeypatch.setattr(app.LOG, "debug", lambda where, said: None)
+    monkeypatch.setattr(LOG, "error", lambda where, said: logged.append((where, said)))
+    monkeypatch.setattr(LOG, "debug", lambda where, said: None)
     files = Unqueueable()
     state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
     state.fleet_writer = fleet

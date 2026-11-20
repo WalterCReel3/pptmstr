@@ -56,7 +56,8 @@ def test_the_driver_and_the_board_share_the_root_names_and_the_allocator() -> No
     own, is two allocators again however well each is tested.
     """
     assert driver.ROOT_ADDRESSES is ROOT_NAMES
-    assert driver.address_for is address_for
+    # Reached on purpose: the check is that driver's name is the allocator itself.
+    assert driver.address_for is address_for  # type: ignore[attr-defined]
     source = inspect.getsource(driver.AgentSession._address_for)
     assert "return address_for(" in source and "while" not in source
     assert "address_for(" in inspect.getsource(addresses._addresses)

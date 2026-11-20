@@ -208,7 +208,7 @@ def test_a_subagent_call_without_a_tool_use_id_is_keyed_anon_and_32_hex() -> Non
         held.append(set(session._subagent_in_flight["alpha-id"]))
         return {}
 
-    session._gate_tool_use = gate  # type: ignore[method-assign]
+    session._gate_tool_use = gate  # type: ignore[assignment]
 
     async def drive() -> None:
         await _fire_start(session, "alpha-id")

@@ -1651,7 +1651,7 @@ def test_the_retraction_kind_does_not_carry_the_reason() -> None:
 def test_a_build_older_than_the_retraction_kind_reads_it_as_unrecognised_not_contested() -> None:
     texts = [codec.encode(r) for r in _sender_log(*_RETRACTED)]
     by_name = {k: v for k, v in boardlog.KINDS.by_name.items() if k != "peer-retracted"}
-    older = codec.Kinds(by_name, boardlog.KINDS.hints)
+    older: codec.Kinds[boardlog.Record] = codec.Kinds(by_name, boardlog.KINDS.hints)
 
     records = [codec.decode(t, older) for t in texts]
     board = boardlog.restore([r for r in records if not isinstance(r, codec.Malformed)])

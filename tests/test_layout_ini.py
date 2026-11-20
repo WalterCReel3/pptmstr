@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from pptmstr import layout_ini, ondisk
+from pptmstr import layout_ini
 from pptmstr.layout_ini import with_window_beside
 
 # Two layouts as hello_imgui writes them, cut down: BOARD dragged into a node of
@@ -230,26 +230,26 @@ def test_a_replaced_file_is_flushed_to_the_device_before_the_rename(
 ) -> None:
     """
     So a power loss as well as a process crash leaves the old layout or the new
-    one, never a short file hello_imgui would read as no layout. Patched on
-    ``ondisk.os``: the primitive calls ``os.fsync`` and ``os.replace`` through the
-    module.
+    one, never a short file hello_imgui would read as no layout. Patched on the
+    ``os`` module itself: ``ondisk`` calls ``os.fsync`` and ``os.replace`` through
+    it, and it is the same object as ``ondisk.os``.
     """
     ini = tmp_path / "pptmstr.ini"
     ini.write_bytes(SAVED.encode())
     steps: list[tuple[object, ...]] = []
-    real_fsync, real_replace = ondisk.os.fsync, ondisk.os.replace
+    real_fsync, real_replace = os.fsync, os.replace
 
     def fsync(fd: int) -> None:
-        held = ondisk.os.fstat(fd)
-        steps.append(("fsync", held.st_ino, ondisk.os.pread(fd, held.st_size + 1, 0)))
+        held = os.fstat(fd)
+        steps.append(("fsync", held.st_ino, os.pread(fd, held.st_size + 1, 0)))
         real_fsync(fd)
 
-    def rename(src: str, dst: object) -> None:
+    def rename(src: str, dst: str | os.PathLike[str]) -> None:
         steps.append(("replace", dst))
         real_replace(src, dst)
 
-    monkeypatch.setattr(ondisk.os, "fsync", fsync)
-    monkeypatch.setattr(ondisk.os, "replace", rename)
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", rename)
 
     assert layout_ini.keep_layout_for(ini, "DIGEST", "BOARD") is not None
 

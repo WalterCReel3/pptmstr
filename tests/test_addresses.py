@@ -9,6 +9,11 @@ derivations of one name agree.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
+import pytest
+from claude_agent_sdk import HookContext, SubagentStartHookInput
+
 from pptmstr import boardlog
 from pptmstr.addresses import FOREIGN, UNKNOWN, role_name
 from pptmstr.model import Snapshot
@@ -31,6 +36,14 @@ from tests.test_board import (
     team,
 )
 
+if TYPE_CHECKING:
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+
+# ``OLD_BUILDER_2`` as a log's ``by_id`` holds it: the same tuple, typed as the
+# record's field. ``NodeId`` allows a None agent id, and this node has one.
+OLD_BUILDER_2_ID = cast(tuple[str, ...], OLD_BUILDER_2)
+
 # -- role naming ------------------------------------------------------------------
 
 
@@ -45,7 +58,9 @@ def test_the_root_of_a_session_is_the_lead_not_its_task_prompt() -> None:
     team(store, S1)
 
     assert role_name(store.snapshot(), LEAD_1, S1) == LEAD
-    assert store.snapshot().get(LEAD_1).agent_type is None
+    lead = store.snapshot().get(LEAD_1)
+    assert lead is not None
+    assert lead.agent_type is None
 
 
 def test_a_role_reads_as_the_name_an_agent_would_address_it_by() -> None:
@@ -120,7 +135,9 @@ def test_the_board_calls_an_agent_what_the_bus_routes_to() -> None:
     assert role_name(snap, session.node_id, session.session_id) == session.role_of(session.node_id)
 
 
-def test_the_board_steps_over_a_declared_name_the_way_the_bus_does(monkeypatch) -> None:
+def test_the_board_steps_over_a_declared_name_the_way_the_bus_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """
     The half of the rule FEATURE cannot exercise: a template with a role literally
     called "builder-2" pushes the second builder to "builder-3", and the board has to
@@ -159,13 +176,15 @@ def test_the_board_steps_over_a_declared_name_the_way_the_bus_does(monkeypatch) 
     _assert_agrees(snap, session, {"a-1": "builder", "a-2": "builder-3", "a-3": "builder-2"})
 
 
-def _run_spawns(session, bridge, *spawns: tuple[str, str]) -> Snapshot:
+def _run_spawns(session: AgentSession, bridge: Bridge, *spawns: tuple[str, str]) -> Snapshot:
     """Fire SubagentStart for each (agent_id, agent_type) and store what it emitted."""
     import asyncio
 
     async def start_them() -> None:
         for agent_id, agent_type in spawns:
-            await session._subagent_start(_start_hook(agent_id, agent_type), None, None)
+            await session._subagent_start(
+                _start_hook(agent_id, agent_type), None, HookContext(signal=None)
+            )
 
     asyncio.run(start_them())
     store = Store()
@@ -174,14 +193,14 @@ def _run_spawns(session, bridge, *spawns: tuple[str, str]) -> Snapshot:
     return store.snapshot()
 
 
-def _assert_agrees(snap: Snapshot, session, expected: dict[str, str]) -> None:
+def _assert_agrees(snap: Snapshot, session: AgentSession, expected: dict[str, str]) -> None:
     for agent_id, address in expected.items():
         node = (session.session_id, agent_id)
         assert session.role_of(node) == address
         assert role_name(snap, node, session.session_id) == address
 
 
-def _start_hook(agent_id: str, agent_type: str) -> dict[str, object]:
+def _start_hook(agent_id: str, agent_type: str) -> SubagentStartHookInput:
     return {
         "hook_event_name": "SubagentStart",
         "agent_id": agent_id,
@@ -259,7 +278,7 @@ def test_a_foreign_owner_is_still_named_rather_than_rendered_as_a_local_one() ->
 
 def test_a_node_nothing_restored_and_nothing_spawned_is_still_only_unknown() -> None:
     """The qualifier is for a party a log named. It asserts a cause, so it needs one."""
-    store = _old_claim(OLD_BUILDER_2)
+    store = _old_claim(OLD_BUILDER_2_ID)
 
     assert role_name(store.snapshot(), (S1, "never-heard-of"), S1) == UNKNOWN
 
@@ -267,14 +286,14 @@ def test_a_node_nothing_restored_and_nothing_spawned_is_still_only_unknown() -> 
 def test_a_restored_party_the_log_had_no_name_for_is_unknown_from_before_the_restart() -> None:
     store = _resumed(
         _declared("t1", 50.0),
-        boardlog.Claimed(at=_CLOCK.wall - 40.0, task_id="t1", by="", by_id=OLD_BUILDER_2),
+        boardlog.Claimed(at=_CLOCK.wall - 40.0, task_id="t1", by="", by_id=OLD_BUILDER_2_ID),
     )
 
     assert role_name(store.snapshot(), OLD_BUILDER_2, S1) == f"{UNKNOWN}, from an earlier run"
 
 
 def test_a_restored_party_seen_from_another_sessions_board_carries_both_qualifiers() -> None:
-    store = _old_claim(OLD_BUILDER_2)
+    store = _old_claim(OLD_BUILDER_2_ID)
 
     assert role_name(store.snapshot(), OLD_BUILDER_2, S2) == (
         f"builder-2, from an earlier run, {FOREIGN}"

@@ -97,7 +97,7 @@ def test_a_record_name_that_is_a_pipe_is_damage_and_does_not_hold_the_reader(
     if fed:
         feed = os.open(tmp_path / "00000001.json", os.O_RDWR | os.O_NONBLOCK)
         os.write(feed, codec.encode(B).encode())
-    got: list[codec.Log] = []
+    got: list[codec.Log[boardlog.Record]] = []
     reader = threading.Thread(
         target=lambda: got.append(files.read(tmp_path, boardlog.KINDS)), daemon=True
     )

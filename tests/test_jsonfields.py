@@ -89,6 +89,7 @@ def test_whole_refuses_a_bool_a_float_and_what_is_not_a_number(value: object) ->
 
 
 def test_bad_is_no_value_json_can_hold() -> None:
+    value: object
     for value in (None, False, 0, "", [], {}):
         assert value is not BAD and value != BAD
 

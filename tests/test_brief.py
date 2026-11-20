@@ -10,7 +10,9 @@ something a reader trips over.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -418,8 +420,8 @@ def test_two_writers_that_chose_the_same_name_both_keep_their_entry(
     interleaved: list[Path] = []
     entered: list[bool] = []
 
-    def _interleaving(real):  # type: ignore[no-untyped-def]
-        def place(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]
+    def _interleaving(real: Callable[..., None]) -> Callable[..., None]:
+        def place(src: object, dst: object, *args: Any, **kwargs: Any) -> None:
             if not entered:
                 entered.append(True)
                 interleaved.append(brief.write_entry(tmp_path, "the writer that slipped in"))
