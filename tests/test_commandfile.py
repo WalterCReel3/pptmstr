@@ -1091,8 +1091,32 @@ def test_an_end_written_before_leftovers_were_counted_reads_as_not_recorded(
         assert isinstance(cf.read_command(SID, CID, tmp_path), Unreadable), (key, wrong)
 
 
+_GOOD_SIDE_FILES: dict[str, dict[str, Any]] = {
+    cf.STARTED_NAME: {
+        "format": cf.FORMAT,
+        "pid": 4242,
+        "pgid": 4242,
+        "at": 1.0,
+        "start_ticks": 5,
+        "boot_id": "b",
+    },
+    cf.UNCONFIRMED_NAME: {"format": cf.FORMAT, "reason": "not seen", "at": 2.0, "pid": 4242},
+}
+
+# Every state the three state files can be in, beside which a side file is put.
+_SIDE_FILE_BASES: tuple[tuple[str, Command], ...] = (
+    ("asked", ASKED),
+    ("running", dataclasses.replace(ASKED, run=RUN)),
+    *((f"ended-{index}", command) for index, command in enumerate(ENDED)),
+)
+
+
+@pytest.mark.parametrize("name", list(_GOOD_SIDE_FILES))
+@pytest.mark.parametrize(
+    "base", [base for _, base in _SIDE_FILE_BASES], ids=[i for i, _ in _SIDE_FILE_BASES]
+)
 def test_neither_side_file_however_it_got_there_opens_a_command_or_finds_a_process(
-    tmp_path: Path,
+    tmp_path: Path, base: Command, name: str
 ) -> None:
     """
     ``started.json`` and ``unconfirmed.json`` in every state -- absent, good,
@@ -1100,67 +1124,60 @@ def test_neither_side_file_however_it_got_there_opens_a_command_or_finds_a_proce
     files can be in. The command read is the one read without them, but for
     the reason a good ``unconfirmed.json`` adds to an ``EndUnknown``; a spoiled
     ``started.json`` names no process; and nothing here says a process is alive.
+
+    One case is one side file beside one base, in each of its states.
     """
     spoilers = _spoilers(tmp_path)
-    good_started = {
-        "format": cf.FORMAT,
-        "pid": 4242,
-        "pgid": 4242,
-        "at": 1.0,
-        "start_ticks": 5,
-        "boot_id": "b",
-    }
-    good_unconfirmed = {"format": cf.FORMAT, "reason": "not seen", "at": 2.0, "pid": 4242}
-    bases = [
-        ASKED,
-        dataclasses.replace(ASKED, run=RUN),
-        *ENDED,
-    ]
+    good = _GOOD_SIDE_FILES[name]
     serial = itertools.count()
-    checked = 0
-    for base in bases:
-        for name, good in (
-            (cf.STARTED_NAME, good_started),
-            (cf.UNCONFIRMED_NAME, good_unconfirmed),
-        ):
-            for state in ("good", "newer", *spoilers):
-                cid = f"cmd-20261013T101500Z-{next(serial):012x}"
-                command = dataclasses.replace(base, id=cid)
-                _record_all(command, tmp_path)
-                plain = _command(cf.read_command(SID, cid, tmp_path))
-                obj = {**good, "id": cid}
-                path = _dir(tmp_path, cid) / name
-                if state == "good":
-                    _put(path, obj)
-                elif state == "newer":
-                    _put(path, {**obj, "format": cf.FORMAT + 1})
-                else:
-                    spoilers[state](path, obj)
-                    for leftover in (tmp_path / "elsewhere.json",):
-                        leftover.unlink(missing_ok=True)
-                read = _command(cf.read_command(SID, cid, tmp_path))
-                assert not read.is_open and read.unsupervised is None and not read.owes_row
-                expected = plain
-                adds = (
-                    name == cf.UNCONFIRMED_NAME
-                    and state in ("good", "newer")
-                    and plain.end is not None
-                    and plain.end.outcome == EndUnknown()
-                    and base.end is None
-                )
-                if adds:
-                    assert plain.end is not None
-                    expected = dataclasses.replace(
-                        plain, end=dataclasses.replace(plain.end, unconfirmed="not seen")
-                    )
-                assert read == expected, (base.end, name, state)
-                found = cf.read_started(SID, cid, tmp_path)
-                if name == cf.STARTED_NAME and state in ("good", "newer"):
-                    assert found == Started(4242, 4242, 1.0, 5, "b")
-                else:
-                    assert found is None, (name, state)
-                checked += 1
-    assert checked > 400
+    for state in ("good", "newer", *spoilers):
+        cid = f"cmd-20261013T101500Z-{next(serial):012x}"
+        command = dataclasses.replace(base, id=cid)
+        _record_all(command, tmp_path)
+        plain = _command(cf.read_command(SID, cid, tmp_path))
+        obj = {**good, "id": cid}
+        path = _dir(tmp_path, cid) / name
+        if state == "good":
+            _put(path, obj)
+        elif state == "newer":
+            _put(path, {**obj, "format": cf.FORMAT + 1})
+        else:
+            spoilers[state](path, obj)
+            for leftover in (tmp_path / "elsewhere.json",):
+                leftover.unlink(missing_ok=True)
+        read = _command(cf.read_command(SID, cid, tmp_path))
+        assert not read.is_open and read.unsupervised is None and not read.owes_row
+        expected = plain
+        adds = (
+            name == cf.UNCONFIRMED_NAME
+            and state in ("good", "newer")
+            and plain.end is not None
+            and plain.end.outcome == EndUnknown()
+            and base.end is None
+        )
+        if adds:
+            assert plain.end is not None
+            expected = dataclasses.replace(
+                plain, end=dataclasses.replace(plain.end, unconfirmed="not seen")
+            )
+        assert read == expected, (base.end, name, state)
+        found = cf.read_started(SID, cid, tmp_path)
+        if name == cf.STARTED_NAME and state in ("good", "newer"):
+            assert found == Started(4242, 4242, 1.0, 5, "b")
+        else:
+            assert found is None, (name, state)
+
+
+def test_the_side_file_cases_are_every_base_beside_both_side_files(tmp_path: Path) -> None:
+    """
+    The cases above, counted: both side files, beside every outcome and the two
+    open states, in good, newer and every spoiled state. Nothing the count reads
+    writes a file.
+    """
+    assert set(_GOOD_SIDE_FILES) == {cf.STARTED_NAME, cf.UNCONFIRMED_NAME}
+    assert len(_SIDE_FILE_BASES) == 2 + len(ENDED)
+    states = 2 + len(_spoilers(tmp_path))
+    assert len(_SIDE_FILE_BASES) * len(_GOOD_SIDE_FILES) * states > 400
 
 
 @pytest.mark.parametrize("pid, pgid", [(0, 5), (1, 5), (5, 0), (5, 1), (-3, 5), (5, -5)])
