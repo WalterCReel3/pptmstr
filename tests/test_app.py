@@ -9225,8 +9225,12 @@ def test_every_frame_looks_for_an_approval_that_started_nothing_and_reads_the_lo
     assert main.index("the_loop_returned()") < main.index("_shut_down(state)")
 
 
+# The handler only records, and the loop looks, as the window loop looks at
+# app_shall_exit. An Event set from the handler can deadlock: the handler runs
+# on the main thread between two bytecodes, which may be inside the wait on that
+# same Event with its lock held, and set() then waits for that lock for ever.
 _SIGNALLED = """
-import os, sys, threading, time
+import os, sys, time
 from pathlib import Path
 from pptmstr import app, commandfile, commandrun
 from pptmstr.command import Command, Run
@@ -9236,23 +9240,26 @@ asked = Command(id="cmd-20261013T101500Z-00000000beef", asker=("s", None), asked
                 reason="", expects="", asked_at=1.0)
 commandfile.write_request(asked, root)
 runner = commandrun.Runner(lambda ended: None, root=root, grace_s=0.3, drain_s=0.2)
-asked_to_exit = threading.Event()
+asked_to_exit = []
 if handled:
-    app.exit_on_signals(asked_to_exit.set)
+    app.exit_on_signals(lambda: asked_to_exit.append(1))
 import dataclasses
 runner.start(dataclasses.replace(asked, run=Run("sleep 1000 & wait", shell, cwd, 600.0, 2.0)))
 while commandfile.read_started("s", asked.id, root) is None:
     time.sleep(0.01)
 print("ready", flush=True)
 try:
-    while not asked_to_exit.wait(0.05):   # the window loop
-        pass
+    while not asked_to_exit:   # the window loop
+        time.sleep(0.05)
 finally:
     runner.close(5.0)
 """
 
 
-@pytest.mark.parametrize("handled", [False, True])
+# The handled case is serial: it ends on Gone, which holds only while nothing
+# else that cannot be read is started in this process's control group
+# (tests/test_commandrun.py, ALONE_IN_ITS_GROUP).
+@pytest.mark.parametrize("handled", [False, pytest.param(True, marks=pytest.mark.serial)])
 def test_a_sigterm_or_sighup_closes_the_runner_and_without_the_handler_orphans_the_command(
     tmp_path: Path, command_mark: str, handled: bool
 ) -> None:
@@ -9368,6 +9375,10 @@ def _tagged_orphan(commands: _Commands, command_mark: str, script: str, old: str
     return orphan, started, child
 
 
+# Serial: what it says of the orphan holds only while nothing else that cannot
+# be read is started in this process's control group (tests/test_commandrun.py,
+# ALONE_IN_ITS_GROUP).
+@pytest.mark.serial
 def test_a_command_whose_shell_died_owes_a_row_and_holds_its_session_by_its_tag(
     commands: _Commands, command_mark: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

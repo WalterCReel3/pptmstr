@@ -62,6 +62,17 @@ from pptmstr.commandrun import (
 
 MARK = "PPTMSTR_TEST_COMMANDRUN"
 
+# Serial, for a test whose exact answer holds only while no other process that
+# cannot be read is started in this process's control group. commandrun counts
+# every such process started since the shell as tied to the command
+# (``_tagged``), as its docstring says it must: one makes ``Gone`` an
+# ``Unidentified`` and adds to ``End.unreadable`` and the remarks. Every worker
+# of a parallel run is in the same group, and its tests start such processes
+# (``env -i``, an undumpable child, any process in the middle of its exec).
+# Measured: these tests fail with a loop of ``env -i sleep`` running beside them
+# and pass without it.
+ALONE_IN_ITS_GROUP = pytest.mark.serial
+
 FAKE_SHELL = """#!/bin/sh
 printf '%s\\0' "$0" "$@" > "$ARGV_OUT"
 exec /bin/sh -c "$3"
@@ -258,6 +269,16 @@ TREE = "sh -c 'echo child $$; exec sleep 1000' & echo shell $$; wait"
 # to each job: a process group of its own, inside the shell's session. ``inner``
 # is in that group, and a signal to the shell's group does not reach it.
 OWN_GROUP = "echo shell $$; timeout 600 sh -c 'echo inner $$; exec sleep 1000'; echo after"
+# Put after the ``&`` that starts ``setsid``: the shell goes on only once the
+# process ``$!`` names has left its session (field 6 of /proc/<pid>/stat).
+# ``setsid`` runs when that child is scheduled, not when ``&`` returns, and a
+# shell that ended first would have the runner end it as a leftover of its own.
+_UNTIL_IT_LEFT = "while [ \"$(cut -d ' ' -f 6 /proc/$!/stat)\" = $$ ]; do sleep 0.01; done; "
+# A child that ignores TERM, and, put after its ``&``, the wait for it to: the
+# trap is set when the child runs, and a shell that ended first would have the
+# runner TERM a child that did not yet ignore it.
+_DEAF = "sh -c 'trap \"\" TERM; : > deaf; echo deaf $$; exec sleep 1000'"
+_UNTIL_DEAF = "while [ ! -e deaf ]; do sleep 0.01; done; "
 DEAF_TREE = (
     "trap '' TERM; sh -c 'trap \"\" TERM; echo child $$; sleep 1000 & echo grandchild $!; wait' &"
     " echo shell $$; wait"
@@ -562,7 +583,7 @@ def test_a_command_that_exits_by_itself_is_exited_whatever_was_asked_after(h: Ha
 
 def test_a_process_that_left_the_group_holding_the_pipe_is_not_waited_for(h: Harness) -> None:
     began = time.monotonic()
-    command = h.start("setsid sleep 1000 & echo held $!; echo done")
+    command = h.start(f"setsid sleep 1000 & {_UNTIL_IT_LEFT}echo held $!; echo done")
     (held,) = h.pids(command, "held")
     ended = h.wait(command)
     took = time.monotonic() - began
@@ -583,7 +604,8 @@ def test_a_child_that_leaves_the_session_survives_the_kill(h: Harness) -> None:
     session, and the session is all a timeout, a stop or a quit can signal.
     """
     command = h.start(
-        "setsid sleep 1000 >/dev/null 2>&1 & echo escaped $!; echo shell $$; sleep 1000",
+        f"setsid sleep 1000 >/dev/null 2>&1 & {_UNTIL_IT_LEFT}echo escaped $!; echo shell $$;"
+        " sleep 1000",
         timeout_s=0.4,
     )
     escaped, shell = h.pids(command, "escaped", "shell")
@@ -709,7 +731,7 @@ def test_what_was_left_in_the_background_is_given_the_grace_to_clean_up(h: Harne
 
 
 def test_a_leftover_deaf_to_term_is_killed_and_the_end_waits_for_it(h: Harness) -> None:
-    command = h.start("sh -c 'trap \"\" TERM; echo deaf $$; exec sleep 1000' & sleep 0.3")
+    command = h.start(f"{_DEAF} & {_UNTIL_DEAF}sleep 0.3")
     (deaf,) = h.pids(command, "deaf")
     ended = h.wait(command)
     assert _outcome(ended) == Exited(0) and _end(ended).leftover == 1
@@ -725,7 +747,7 @@ def test_a_stop_while_the_leftovers_are_being_ended_is_recorded_and_nothing_is_l
     exit. What it asked for -- nothing of the command left -- is already
     happening, and has happened by the time the end is reported.
     """
-    command = h.start("sh -c 'trap \"\" TERM; echo deaf $$; exec sleep 1000' & echo done")
+    command = h.start(f"{_DEAF} & {_UNTIL_DEAF}echo done")
     (deaf,) = h.pids(command, "deaf")
     time.sleep(0.15)
     assert h.ended == [], "the command ended before its leftovers had been given the grace"
@@ -871,6 +893,7 @@ def test_a_group_not_seen_to_go_after_kill_is_not_recorded_as_plainly_ended(
 # -- the property: a process can be found from its record -------------------------
 
 
+@ALONE_IN_ITS_GROUP
 def test_the_process_is_on_record_as_soon_as_it_exists_and_can_be_found_by_it(
     h: Harness,
 ) -> None:
@@ -2480,6 +2503,7 @@ def test_the_value_is_taken_out_wherever_the_pieces_fall() -> None:
         commandrun._Withheld(b"short")
 
 
+@ALONE_IN_ITS_GROUP
 def test_a_process_started_with_what_the_records_hold_is_not_taken_for_the_command(
     mark: str,
 ) -> None:
@@ -2556,6 +2580,7 @@ def _kill(pid: int) -> None:
         time.sleep(0.01)
 
 
+@ALONE_IN_ITS_GROUP
 def test_a_process_that_left_and_cannot_be_read_is_never_gone_while_its_group_ties_it(
     mark: str, tmp_path: Path
 ) -> None:
@@ -2603,6 +2628,7 @@ def test_a_process_that_left_and_cannot_be_read_is_never_gone_while_its_group_ti
     assert commandrun.survivor(started) == Gone(commandrun.NOTHING_ALIVE + commandrun.NONE_TAGGED)
 
 
+@ALONE_IN_ITS_GROUP
 def test_the_end_of_a_run_counts_what_it_could_not_read_beside_it(h: Harness) -> None:
     script = h.cwd / "unreadable.py"
     script.write_text(_UNREADABLE)
@@ -2620,6 +2646,7 @@ def test_the_end_of_a_run_counts_what_it_could_not_read_beside_it(h: Harness) ->
         _kill(out)
 
 
+@ALONE_IN_ITS_GROUP
 def test_a_shell_killed_with_its_children_alive_is_a_survivor_and_its_kill_line_ends_exactly_them(
     mark: str,
 ) -> None:
@@ -2675,6 +2702,7 @@ def test_a_shell_killed_with_its_children_alive_is_a_survivor_and_its_kill_line_
         _end_all(process, [a, b])
 
 
+@ALONE_IN_ITS_GROUP
 def test_a_child_started_with_an_empty_environment_is_not_found_and_is_not_said_to_be_gone(
     mark: str,
 ) -> None:
@@ -2726,6 +2754,7 @@ def test_a_child_started_with_an_empty_environment_is_not_found_and_is_not_said_
     assert commandrun.survivor(started) == Gone(commandrun.NOTHING_ALIVE + commandrun.NONE_TAGGED)
 
 
+@ALONE_IN_ITS_GROUP
 @pytest.mark.parametrize("how", ["stop", "timeout", "exit", "close", "abandon"])
 def test_a_process_that_left_the_session_is_counted_at_the_end_and_never_signalled(
     h: Harness, how: str
@@ -2736,7 +2765,7 @@ def test_a_process_that_left_the_session_is_counted_at_the_end_and_never_signall
     """
     tail = "" if how == "exit" else "; sleep 1000"
     command = h.start(
-        f"setsid sleep 1000 >/dev/null 2>&1 & echo escaped $!; echo shell $${tail}",
+        f"setsid sleep 1000 >/dev/null 2>&1 & {_UNTIL_IT_LEFT}echo escaped $!; echo shell $${tail}",
         timeout_s=0.5 if how == "timeout" else 30.0,
     )
     escaped, shell = h.pids(command, "escaped", "shell")
@@ -2851,6 +2880,7 @@ def test_a_survivor_with_its_shell_names_what_left_its_session_too(mark: str) ->
         _end_all(process, [out, a])
 
 
+@ALONE_IN_ITS_GROUP
 def test_what_is_left_is_only_outside_the_session_and_is_still_a_survivor(mark: str) -> None:
     """
     The shell and its session are gone and a process that left it is not.
@@ -3125,6 +3155,7 @@ def test_a_tagged_process_that_joined_another_group_does_not_put_that_group_on_t
         _end_all(agent, [bystander, own])
 
 
+@ALONE_IN_ITS_GROUP
 def test_a_process_that_carried_the_tag_before_the_shell_started_is_not_the_commands(
     mark: str,
 ) -> None:

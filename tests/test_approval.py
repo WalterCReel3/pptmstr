@@ -2747,8 +2747,12 @@ def test_the_queue_row_says_a_write_reaches_pptmstrs_own_records(tmp_path: Path)
     assert summarize("Write", write, session_id=MINE, cwd=str(tmp_path)) == (
         "pptmstr's own records · Write notes.json"
     )
-    assert summarize("Write", {"file_path": str(tmp_path / "x")}, cwd=str(tmp_path)) == (
-        f"Write {tmp_path / 'x'}"
+    # As wide as the row: tmp_path's length is the runner's (an xdist worker's
+    # is longer by its own directory), and the default width cuts a long one.
+    elsewhere = f"Write {tmp_path / 'x'}"
+    assert (
+        summarize("Write", {"file_path": str(tmp_path / "x")}, len(elsewhere), cwd=str(tmp_path))
+        == elsewhere
     )
 
 

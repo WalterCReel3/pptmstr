@@ -2802,10 +2802,16 @@ def test_a_library_that_is_found_and_cannot_draw_fails_the_tests_that_draw_and_d
     from tests.conftest import child_environment, refused_library, without_the_library
 
     one = "tests/test_typeset_views.py::test_the_bold_monospace_is_registered_and_used"
+    runs = iter(("found", "none"))
 
     def run(environ: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        # A basetemp of its own: the default is under the directory every pytest
+        # of this user shares, whose old entries each run removes, so a child
+        # beside a parallel run can lose that race and fail.
+        basetemp = tmp_path / f"basetemp-{next(runs)}"
         return subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", one],
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+            + ["--basetemp", str(basetemp), one],
             capture_output=True,
             text=True,
             timeout=120,

@@ -327,11 +327,15 @@ def test_a_call_with_no_diff_is_none_and_stays_none_cheaply(
     assert [cache.view(key) for key in ("k", "none", "tuple", "list", "model")] == [None] * 5
 
 
-def test_a_diff_draws_its_gutter_and_both_sides(seam: Any, tmp_path: Path) -> None:
-    target = tmp_path / "a.py"
-    target.write_text("foo")
+def test_a_diff_draws_its_gutter_and_both_sides(
+    seam: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A relative path: the header above the view is wrapped to its width, and
+    # ``label`` below allows it one line. tmp_path's length is the runner's.
+    monkeypatch.chdir(tmp_path)
+    Path("a.py").write_text("foo")
     cache = typeset.ViewCache()
-    call = pending("Edit", {"file_path": str(target), "old_string": "foo", "new_string": "bar"})
+    call = pending("Edit", {"file_path": "a.py", "old_string": "foo", "new_string": "bar"})
     drawn: list[int] = []
 
     def body(**given: Any) -> None:

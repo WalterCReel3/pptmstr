@@ -722,6 +722,10 @@ def test_at_a_display_scale_typeset_text_and_the_chrome_are_one_pixel_height(
 
         return _in_a_frame(seam, body)
 
+    # Twice: ``keep_baked_sizes`` does nothing before a context's first frame,
+    # so on a context no earlier test drew on, only the second frame records
+    # the size before the change, which the change is then measured against.
+    drawn()
     drawn()
     epoch = gate.epoch()
     try:

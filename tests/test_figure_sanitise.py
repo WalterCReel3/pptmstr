@@ -857,6 +857,9 @@ def test_within_bound_fails_what_is_slow_every_time_and_passes_one_slow_run() ->
         within_bound(lambda: time.sleep(0.2), 0.05)
 
 
+# Serial: the bound is wall-clock time, and the worst case takes about half of
+# it on a machine to itself. Beside a worker on every core it overruns it.
+@pytest.mark.serial
 @pytest.mark.parametrize("svg", WORST.values(), ids=WORST.keys())
 def test_the_worst_inputs_at_the_byte_cap_sanitise_within_the_bound(svg: str) -> None:
     assert len(svg.encode()) <= MAX_INPUT_BYTES
