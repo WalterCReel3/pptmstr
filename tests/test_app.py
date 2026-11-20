@@ -9019,6 +9019,10 @@ def test_what_a_commands_own_directory_cost_its_environment_is_logged_at_its_end
     ]
 
 
+# The handler only counts, and the loop says so. A handler that printed could
+# run while the main thread was still inside print("ready"), after the line was
+# out but before the stdout buffer was released, and the nested write raises
+# "reentrant call inside <_io.BufferedWriter>". A loaded machine hits that window.
 _SIGNALLED_TWICE = """
 import signal, sys, time
 from pptmstr import app
@@ -9026,11 +9030,14 @@ from pptmstr import app
 asked = []
 def request():
     asked.append(1)
-    print("asked", len(asked), flush=True)
 
 app.exit_on_signals(request)
 print("ready", flush=True)
+said = 0
 while True:      # a shutdown that has hung
+    if len(asked) > said:
+        said = len(asked)
+        print("asked", said, flush=True)
     time.sleep(0.05)
 """
 
