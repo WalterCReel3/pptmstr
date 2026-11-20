@@ -151,7 +151,7 @@ it duplicates nothing.
 ## Seen while drawing this, not asked
 
 - The rail's empty text says `start one from the launcher below.`, but the launcher became
-  a modal (`planning/2026-08-10-launcher-as-a-modal.md`) and nothing is below. Every variant
+  a modal (`planning/archive/2026-08-10-launcher-as-a-modal.md`) and nothing is below. Every variant
   is drawn under that line as it stands. Any of them should replace it.
 - `rail.header_counts` says `1 sessions` (visible in every one-session cell).
 - `projects.project_key` raises `ValueError` on a cwd that holds a NUL, through

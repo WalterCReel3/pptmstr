@@ -954,6 +954,12 @@ def test_the_constructs_the_tracker_does_not_model_are_refused_for_a_character(
     assert not is_read_only(body)
 
 
+# The biased sample the property and its two controls below are all run over.
+# Each is a whole pass of bash over every candidate, so each is its own test;
+# the sample is seeded, and the three read the same one.
+_BIASED_COUNT = 600
+
+
 def test_no_generated_command_runs_what_the_classifier_did_not_refuse() -> None:
     """
     The property, over a generated corpus weighted toward `#`, quotes, newlines
@@ -963,13 +969,14 @@ def test_no_generated_command_runs_what_the_classifier_did_not_refuse() -> None:
     Bash is the oracle and nothing a candidate spells can start: the probe
     gives it an empty `PATH` and reads back the vectors bash tried to run.
 
-    The two controls are what make the zero mean something. Each switches one
-    rule off and requires the same sample to then show a hole, so a generator
-    that stopped producing comments, or joins, fails here instead of passing
-    quietly. `make verify` runs ten times this sample plus the exhaustive arm.
+    The two controls are what make the zero mean something, and are the two
+    tests after this one. Each switches one rule off and requires the same
+    sample to then show a hole, so a generator that stopped producing comments,
+    or joins, fails there instead of this passing quietly. `make verify` runs
+    ten times this sample plus the exhaustive arm.
     """
     probe = _probe()
-    sample = probe.biased(600)
+    sample = probe.biased(_BIASED_COUNT)
 
     result = probe.check(sample)
     assert result.holes == [], f"bash ran a refused command and we admitted it: {result.holes}"
@@ -978,6 +985,14 @@ def test_no_generated_command_runs_what_the_classifier_did_not_refuse() -> None:
         result.exercised >= 200
     ), f"only {result.exercised} of {result.total} candidates reached the requirement"
 
+
+def test_the_generated_sample_shows_a_hole_with_comments_unreported() -> None:
+    """
+    The comment rule's control for the property above, over the same sample.
+    """
+    probe = _probe()
+    sample = probe.biased(_BIASED_COUNT)
+
     real_scan = shellscan._scan
     with mock.patch.object(shellscan, "_scan", lambda command: (real_scan(command)[0], None)):
         blind = probe.check(sample)
@@ -985,6 +1000,14 @@ def test_no_generated_command_runs_what_the_classifier_did_not_refuse() -> None:
         "with comments unreported the sample shows no hole, so it has stopped "
         "containing the case the comment rule is for"
     )
+
+
+def test_the_generated_sample_shows_a_hole_with_a_backslash_newline_admitted() -> None:
+    """
+    The continuation rule's control for the property above, over the same sample.
+    """
+    probe = _probe()
+    sample = probe.biased(_BIASED_COUNT)
 
     with mock.patch.object(shellscan, "_CONTINUATION", "\0"):
         unjoined = probe.check(sample)
@@ -2092,6 +2115,12 @@ def test_a_glob_is_refused_for_exactly_the_commands_whose_flags_are_restricted()
     assert refusal("git *") == "git * is not in the read-only table"
 
 
+# The planted arm's sample, a seventh of it: the property, its control and the
+# empty-directory contrast below each run bash over all of it, so each is its
+# own test over the same slice.
+_GLOBBED_STRIDE = 7
+
+
 def test_no_glob_among_planted_names_runs_what_the_classifier_did_not_refuse() -> None:
     """
     The probe's planted arm, a seventh of it: every candidate is run by bash in
@@ -2099,12 +2128,13 @@ def test_no_glob_among_planted_names_runs_what_the_classifier_did_not_refuse() -
     bash built after expanding must be one `refusal` admits alone, or the
     candidate must have been refused.
 
-    The control switches the glob rule off and requires the same sample to show
-    holes, so a generator that stopped producing an expanding glob behind a
-    restricted command fails here. `make verify` runs all of it.
+    The control, the next test, switches the glob rule off and requires the
+    same sample to show holes, so a generator that stopped producing an
+    expanding glob behind a restricted command fails there. `make verify` runs
+    all of it.
     """
     probe = _probe()
-    sample = probe.globbed()[::7]
+    sample = probe.globbed()[::_GLOBBED_STRIDE]
 
     result = probe.check(sample, probe.PLANTED)
     assert result.holes == [], f"bash ran a refused command and we admitted it: {result.holes}"
@@ -2116,6 +2146,14 @@ def test_no_glob_among_planted_names_runs_what_the_classifier_did_not_refuse() -
     assert any(c.startswith("git log -- ") for c in admitted)
     assert any(c.startswith("ls ") for c in admitted)
 
+
+def test_the_planted_sample_shows_a_hole_for_each_restricted_command_with_globs_admitted() -> None:
+    """
+    The glob rule's control for the property above, over the same sample.
+    """
+    probe = _probe()
+    sample = probe.globbed()[::_GLOBBED_STRIDE]
+
     with mock.patch.object(shellscan, "_GLOB", frozenset()):
         blind = probe.check(sample, probe.PLANTED)
     opened = {candidate.split(" ")[0] for _hazards, candidate in blind.holes}
@@ -2124,7 +2162,14 @@ def test_no_glob_among_planted_names_runs_what_the_classifier_did_not_refuse() -
         f"restricted command: {sorted(opened)}"
     )
 
-    # In an empty directory the same strings expand to nothing, which is why
-    # the other arms could not see this.
+
+def test_the_planted_sample_in_an_empty_directory_shows_no_hole() -> None:
+    """
+    In an empty directory the same strings expand to nothing, which is why
+    the other arms could not see what the planted names show.
+    """
+    probe = _probe()
+    sample = probe.globbed()[::_GLOBBED_STRIDE]
+
     empty = probe.check(sample)
     assert empty.holes == []

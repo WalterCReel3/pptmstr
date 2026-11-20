@@ -275,8 +275,8 @@ def failed(failure: BaseException) -> None:
     """
     Keep what was raised as the reason, and stop offering the library to draw with.
 
-    For this module, and for the one caller that stands where an exception may
-    not pass: ``theme``, inside hello_imgui's font callback.
+    For this module, and for ``load_fonts_in_callback``, which stands where an
+    exception may not pass: inside hello_imgui's font callback.
     """
     _GATE.failure = f"{type(failure).__name__}: {failure}"
 
@@ -1291,6 +1291,39 @@ def load_fonts(bold: Path | None = None) -> bool:
         except Exception:
             pass
     return can_draw()
+
+
+def load_application_fonts() -> None:
+    """
+    pptmstr's hello_imgui ``load_additional_fonts``: the chrome's faces
+    (``theme.load_fonts``), then the library's, last, and only behind a body face
+    that loaded.
+
+    Last because the library puts a proportional face and a second copy of
+    Inconsolata without the icons on the atlas, and either one as Fonts[0] would
+    become the font of every widget; with no body face the library's first would
+    be Fonts[0] for the same reason. Whatever ``Settings.typeset`` says: the load
+    is paid at launch so that switching it on later is a setting, not a load into
+    an atlas in use. Here and not in ``theme``, which is beneath
+    ``ui`` and does not import it. ``theme.load_fonts`` is read when this runs, so
+    a probe that wraps it (``scripts/font_raster_probe.py``) is called.
+    """
+    ui_theme.load_fonts()
+    if ui_theme.face(ui_theme.Face.BODY) is not None:
+        load_fonts_in_callback(ui_theme.BOLD_FILE)
+
+
+def load_fonts_in_callback(bold: Path) -> None:
+    """
+    ``load_fonts`` where an exception may not pass: inside hello_imgui's font
+    callback, which an escaping exception takes the application down from.
+    ``load_fonts`` is not meant to raise; one that does all the same is the gate's
+    failure, so the library is not offered and the Text menu says why.
+    """
+    try:
+        load_fonts(bold)
+    except Exception as failure:
+        failed(failure)
 
 
 def _register(bold: Path | None, prose: Path | None) -> None:

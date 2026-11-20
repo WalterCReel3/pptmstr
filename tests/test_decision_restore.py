@@ -1,7 +1,7 @@
 """
 Where a restore places a logged decision, and why it leaves one out.
 
-The same rules as a task's and a concern's (``store._restored``): a decision is
+The same rules as a task's and a concern's (``store.restore._restored``): a decision is
 placed when its id is free and its asker is of the session being restored; the
 store's own decision under the id is left alone; a store whose decisions for the
 session are not the log's takes nothing from the board. The round trip from the

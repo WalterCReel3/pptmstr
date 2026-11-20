@@ -1,0 +1,274 @@
+scratch: /tmp/claude-1000/b1-readback-ykizbe0z
+python 3.11.2
+1. proto bodies against HEAD's, after the stated substitutions
+  ok   decode: body equals HEAD's
+  ok   read: body equals HEAD's
+2. a board log HEAD wrote: every kind, awkward values
+  ok   what this build wrote is byte-for-byte golden[board] (HEAD 66af79e's) -- 133 files
+  ok   HEAD read is whole and returns what was appended (133 records)
+  ok   proposed read equals HEAD read (records and damage)
+  ok   reading changed no file
+  ok   each record read back re-encodes to its file's bytes
+  ok   a log appended from the proposed read is byte-for-byte HEAD's (names and bytes) -- 133 files, 23538 bytes
+  ok   every Known kind and RecordingStopped and Unrecognised appear -- 23
+3. hand-written files no current append produces (older or foreign writers)
+  ok   proposed read equals HEAD read -- HEAD: 4 records, damage None
+4. damaged board logs: the same break and the same words
+  ok   torn -- damage Damage(ordinal=1, reason='no terminator: the write did not finish', unread=1)
+  ok   missing ordinal -- damage Damage(ordinal=1, reason='missing', unread=2)
+  ok   not json -- damage Damage(ordinal=1, reason='not JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)', unread=0)
+  ok   not an object -- damage Damage(ordinal=0, reason='not a JSON object', unread=0)
+  ok   no kind -- damage Damage(ordinal=0, reason='no kind', unread=0)
+  ok   time not a number -- damage Damage(ordinal=0, reason='at: not a number', unread=0)
+  ok   time too large -- damage Damage(ordinal=0, reason='at: too large to be a time', unread=0)
+  ok   field of the wrong shape -- damage Damage(ordinal=0, reason='task-claimed.task_id: not text', unread=0)
+  ok   required field missing -- damage Damage(ordinal=0, reason='task-claimed: no task_id', unread=0)
+  ok   not utf-8 -- damage Damage(ordinal=0, reason="UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 50: invalid start byte", unread=0)
+  ok   nested too deep -- damage Damage(ordinal=0, reason='not JSON: nested too deeply to parse', unread=0)
+  ok   over the size limit -- damage Damage(ordinal=0, reason='OSError: over the 1048576 bytes it may be', unread=0)
+  ok   a symlink under a record's name -- damage Damage(ordinal=1, reason='OSError: [Errno 40] Too many levels of symbolic links: "/tmp/claude-1000/b1-readback-ykizbe0z/damage/a symlink under a record\'s name/00000001.json"', unread=0)
+  ok   a directory under a record's name -- damage Damage(ordinal=1, reason='OSError: not a regular file', unread=0)
+  ok   a fifo under a record's name -- damage Damage(ordinal=1, reason='OSError: not a regular file', unread=0)
+  ok   temp files and foreign names beside -- no damage
+  ok   unlistable -- damage Damage(ordinal=0, reason="PermissionError: [Errno 13] Permission denied: '/tmp/claude-1000/b1-readback-ykizbe0z/damage/unlistable'", unread=0)
+5. channel logs HEAD wrote, through FileChannels.append
+  ok   proposed channel read body is HEAD's FileChannels.read but for the path
+  ok   what this build wrote is byte-for-byte golden[channel] (HEAD 66af79e's) -- 19 files
+  ok   HEAD read returns the facts appended (19)
+  ok   proposed read equals HEAD read
+  ok   each file is the fact's encoding, byte for byte
+  ok   reading changed no file
+  ok   judge agrees -- Short(reason='18 record(s) about a link the log never created; its writer stopped: stopped \udc80')
+   damaged channel logs
+  ok   members not a list -- record 1 cannot be read: link-created.members: not a list of text, and 1 after it are withheld
+  ok   charter missing -- record 1 cannot be read: link-created.charter: not text, and 1 after it are withheld
+  ok   time not a number -- record 1 cannot be read: at: not a number, and 1 after it are withheld
+  ok   torn -- record 1 cannot be read: no terminator: the write did not finish, and 1 after it are withheld
+6. board records in a channel's directory (the predicted difference)
+  ok   same facts by type, kind and time
+  ok   judge agrees -- Short(reason='2 record(s) of a kind this build does not define (task-claimed); 1 record(s) about a link the log never created')
+  ok   proposed: each board record is carried as the file's own text
+  ok   HEAD: the non-canonical one is carried re-encoded, not as written (the predicted difference)
+  diff fact 2: HEAD Unrecognised.text='{"kind": "task-claimed", "at": 2.0, "task_id": "t", "by": "b", "by_id": []}'
+             proposed      text='{"at": 2, "kind": "task-claimed", "task_id": "t", "by": "b", "extra": 1}'
+             file bytes          ='{"at": 2, "kind": "task-claimed", "task_id": "t", "by": "b", "extra": 1}'
+6b. a malformed board record in a channel's directory: read, judge, owes_close, sweep
+  owed  skeptic's record alone
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=None  sweep appended=[]  judge=Short
+  WRITE created, then the skeptic's record
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE the skeptic's record, then created
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  read  created, skeptic's record, closed
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=False sweep appended=[]  judge=Short
+  WRITE unpaired creation, then the skeptic's record
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  read  created, skeptic's record, stop marker
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=False sweep appended=[]  judge=Short
+  same  created, a well-formed task-claimed
+  same  created, a malformed recording-stopped (reason 5)
+  same  created, a malformed board record with no at
+  same  created, an unknown kind
+  WRITE created, bare task-declared
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, task-declared with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed task-declared
+  WRITE created, bare task-claimed
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, task-claimed with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed task-claimed
+  WRITE created, bare task-released
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, task-released with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed task-released
+  WRITE created, bare task-reclaimed
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, task-reclaimed with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed task-reclaimed
+  WRITE created, bare task-version-handed
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, task-version-handed with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed task-version-handed
+  WRITE created, bare task-completed
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, task-completed with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed task-completed
+  WRITE created, bare task-closed
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, task-closed with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed task-closed
+  WRITE created, bare task-withdrawn
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, task-withdrawn with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed task-withdrawn
+  WRITE created, bare task-amended
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, task-amended with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed task-amended
+  WRITE created, bare task-writes-accrued
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, task-writes-accrued with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed task-writes-accrued
+  WRITE created, bare concern-posted
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, concern-posted with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed concern-posted
+  WRITE created, bare peer-posted
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, peer-posted with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed peer-posted
+  WRITE created, bare concern-edited
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, concern-edited with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed concern-edited
+  WRITE created, bare concern-withdrawn
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, concern-withdrawn with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed concern-withdrawn
+  WRITE created, bare peer-retracted
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, peer-retracted with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed peer-retracted
+  WRITE created, bare concerns-delivered
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, concerns-delivered with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed concerns-delivered
+  WRITE created, bare decision-raised
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, decision-raised with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed decision-raised
+  WRITE created, bare decision-answered
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, decision-answered with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed decision-answered
+  WRITE created, bare decision-dismissed
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, decision-dismissed with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed decision-dismissed
+  WRITE created, bare decision-withdrawn
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, decision-withdrawn with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed decision-withdrawn
+  WRITE created, bare decision-delivered
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  WRITE created, decision-delivered with a field of the wrong shape
+            HEAD: damaged=True  owes_close=False sweep appended=[]  judge=Short
+        proposed: damaged=False owes_close=True  sweep appended=['link-closed(earlier)']  judge=Short
+  same  created, well-formed decision-delivered
+  46 of 73 variants differ in owes_close or in what the sweep writes
+  45 of 73 variants: the sweep appends a file under one path only
+    - created, then the skeptic's record
+    - the skeptic's record, then created
+    - unpaired creation, then the skeptic's record
+    - created, bare task-declared
+    - created, task-declared with a field of the wrong shape
+    - created, bare task-claimed
+    - created, task-claimed with a field of the wrong shape
+    - created, bare task-released
+    - created, task-released with a field of the wrong shape
+    - created, bare task-reclaimed
+    - created, task-reclaimed with a field of the wrong shape
+    - created, bare task-version-handed
+    - created, task-version-handed with a field of the wrong shape
+    - created, bare task-completed
+    - created, task-completed with a field of the wrong shape
+    - created, bare task-closed
+    - created, task-closed with a field of the wrong shape
+    - created, bare task-withdrawn
+    - created, task-withdrawn with a field of the wrong shape
+    - created, bare task-amended
+    - created, task-amended with a field of the wrong shape
+    - created, bare task-writes-accrued
+    - created, task-writes-accrued with a field of the wrong shape
+    - created, bare concern-posted
+    - created, concern-posted with a field of the wrong shape
+    - created, bare peer-posted
+    - created, peer-posted with a field of the wrong shape
+    - created, bare concern-edited
+    - created, concern-edited with a field of the wrong shape
+    - created, bare concern-withdrawn
+    - created, concern-withdrawn with a field of the wrong shape
+    - created, bare peer-retracted
+    - created, peer-retracted with a field of the wrong shape
+    - created, bare concerns-delivered
+    - created, concerns-delivered with a field of the wrong shape
+    - created, bare decision-raised
+    - created, decision-raised with a field of the wrong shape
+    - created, bare decision-answered
+    - created, decision-answered with a field of the wrong shape
+    - created, bare decision-dismissed
+    - created, decision-dismissed with a field of the wrong shape
+    - created, bare decision-withdrawn
+    - created, decision-withdrawn with a field of the wrong shape
+    - created, bare decision-delivered
+    - created, decision-delivered with a field of the wrong shape
+  ok   the skeptic's case: created, then {kind: task-claimed, at: 1} -- the proposed sweep appends a LinkClosed where HEAD's appends nothing (CONFIRMED when ok)
+
+0 failed

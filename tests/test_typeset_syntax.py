@@ -1064,7 +1064,21 @@ def test_what_a_cache_holds_is_at_most_what_it_weighs(
     other cache keeps nothing meanwhile, so that what is measured is this one.
     """
     import gc
+    import os
     import tracemalloc
+
+    # tracemalloc counts every thread of the process. An xdist worker takes the
+    # controller's messages on an execnet thread of its own, and what that
+    # allocates while this measures -- measured at about 4 KB in one window,
+    # in execnet/ and xdist/ -- is the size of the whole margin here. So the
+    # runner's own files, and tracemalloc's, are not counted.
+    runner = [
+        tracemalloc.Filter(False, f"*{os.sep}{name}{os.sep}*") for name in ("execnet", "xdist")
+    ]
+    runner.append(tracemalloc.Filter(False, tracemalloc.__file__))
+
+    def traced() -> int:
+        return sum(trace.size for trace in tracemalloc.take_snapshot().filter_traces(runner).traces)
 
     limit = 2**20
     language, code = _FENCES[fence]
@@ -1076,13 +1090,14 @@ def test_what_a_cache_holds_is_at_most_what_it_weighs(
     gc.collect()
     tracemalloc.start()
     try:
-        base = tracemalloc.get_traced_memory()[0]
+        traced()  # the filters' patterns, compiled and cached before the count starts
+        base = traced()
         n = 0
         while len(kept) == n or n < 10:
             syntax.block_spans(*_captioned(language, f"{n}\n{code}"), ACCENT, None, INKS)
             n += 1
         gc.collect()
-        held = tracemalloc.get_traced_memory()[0] - base
+        held = traced() - base
     finally:
         tracemalloc.stop()
     assert len(getattr(syntax, other)) == 0 and kept.held <= limit
@@ -1145,6 +1160,10 @@ def _modules_in_a_child(tmp_path: Any, modules: dict[str, str]) -> str:
     environ["PYTHONPATH"] = os.pathsep.join(filter(None, [root, environ.get("PYTHONPATH")]))
     done = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "tests.conftest", "-p", "no:cacheprovider"]
+        # A basetemp of its own: the default is under the directory every pytest
+        # of this user shares, whose old entries each run removes, so a child
+        # beside a parallel run can lose that race and fail.
+        + ["--basetemp", str(tmp_path / "basetemp")]
         + ["--rootdir", str(tmp_path), *sorted(modules)],
         cwd=tmp_path,
         env=environ,

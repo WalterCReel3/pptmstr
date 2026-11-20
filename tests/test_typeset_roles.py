@@ -159,23 +159,16 @@ def test_a_pane_is_switched_off_alone_and_the_master_switch_is_over_all(seam: An
     assert all(typeset.enabled(pane) for pane in Pane), "a pane left out is on"
 
 
-@pytest.mark.parametrize(
-    ("module", "pane"),
-    [
-        ("detail", Pane.DETAIL),
-        ("inbox", Pane.INBOX),
-        ("transcript_pane", Pane.CONTEXT),
-        ("board_pane", Pane.BOARD),
-        ("brief_pane", Pane.BRIEF),
-    ],
-)
-def test_each_pane_asks_whether_it_is_switched_on_for_itself(module: str, pane: Pane) -> None:
+@pytest.mark.parametrize("pane", list(Pane), ids=[pane.value for pane in Pane])
+def test_each_pane_asks_whether_it_is_switched_on_for_itself(pane: Pane) -> None:
     """
     A pane's switch is only a switch if the pane asks about it. One that asked the
     master switch, or about its neighbour, would pass every test of the seam and of
     its own two renderers. Read off the source: every call a pane makes to
     ``typeset.enabled`` names that pane.
     """
+    module = roles.PANE_DOCKS[pane].module
+    assert module is not None, pane
     source = (Path(typeset.__file__).parent.parent / f"{module}.py").read_text(encoding="utf-8")
     asked = [
         ast.unparse(node)
@@ -297,3 +290,17 @@ def test_choosing_what_is_already_in_force_moves_nothing(seam: None) -> None:
     epoch = typeset._STATE.epoch
     typeset.configure(typeset=True, proportional="droid", roles=dict(chosen), scale=1.0)
     assert typeset._STATE.epoch == epoch
+
+
+def test_each_typeset_switch_is_labelled_with_its_panes_title() -> None:
+    """
+    The settings dialog names each switch by the title its pane carries, and the
+    enum's values are the keys ``settings.typeset_panes`` persists: both pinned.
+    """
+    assert {pane.value: label for pane, label in typeset.PANE_LABELS.items()} == {
+        "detail": "DETAIL",
+        "inbox": "NEEDS YOU",
+        "context": "CONTEXT",
+        "board": "BOARD",
+        "brief": "BRIEF",
+    }

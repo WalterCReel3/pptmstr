@@ -8,7 +8,7 @@ what's driving me that direction."* Then, on scope: *"I don't want settings to g
 too fiddly."* ·
 **Read with:** `planning/2026-10-07-which-fonts-ship.md` §0, where the second sentence
 was first said — about line spacing, and it is the reason line spacing is not below —
-and `planning/2026-08-10-launcher-as-a-modal.md`, whose mechanics this reuses and in
+and `planning/archive/2026-08-10-launcher-as-a-modal.md`, whose mechanics this reuses and in
 two places departs from ·
 **Measured with:** imgui-bundle 1.92.900 (Dear ImGui 1.92.9) under
 `scripts/xvfb_shot.sh` (Xvfb, llvmpipe, 1500x900 window), driving the real application

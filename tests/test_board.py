@@ -13,17 +13,11 @@ import dataclasses
 
 import pytest
 
-from pptmstr import boardlog, bus
-from pptmstr.board import (
-    FOREIGN,
-    LEAD,
-    UNDELIVERABLE,
-    UNKNOWN,
-    board_concerns,
-    board_tasks,
-    has_board,
-    role_name,
-)
+from pptmstr import boardlog
+from pptmstr.addresses import FOREIGN, UNKNOWN, role_name
+from pptmstr.board.rows import UNDELIVERABLE, board_concerns, board_tasks, has_board
+from pptmstr.board.text import _board_text
+from pptmstr.channels.records import Charter
 from pptmstr.effects import ClaimSettled
 from pptmstr.intents import (
     AgentFinished,
@@ -40,7 +34,6 @@ from pptmstr.intents import (
 )
 from pptmstr.model import (
     AgentState,
-    Charter,
     ClaimRefusal,
     Concern,
     ConcernState,
@@ -50,6 +43,7 @@ from pptmstr.model import (
     Task,
     TaskState,
 )
+from pptmstr.naming import LEAD
 from pptmstr.store import Store
 
 S1 = "sess-1"
@@ -106,207 +100,7 @@ def team(store: Store, session: str) -> None:
     spawn(store, (session, "agent-qa"), agent_type="reviewer")
 
 
-# -- role naming ------------------------------------------------------------------
-
-
-def test_the_root_of_a_session_is_the_lead_not_its_task_prompt() -> None:
-    """
-    The driver emits the root's AgentSpawned with no agent_type, so the usual
-    `agent_type or task` idiom would render the operator's entire prompt as a
-    name. The lead is the recipient of nearly every concern, so this is the
-    common case, not an edge.
-    """
-    store = Store()
-    team(store, S1)
-
-    assert role_name(store.snapshot(), LEAD_1, S1) == LEAD
-    assert store.snapshot().get(LEAD_1).agent_type is None
-
-
-def test_a_role_reads_as_the_name_an_agent_would_address_it_by() -> None:
-    store = Store()
-    spawn(store, DEV_1, agent_type="Explore")
-
-    # The driver allocates the first agent of a type `agent_type.lower()`, so the
-    # address is "explore". A board naming it "Explore" would show a role nobody can
-    # reach under the string it displays.
-    assert role_name(store.snapshot(), DEV_1, S1) == "explore"
-
-
-def test_two_agents_in_one_role_do_not_read_as_one_agent() -> None:
-    """
-    The bus gives the second builder its own address, so a board rendering both as
-    "builder" would put one name on two agents -- and the concern log, which is the
-    audit trail of who said what, is the surface that loses the most by it.
-    """
-    store = Store()
-    spawn(store, LEAD_1, agent_type=None)
-    spawn(store, DEV_1, agent_type="builder")
-    spawn(store, (S1, "agent-dev2"), agent_type="builder")
-    spawn(store, QA_1, agent_type="reviewer")
-
-    snap = store.snapshot()
-    assert role_name(snap, DEV_1, S1) == "builder"
-    assert role_name(snap, (S1, "agent-dev2"), S1) == "builder-2"
-    assert role_name(snap, QA_1, S1) == "reviewer"
-
-
-def test_the_board_calls_an_agent_what_the_bus_routes_to() -> None:
-    """
-    Two implementations of one rule: the driver allocates the address on
-    SubagentStart, and the board recovers it from the spawn order in the snapshot.
-    Nothing but this test stops them drifting, and a board that disagrees is the
-    operator reading a name no one can write.
-
-    Driven through the real ``AgentSession`` and a real ``Store`` over one spawn
-    sequence -- including a wake, an off-template type and a capitalised one, which
-    are the three places the two derivations could part company.
-    """
-    from pptmstr.bridge import Bridge
-    from pptmstr.driver import AgentSession
-    from pptmstr.templates import FEATURE
-
-    bridge = Bridge()
-    session = AgentSession(bridge, task="t", template=FEATURE)
-    session.announce()
-
-    snap = _run_spawns(
-        session,
-        bridge,
-        ("a-1", "builder"),
-        ("a-2", "reviewer"),
-        ("a-3", "builder"),
-        # A wake, not a spawn: the same id starting again after it stopped.
-        ("a-1", "builder"),
-        ("a-4", "Explore"),
-        # The CLI resolves an agent_type the template never declared, and "lead" is
-        # the one that would divert every upward report if it were allocatable.
-        ("a-5", "lead"),
-    )
-
-    expected = {
-        "a-1": "builder",
-        "a-2": "reviewer",
-        "a-3": "builder-2",
-        "a-4": "explore",
-        "a-5": "lead-2",
-    }
-    _assert_agrees(snap, session, expected)
-    assert role_name(snap, session.node_id, session.session_id) == session.role_of(session.node_id)
-
-
-def test_the_board_steps_over_a_declared_name_the_way_the_bus_does(monkeypatch) -> None:
-    """
-    The half of the rule FEATURE cannot exercise: a template with a role literally
-    called "builder-2" pushes the second builder to "builder-3", and the board has to
-    step over it too or it renders the role's name onto an agent that is not it.
-
-    The template is registered because the board recovers it by name from the
-    registry -- the root record carries a name, not a shape.
-    """
-    from pptmstr import templates
-    from pptmstr.bridge import Bridge
-    from pptmstr.driver import AgentSession
-    from pptmstr.templates import Role, WorkTemplate
-
-    template = WorkTemplate(
-        name="collide",
-        description="d",
-        lead_prompt="p",
-        roles=(
-            Role(name="builder", description="d", prompt="p"),
-            Role(name="builder-2", description="d", prompt="p"),
-        ),
-    )
-    monkeypatch.setattr(templates, "BUILT_IN", (*templates.BUILT_IN, template))
-
-    bridge = Bridge()
-    session = AgentSession(bridge, task="t", template=template)
-    session.announce()
-    snap = _run_spawns(
-        session,
-        bridge,
-        ("a-1", "builder"),
-        ("a-2", "builder"),
-        ("a-3", "builder-2"),
-    )
-
-    _assert_agrees(snap, session, {"a-1": "builder", "a-2": "builder-3", "a-3": "builder-2"})
-
-
-def _run_spawns(session, bridge, *spawns: tuple[str, str]) -> Snapshot:
-    """Fire SubagentStart for each (agent_id, agent_type) and store what it emitted."""
-    import asyncio
-
-    async def start_them() -> None:
-        for agent_id, agent_type in spawns:
-            await session._subagent_start(_start_hook(agent_id, agent_type), None, None)
-
-    asyncio.run(start_them())
-    store = Store()
-    for intent in bridge.drain():
-        store.apply(intent)
-    return store.snapshot()
-
-
-def _assert_agrees(snap: Snapshot, session, expected: dict[str, str]) -> None:
-    for agent_id, address in expected.items():
-        node = (session.session_id, agent_id)
-        assert session.role_of(node) == address
-        assert role_name(snap, node, session.session_id) == address
-
-
-def _start_hook(agent_id: str, agent_type: str) -> dict[str, object]:
-    return {
-        "hook_event_name": "SubagentStart",
-        "agent_id": agent_id,
-        "agent_type": agent_type,
-        "session_id": "sess-driver",
-        "cwd": "/tmp",
-        "transcript_path": "/tmp/t.jsonl",
-    }
-
-
-def test_a_node_with_no_record_is_named_rather_than_crashing() -> None:
-    assert role_name(Snapshot.empty(), ("sess-9", "agent-ghost"), "sess-9") == UNKNOWN
-
-
-def test_another_sessions_root_does_not_read_as_this_boards_lead() -> None:
-    """
-    The worst case of the fleet-wide task map: `_pick_claim` applies no session
-    filter, so another session's root can hold a task on this board. Rendering it
-    as "lead" would put a foreign agent under the one name an operator would
-    never think to doubt.
-    """
-    store = Store()
-    team(store, S1)
-    team(store, S2)
-    snap = store.snapshot()
-
-    assert role_name(snap, LEAD_2, S1) == f"{LEAD}, {FOREIGN}"
-    # Still the lead of its own board. The name was never wrong, only the board.
-    assert role_name(snap, LEAD_2, S2) == LEAD
-
-
-def test_another_sessions_worker_is_named_and_qualified() -> None:
-    store = Store()
-    team(store, S1)
-    team(store, S2)
-    snap = store.snapshot()
-
-    # Named, not hidden: it is a real agent doing real work, and "builder" is
-    # accurate -- it just is not this team's builder.
-    assert role_name(snap, DEV_2, S1) == f"builder, {FOREIGN}"
-    assert role_name(snap, DEV_2, S2) == "builder"
-
-
-def test_the_foreign_qualifier_does_not_imply_a_broken_node() -> None:
-    """
-    It reads as a location, not a fault. An unknown node and a foreign one are
-    different conditions and must not collapse into one word.
-    """
-    assert FOREIGN == "another session"
-    assert UNKNOWN not in FOREIGN
+# -- across sessions --------------------------------------------------------------
 
 
 def test_a_worker_cannot_claim_a_task_from_another_session() -> None:
@@ -350,26 +144,6 @@ def test_an_anything_claim_does_not_reach_across_sessions_either() -> None:
     (settled,) = store.apply(TaskClaimRequested(DEV_2, request_id="k1"))
 
     assert isinstance(settled, ClaimSettled) and settled.task is None
-
-
-def test_a_foreign_owner_is_still_named_rather_than_rendered_as_a_local_one() -> None:
-    """
-    ``role_name``'s foreign handling now guards a state the reducer cannot enter,
-    and it stays. It is one function call from a board row, the renderer is what
-    a stale store or a future cross-session feature would meet first, and "lead" is
-    the one name an operator would never think to doubt.
-
-    Driven through ``role_name`` directly because the path that used to build this
-    state -- a cross-session claim -- is exactly what the test above pins shut.
-    """
-    store = Store()
-    team(store, S1)
-    team(store, S2)
-    snap = store.snapshot()
-
-    assert role_name(snap, DEV_2, S2) == "builder"
-    assert role_name(snap, DEV_2, S1) == f"builder, {FOREIGN}"
-    assert role_name(snap, LEAD_2, S1) == f"lead, {FOREIGN}"
 
 
 # -- scoping ----------------------------------------------------------------------
@@ -944,7 +718,7 @@ def test_an_unstated_basis_is_named_as_unstated_and_a_stated_one_as_said() -> No
     the system checked it; and an absence that is named, because an unmarked text
     beside marked ones reads as the settled kind.
     """
-    from pptmstr.board import basis_label
+    from pptmstr.board.words import basis_label
     from pptmstr.model import Basis
 
     assert basis_label(None) == "basis unstated"
@@ -999,7 +773,7 @@ def test_what_was_not_run_is_unstated_until_said_and_nothing_only_when_stated() 
     collapse: a claimer that did not say, and one that said nothing was left.
     Neither label for a stated answer vouches for it.
     """
-    from pptmstr.board import not_run_label
+    from pptmstr.board.words import not_run_label
 
     assert not_run_label(None) == "not run: unstated"
     assert not_run_label("") == "says nothing was left unrun"
@@ -1008,7 +782,7 @@ def test_what_was_not_run_is_unstated_until_said_and_nothing_only_when_stated() 
 
 
 def test_an_incident_is_marked_and_an_unmarked_concern_says_nothing_either_way() -> None:
-    from pptmstr.board import incident_marker, property_label
+    from pptmstr.board.words import incident_marker, property_label
 
     assert incident_marker(True) == "INCIDENT "
     assert incident_marker(False) == ""
@@ -1095,7 +869,7 @@ def test_the_ledger_lists_every_finished_task_nobody_said_was_run_in_full() -> N
     The unstated rows are the point. A ledger of only the rows that volunteered
     something would be shortest for the team that said least.
     """
-    from pptmstr.board import unrun_ledger
+    from pptmstr.board.rows import unrun_ledger
 
     store = Store()
     _round(store)
@@ -1111,7 +885,7 @@ def test_the_ledger_lists_every_finished_task_nobody_said_was_run_in_full() -> N
 
 
 def test_the_incident_list_is_the_marked_concerns_and_keeps_a_withdrawn_one() -> None:
-    from pptmstr.board import incidents
+    from pptmstr.board.rows import incidents
 
     store = Store()
     _round(store)
@@ -1124,7 +898,7 @@ def test_the_incident_list_is_the_marked_concerns_and_keeps_a_withdrawn_one() ->
 
 
 def test_the_ledger_and_the_incident_list_are_scoped_to_the_session_asked_about() -> None:
-    from pptmstr.board import incidents, unrun_ledger
+    from pptmstr.board.rows import incidents, unrun_ledger
 
     store = Store()
     _round(store)
@@ -1140,7 +914,8 @@ def test_a_row_carries_its_version_what_its_holder_was_handed_and_every_earlier_
     The amender is a name a reader can use: a role for an agent, and the operator
     by name where the record holds None.
     """
-    from pptmstr.board import OPERATOR, BoardVersion
+    from pptmstr.addresses import OPERATOR
+    from pptmstr.board.rows import BoardVersion
     from pptmstr.intents import TaskAmended
     from pptmstr.model import Basis
 
@@ -1188,7 +963,7 @@ def _versioned(*then: object) -> Store:
 
 
 def test_a_row_at_its_declared_specification_says_nothing_about_versions() -> None:
-    from pptmstr.board import stale_label, version_label
+    from pptmstr.board.rows import stale_label, version_label
 
     (row,) = board_tasks(_versioned().snapshot(), S1)
 
@@ -1197,7 +972,7 @@ def test_a_row_at_its_declared_specification_says_nothing_about_versions() -> No
 
 
 def test_a_row_says_which_version_it_shows_and_who_replaced_the_last_one() -> None:
-    from pptmstr.board import version_label
+    from pptmstr.board.rows import version_label
     from pptmstr.intents import TaskAmended
 
     store = _versioned(
@@ -1217,7 +992,7 @@ def test_a_row_says_when_its_holder_or_its_result_is_behind_the_specification() 
     been shown the text; once finished it is which text the result is an account
     of. A holder shown the current one, and a task nobody holds, say nothing.
     """
-    from pptmstr.board import stale_label
+    from pptmstr.board.rows import stale_label
     from pptmstr.intents import TaskAmended, TaskReleased, TaskVersionHanded
 
     dev = (S1, "agent-dev")
@@ -1248,7 +1023,7 @@ def test_a_claim_that_recorded_no_version_is_said_to_be_unrecorded_once_the_text
     """
     import dataclasses
 
-    from pptmstr.board import BoardVersion, stale_label
+    from pptmstr.board.rows import BoardVersion, stale_label
 
     (row,) = board_tasks(_versioned().snapshot(), S1)
     unrecorded = dataclasses.replace(row, claimed_version=None)
@@ -1268,7 +1043,7 @@ def test_a_replacers_name_cannot_break_the_line_a_version_is_said_on() -> None:
     """A role name is an agent's type, which is a string a model chose."""
     import dataclasses
 
-    from pptmstr.board import BoardVersion, version_label
+    from pptmstr.board.rows import BoardVersion, version_label
 
     (row,) = board_tasks(_versioned().snapshot(), S1)
     forged = dataclasses.replace(
@@ -1280,72 +1055,6 @@ def test_a_replacers_name_cannot_break_the_line_a_version_is_said_on() -> None:
     )
 
     assert version_label(forged) == "specification v2, replaced by builder - t9 [done]"
-
-
-# -- the one allocator ---------------------------------------------------------------
-
-
-def test_an_address_is_stepped_over_whoever_or_nobody_holds_it() -> None:
-    from pptmstr.board import address_for
-
-    held = {"builder": "a-1", "builder-2": None, "reviewer": "a-9"}
-
-    assert address_for("a-new", "Builder ", held, ()) == "builder-3"
-    assert address_for("a-new", "builder", held, ("builder-3",)) == "builder-4"
-    assert address_for("a-new", "lead", {}, ()) == "lead-2"
-    assert address_for("a-new", " ", {}, ()) == "agent"
-
-
-def test_an_id_the_table_names_gets_its_address_back_wherever_it_starts() -> None:
-    from pptmstr.board import address_for
-
-    held = {"builder": "a-1", "builder-2": "a-2", "builder-3": "a-new"}
-
-    assert address_for("a-2", "builder", held, ()) == "builder-2"
-    # By id and never by role: the type it reports now is not consulted.
-    assert address_for("a-2", "reviewer", held, ()) == "builder-2"
-
-
-def test_a_table_is_the_same_whatever_order_its_pairs_arrive_in() -> None:
-    """
-    The driver's copy is made from a log's ``Board.addresses`` and the board's
-    from the ``Restore.parties`` the store made of that log, and the two do not
-    share an order. An address written under two ids is reserved for neither.
-    """
-    import itertools
-
-    from pptmstr.board import reserved
-
-    pairs = [
-        ("builder", "a-1"),
-        (" Builder ", None),
-        ("builder-2", "a-2"),
-        ("builder-2", "a-3"),
-        ("reviewer", None),
-        ("", "a-4"),
-        ("lead", None),
-        ("main", "a-5"),
-    ]
-    expected = {"builder": "a-1", "builder-2": None, "reviewer": None}
-
-    for order in itertools.permutations(pairs):
-        assert reserved(order) == expected
-
-
-def test_the_driver_and_the_board_share_the_root_names_and_the_allocator() -> None:
-    """
-    The wiring. Two spellings of the root's names, or a driver with a loop of its
-    own, is two allocators again however well each is tested.
-    """
-    import inspect
-
-    from pptmstr import board, driver
-
-    assert driver.ROOT_ADDRESSES is board.ROOT_NAMES
-    assert driver.address_for is board.address_for
-    source = inspect.getsource(driver.AgentSession._address_for)
-    assert "return address_for(" in source and "while" not in source
-    assert "address_for(" in inspect.getsource(board._addresses)
 
 
 # -- a party from before the restart ------------------------------------------------
@@ -1415,36 +1124,12 @@ def test_no_live_agent_is_given_the_name_a_restored_board_has_for_another(
     assert (live.id, live.owner, live.holder) == ("t2", "builder-3", NEW_BUILDER_2)
     assert old.holder != live.holder and old.owner_gone and not live.owner_gone
 
-    text = bus._board_text((old, live), {})
+    text = _board_text((old, live), {})
     held = [line.split("held by ")[1] for line in text.splitlines() if "held by " in line]
     assert [name.split(" · ")[0].split(" but ")[0] for name in held] == [
         "builder-2, from an earlier run",
         "builder-3",
     ]
-
-
-def test_a_node_nothing_restored_and_nothing_spawned_is_still_only_unknown() -> None:
-    """The qualifier is for a party a log named. It asserts a cause, so it needs one."""
-    store = _old_claim(OLD_BUILDER_2)
-
-    assert role_name(store.snapshot(), (S1, "never-heard-of"), S1) == UNKNOWN
-
-
-def test_a_restored_party_the_log_had_no_name_for_is_unknown_from_before_the_restart() -> None:
-    store = _resumed(
-        _declared("t1", 50.0),
-        boardlog.Claimed(at=_CLOCK.wall - 40.0, task_id="t1", by="", by_id=OLD_BUILDER_2),
-    )
-
-    assert role_name(store.snapshot(), OLD_BUILDER_2, S1) == f"{UNKNOWN}, from an earlier run"
-
-
-def test_a_restored_party_seen_from_another_sessions_board_carries_both_qualifiers() -> None:
-    store = _old_claim(OLD_BUILDER_2)
-
-    assert role_name(store.snapshot(), OLD_BUILDER_2, S2) == (
-        f"builder-2, from an earlier run, {FOREIGN}"
-    )
 
 
 def test_a_restored_agent_that_is_running_again_has_the_name_it_had() -> None:
@@ -1504,7 +1189,7 @@ def test_an_earlier_runs_agent_is_named_as_one_while_this_process_still_has_its_
     stopped. The new run's builder keeps its own address beside it, and the
     address alone -- what a log record is written with -- carries no qualifier.
     """
-    from pptmstr.board import address_in_session
+    from pptmstr.addresses import address_in_session
 
     snap = _started_again().snapshot()
 
@@ -1564,7 +1249,7 @@ def test_a_row_the_operator_closed_says_so_and_is_nobodys_completion() -> None:
     who ended it, and that no work is reported. It is off the ledger of results
     nobody said were run, because it reports no result of anybody's.
     """
-    from pptmstr.board import closed_label, unrun_ledger
+    from pptmstr.board.rows import closed_label, unrun_ledger
     from pptmstr.intents import TaskClosed
 
     store = Store()
@@ -1590,7 +1275,7 @@ def test_a_claimer_that_types_the_closing_words_has_not_closed_its_task() -> Non
     """
     The label is read off the store's fact and never off text an agent wrote.
     """
-    from pptmstr.board import closed_label, unrun_ledger
+    from pptmstr.board.rows import closed_label, unrun_ledger
 
     store = Store()
     team(store, S1)
@@ -1612,7 +1297,7 @@ def test_a_row_its_declarer_withdrew_says_so_and_is_nobodys_completion() -> None
     ``closed_label``'s rule for a withdrawal, under its own words, and off the
     ledger for the same reason: it reports no result of anybody's work.
     """
-    from pptmstr.board import closed_label, ended_label, unrun_ledger, withdrawn_label
+    from pptmstr.board.rows import closed_label, ended_label, unrun_ledger, withdrawn_label
     from pptmstr.intents import TaskWithdrawn
 
     store = Store()
@@ -1651,7 +1336,7 @@ def test_a_withdrawn_row_says_who_withdrew_it_and_whose_words_its_reason_is(
     The row carries the task's two facts, and its label -- which the board
     pane draws through ``ended_label`` -- is ``model.withdrawal_label`` of them.
     """
-    from pptmstr.board import ended_label, withdrawn_label
+    from pptmstr.board.rows import ended_label, withdrawn_label
     from pptmstr.intents import AgentFinished, TaskWithdrawn
     from pptmstr.model import AgentState, withdrawal_label
 
@@ -1674,7 +1359,7 @@ def test_a_withdrawn_row_says_who_withdrew_it_and_whose_words_its_reason_is(
 
 
 def test_a_claimer_that_types_the_withdrawal_words_has_not_withdrawn_its_task() -> None:
-    from pptmstr.board import ended_label, unrun_ledger
+    from pptmstr.board.rows import ended_label, unrun_ledger
 
     store = Store()
     team(store, S1)
@@ -1698,7 +1383,7 @@ def test_a_row_waiting_on_another_sessions_id_says_it_cannot_end_and_what_ends_i
     fleet-wide, so declaring it here is refused and the wait has no end an agent
     can reach -- the row names it, says so, and says who can end it.
     """
-    from pptmstr.board import foreign_wait_label
+    from pptmstr.board.rows import foreign_wait_label
 
     store = Store()
     team(store, S1)
@@ -1773,7 +1458,7 @@ def test_a_row_says_its_holder_was_left_behind_exactly_where_the_lead_may_releas
     kind: str,
 ) -> None:
     """
-    The row's boolean is a second spelling of ``store._may_reclaim``, which the
+    The row's boolean is a second spelling of ``store.tasks._may_reclaim``, which the
     bus turns into an instruction. So the release is made: where the row says
     yes the store takes it, and where the row says no the store refuses.
     """
@@ -2006,7 +1691,7 @@ def test_a_gate_row_lists_its_writers_now_and_a_finished_one_only_what_was_decla
     ``writers``, which says which of those came from the word rather than from
     ``depends_on``. Neither is missing, and none is another session's.
     """
-    from pptmstr.board import all_writers_label
+    from pptmstr.board.rows import all_writers_label
     from pptmstr.model import ALL_WRITERS
 
     store = Store()

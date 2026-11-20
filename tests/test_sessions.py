@@ -13,6 +13,8 @@ evidence that a session exists.
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -181,6 +183,79 @@ def test_save_is_atomic_and_leaves_no_temp_files(tmp_path: Path) -> None:
     save_overlay(set_bookmark({}, "def", True), path)
     assert list(load_overlay(path)) == ["def"]
     assert [p.name for p in tmp_path.iterdir()] == ["sessions.json"]
+
+
+def test_a_save_whose_rename_fails_leaves_the_old_overlay_whole_and_no_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "sessions.json"
+    save_overlay(set_bookmark({}, "abc", True), path)
+    held = path.read_bytes()
+
+    def refuse(*args: object) -> None:
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    save_overlay(set_bookmark({}, "def", True), path)
+
+    assert path.read_bytes() == held
+    assert [p.name for p in tmp_path.iterdir()] == ["sessions.json"]
+
+
+def test_the_overlay_is_written_as_sorted_indented_ascii_json(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.json"
+    overlay = set_title(set_bookmark({}, "b", True), "a", "caf\u00e9 \udc80")
+
+    save_overlay(overlay, path)
+
+    expected = {
+        "sessions": {
+            "a": {"bookmarked": False, "title": "caf\u00e9 \udc80"},
+            "b": {"bookmarked": True, "title": None},
+        }
+    }
+    assert path.read_bytes() == (json.dumps(expected, indent=2, sort_keys=True) + "\n").encode()
+    assert path.read_bytes().isascii()
+
+
+def test_a_save_flushes_the_written_bytes_to_the_device_before_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A bookmark is made against a crash, so it has to survive one: the bytes reach
+    the device before the name moves onto them. Patched on the ``os`` module
+    itself: ``ondisk`` calls ``os.fsync`` and ``os.replace`` through it, and it is
+    the same object as ``ondisk.os``.
+    """
+    path = tmp_path / "sessions.json"
+    steps: list[tuple[object, ...]] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd: int) -> None:
+        held = os.fstat(fd)
+        steps.append(("fsync", held.st_ino, os.pread(fd, held.st_size + 1, 0)))
+        real_fsync(fd)
+
+    def rename(src: str, dst: str | os.PathLike[str]) -> None:
+        steps.append(("replace", dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", rename)
+
+    save_overlay(set_bookmark({}, "abc", True), path)
+
+    assert steps == [("fsync", path.stat().st_ino, path.read_bytes()), ("replace", path)]
+
+
+def test_a_saved_overlay_keeps_the_files_permission_bits(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.json"
+    save_overlay(set_bookmark({}, "abc", True), path)
+    path.chmod(0o644)
+
+    save_overlay(set_bookmark({}, "def", True), path)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
 
 def test_save_creates_the_directory(tmp_path: Path) -> None:

@@ -45,8 +45,9 @@ from typing import assert_never
 
 from imgui_bundle import imgui
 
-from ..approval import Policy
-from ..model import AgentRecord, ChannelId, NodeId
+from ..channels.records import ChannelId
+from ..gate.policy import Policy
+from ..model import AgentRecord, NodeId
 from ..settings import Settings
 from ..theme import REQUIRED_THEMES, THEMES
 from . import launcher, session_menu, settings_dialog, widgets

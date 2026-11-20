@@ -88,7 +88,7 @@ drawing; 2 when a page could not be read whole.
     scripts/xvfb_shot.sh -- .venv/bin/python scripts/measure_typeset_advances.py --pptmstr
     ... --pptmstr --bodies 16 --families roboto
 
-Fonts are loaded by ``pptmstr.theme.load_fonts`` itself, and every page's
+Fonts are loaded by ``typeset.load_application_fonts`` itself, and every page's
 documents are themed by ``roles.configure`` and ``themes.document_theme``: a
 family (prose in Roboto, or in the code face), a body size, and one step for
 the code-block, literal and inline-code roles together, from -2 to +4, so code
@@ -1504,9 +1504,9 @@ def pptmstr_main(args: argparse.Namespace) -> int:
             imgui.end()
 
     def load() -> None:
-        ui_theme.load_fonts()
+        gate.load_application_fonts()
         facts["fonts"] = (
-            f"pptmstr.theme.load_fonts(): {len(imgui.get_io().fonts.fonts)} atlas entries; "
+            f"load_application_fonts(): {len(imgui.get_io().fonts.fonts)} atlas entries; "
             f"gate.can_draw() {gate.can_draw()}"
         )
 

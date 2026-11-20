@@ -58,6 +58,11 @@ being exactly the right shape. Its own docstring marks it for deletion once the 
 landed, and it talks to no Store, Bridge or SDK. Pinning marketing material to a mock
 of a layout is how the mock stops being deletable.
 
+*2026-11-06:* `scripts/mock_cards.py` has been deleted (refactor round 2). Nothing ran it,
+its rail had already become a call to the real `pptmstr.ui.rail`, and the rest was a
+second drawing of the inbox and side panes. The capture source is
+`scripts/screenshot.py` with the fake driver, as the rest of this note already assumes.
+
 Rough shape, in the order it unblocks something:
 
 | | |

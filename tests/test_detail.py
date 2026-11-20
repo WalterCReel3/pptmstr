@@ -18,9 +18,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pptmstr import approval as approval_mod
 from pptmstr import theme as theme_mod
-from pptmstr.approval import DiffText, summarize
+from pptmstr.gate import park as gate_park
+from pptmstr.gate import rows as gate_rows
+from pptmstr.gate.diff import DiffText, render_texts
+from pptmstr.gate.park import summarize
+from pptmstr.gate.tools import _BUS_DECLARE, _BUS_POST
 from pptmstr.model import (
     AgentRecord,
     AgentState,
@@ -134,19 +137,6 @@ def test_a_non_string_argument_keeps_its_quoting() -> None:
     """A nested dict of edits and the bare word None must not look alike."""
     assert detail.render_value(None) == "None"
     assert detail.render_value(["x"]) == "['x']"
-
-
-# -- bounds --------------------------------------------------------------------
-
-
-def test_a_bound_reports_what_it_dropped() -> None:
-    text, omitted = detail.clip("abcdef", 4)
-    assert text == "abcd"
-    assert omitted == 2
-
-
-def test_a_string_within_the_bound_is_untouched() -> None:
-    assert detail.clip("abc", 4) == ("abc", 0)
 
 
 # -- the clipboard rendering ---------------------------------------------------
@@ -794,7 +784,7 @@ def test_an_argument_whose_whitespace_is_its_meaning_keeps_all_of_it() -> None:
         ]
         bash = detail.argument_parts("Bash", {"command": heredoc}, columns)
         # A Bash command as every approval surface draws it (``command_shown``).
-        shown = approval_mod.command_shown("Bash", "command", heredoc)
+        shown = gate_rows.command_shown("Bash", "command", heredoc)
         assert shown is not None and shown.replace("\\n\n", "\n") == heredoc
         assert _kinds(bash)[1] == ("literal", shown)
         spaced = detail.argument_parts("Bash", {"command": "grep  -n   'a  b'"}, columns)
@@ -898,7 +888,7 @@ def test_this_pane_and_the_inbox_row_read_one_table() -> None:
     two ways. There is one table, the row's, and this pane asks it.
     """
     assert not hasattr(detail, "_PROSE_ARGUMENT")
-    assert {approval_mod._BUS_POST, approval_mod._BUS_DECLARE} <= inbox.DESCRIBED.keys()
+    assert {_BUS_POST, _BUS_DECLARE} <= inbox.DESCRIBED.keys()
     for tool, (name, _) in inbox.DESCRIBED.items():
         described = inbox.describe(
             PendingApproval(
@@ -1319,7 +1309,7 @@ def parked(tool: str, args: dict[str, object], pid: str = "p1") -> ApprovalNeede
     """
     A parked call as the driver builds one: the texts read once, the string from them.
     """
-    texts = approval_mod.diff_texts(tool, args)
+    texts = gate_park.diff_texts(tool, args)
     return ApprovalNeeded(
         node=ROOT,
         since=1.0,
@@ -1332,7 +1322,7 @@ def parked(tool: str, args: dict[str, object], pid: str = "p1") -> ApprovalNeede
             raw_args=args,
             summary=summarize(tool, args),
             requested_at=1.0,
-            diff=approval_mod.render_texts(tool, texts),
+            diff=render_texts(tool, texts),
             texts=texts,
         ),
     )
@@ -1740,7 +1730,7 @@ def test_an_argument_of_several_lines_is_set_unbroken_and_the_pane_scrolls_to_it
         rig.frame(snap)
 
     key = (obligation.key, "arguments")
-    shown = approval_mod.command_shown("Bash", "command", command)
+    shown = gate_rows.command_shown("Bash", "command", command)
     assert rig.pane.views.texts(key) == ("command", shown)
     cell = _literal_cell(seam)
     assert cell == 8.0
@@ -3775,7 +3765,8 @@ def test_each_message_is_marked_from_its_state_then_its_times() -> None:
     and then withdrawn (``delivered_at`` set, WITHDRAWN). Neither is read off
     the state alone or the time alone.
     """
-    from pptmstr.model import ConcernState, ThreadMark, ThreadMessage
+    from pptmstr.channels.records import ThreadMark
+    from pptmstr.model import ConcernState, ThreadMessage
 
     q1 = f"c-{1:012x}"
     snap = _with(
@@ -3805,7 +3796,8 @@ def test_each_message_is_marked_from_its_state_then_its_times() -> None:
 
 
 def test_a_withdrawn_reply_answers_nothing_and_a_reply_from_the_asker_is_not_an_answer() -> None:
-    from pptmstr.model import ConcernState, ThreadMark, ThreadMessage
+    from pptmstr.channels.records import ThreadMark
+    from pptmstr.model import ConcernState, ThreadMessage
 
     q1 = f"c-{1:012x}"
     snap = _with(
@@ -3822,7 +3814,8 @@ def test_a_withdrawn_reply_answers_nothing_and_a_reply_from_the_asker_is_not_an_
 
 
 def test_a_withdrawn_question_stays_withdrawn_when_a_reply_cites_it() -> None:
-    from pptmstr.model import ConcernState, ThreadMark, ThreadMessage
+    from pptmstr.channels.records import ThreadMark
+    from pptmstr.model import ConcernState, ThreadMessage
 
     q1 = f"c-{1:012x}"
     snap = _with(
@@ -3864,8 +3857,9 @@ def test_a_recalled_side_resumed_through_the_store_is_held() -> None:
     the recalled root, and the record it files carries no ``recalled``, so the
     side reads as held from then on and not as "not in this store" for good.
     """
+    from pptmstr.channels.records import Channel
     from pptmstr.intents import AgentSpawned, ChannelsRestored, SessionRecalled
-    from pptmstr.model import Channel, Recalled, ThreadSide
+    from pptmstr.model import Recalled, ThreadSide
     from pptmstr.store import Store
 
     # A startup: the link from its log and the recalled card first, then a
@@ -3969,7 +3963,7 @@ def test_every_call_that_parks_on_a_link_has_a_kind_the_thread_names() -> None:
     bare tool name. A renamed peer tool leaves no stale entry behind.
     """
     from pptmstr.bus import offered_tools
-    from pptmstr.model import WITHDRAW_PEER_TOOL
+    from pptmstr.channels.records import WITHDRAW_PEER_TOOL
 
     snap = _waiting_on_you()
     args = {
@@ -4000,7 +3994,8 @@ def test_what_waits_on_the_operator_is_a_row_in_the_thread_in_time_order() -> No
     wake, is a row at its instant; the calls that act across no link, or
     another, are not. One reading for both (``parked_on``).
     """
-    from pptmstr.model import MoveOwner, ThreadMessage, ThreadParked, ThreadWakeHeld
+    from pptmstr.channels.records import MoveOwner, ThreadWakeHeld
+    from pptmstr.model import ThreadMessage, ThreadParked
 
     snap = _waiting_on_you()
     link = snap.channels["k1"]

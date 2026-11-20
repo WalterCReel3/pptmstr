@@ -60,17 +60,16 @@ from __future__ import annotations
 import contextlib
 import itertools
 import json
-import math
 import os
-import stat
-import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import boardlog, settings
-from .approval import Policy
+from . import jsonfields, settings
+from .gate.policy import Policy
+from .journal import files
+from .ondisk import create_once, read_regular, replace
 
 # The format this build writes, and the newest it will write over.
 FORMAT = 1
@@ -199,7 +198,7 @@ class Unwritten:
     """
     Nothing was written, the file is as it was, and why.
 
-    A value rather than an exception for the reason ``boardlog.Unwritten`` is one:
+    A value rather than an exception for the reason ``files.Unwritten`` is one:
     the operator has to be shown it, and a fleet that silently stopped being kept
     is discovered at the next start, by its absence.
     """
@@ -225,42 +224,20 @@ class Listing:
 
 # -- values at the boundary -------------------------------------------------------
 
-# What a decoder returns for a value it does not take.
-_BAD: Any = object()
-
-
-def _text(value: object) -> Any:
-    return value if isinstance(value, str) else _BAD
-
 
 def _flag(value: object) -> Any:
-    return value if isinstance(value, bool) else _BAD
-
-
-def _number(value: object) -> Any:
-    # ``bool`` is an ``int`` to ``isinstance``, and ``true`` is not a time.
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return _BAD
-    try:
-        number = float(value)
-    except OverflowError:
-        return _BAD
-    return number if math.isfinite(number) else _BAD
-
-
-def _whole(value: object) -> Any:
-    return value if isinstance(value, int) and not isinstance(value, bool) else _BAD
+    return value if isinstance(value, bool) else jsonfields.BAD
 
 
 def _how(value: object) -> Any:
-    return value if isinstance(value, str) and value in ENDED_HOW else _BAD
+    return value if isinstance(value, str) and value in ENDED_HOW else jsonfields.BAD
 
 
 def _rung(value: object) -> Any:
     if isinstance(value, str):
         with contextlib.suppress(ValueError):
             return Policy(value)
-    return _BAD
+    return jsonfields.BAD
 
 
 def _or_null(inner: Callable[[object], Any]) -> Callable[[object], Any]:
@@ -272,23 +249,23 @@ def _or_null(inner: Callable[[object], Any]) -> Callable[[object], Any]:
 # ``tests/test_sessionfile.py`` holds this against the fields of ``SessionFile``.
 _FIELDS: dict[str, tuple[Callable[[object], Any], Any]] = {
     "in_fleet": (_flag, True),
-    "created_at": (_number, None),
-    "launched_at": (_number, None),
-    "last_active": (_number, None),
-    "ended_at": (_or_null(_number), None),
+    "created_at": (jsonfields.number, None),
+    "launched_at": (jsonfields.number, None),
+    "last_active": (jsonfields.number, None),
+    "ended_at": (_or_null(jsonfields.number), None),
     "ended_how": (_or_null(_how), None),
-    "task": (_text, ""),
-    "last_message": (_or_null(_text), None),
-    "model": (_text, ""),
-    "cwd": (_text, ""),
-    "session_base": (_or_null(_text), None),
-    "template": (_or_null(_text), None),
-    "brief": (_or_null(_text), None),
+    "task": (jsonfields.text, ""),
+    "last_message": (_or_null(jsonfields.text), None),
+    "model": (jsonfields.text, ""),
+    "cwd": (jsonfields.text, ""),
+    "session_base": (_or_null(jsonfields.text), None),
+    "template": (_or_null(jsonfields.text), None),
+    "brief": (_or_null(jsonfields.text), None),
     "policy": (_rung, UnknownPolicy()),
     "contained": (_flag, False),
-    "subagent_cap": (_or_null(_whole), None),
-    "cost_usd": (_or_null(_number), None),
-    "error": (_or_null(_text), None),
+    "subagent_cap": (_or_null(jsonfields.whole), None),
+    "cost_usd": (_or_null(jsonfields.number), None),
+    "error": (_or_null(jsonfields.text), None),
 }
 
 
@@ -314,22 +291,24 @@ def decode(obj: object, *, session_id: str) -> SessionFile | Unreadable:
     if not isinstance(obj, dict):
         return Unreadable(f"not a JSON object but {_kind(obj)}")
     fmt = obj.get("format", FORMAT)
-    if _whole(fmt) is _BAD or fmt < 1:
+    if jsonfields.whole(fmt) is jsonfields.BAD or fmt < 1:
         return Unreadable("'format' is not a whole number of at least 1")
     stated = obj.get("session_id", session_id)
     if stated != session_id:
         return Unreadable(
-            f"'session_id' is {_shown(stated)}, which is not the name of its directory"
+            f"'session_id' is {jsonfields.shown(stated)}, which is not the name of its directory"
         )
     values: dict[str, Any] = {}
     for key, (read_value, default) in _FIELDS.items():
         if key not in obj:
             continue
         value = read_value(obj[key])
-        if value is not _BAD:
+        if value is not jsonfields.BAD:
             values[key] = value
         elif key == "in_fleet":
-            return Unreadable(f"'in_fleet' is {_shown(obj[key])}, which is not true or false")
+            return Unreadable(
+                f"'in_fleet' is {jsonfields.shown(obj[key])}, which is not true or false"
+            )
         elif key == "policy":
             values[key] = UnknownPolicy(obj[key] if isinstance(obj[key], str) else None)
         else:
@@ -341,14 +320,6 @@ def _kind(value: object) -> str:
     if value is None:
         return "null"
     return {bool: "a bool", list: "a list", str: "text"}.get(type(value), "a number")
-
-
-def _shown(value: object) -> str:
-    """
-    A value for a reason an operator reads: short, and on one line.
-    """
-    text = repr(value)
-    return text if len(text) <= 60 else text[:57] + "..."
 
 
 # -- paths ------------------------------------------------------------------------
@@ -371,9 +342,9 @@ def root() -> Path:
 def session_dir(session_id: str, root: Path | None = None) -> Path | None:
     """
     Where pptmstr keeps what it knows about one session, or None for an id that
-    is not exactly one directory name (``boardlog.session_dir`` has the rule).
+    is not exactly one directory name (``files.session_dir`` has the rule).
     """
-    return boardlog.session_dir(_under(root), session_id)
+    return files.session_dir(_under(root), session_id)
 
 
 def file_path(session_id: str, root: Path | None = None) -> Path | None:
@@ -396,39 +367,7 @@ def board_dir(session_id: str, root: Path | None = None) -> Path | None:
 
 
 def _not_an_id(session_id: str) -> str:
-    return f"{_shown(session_id)} is not a session id: it is not one directory name"
-
-
-def _file_bytes(path: Path) -> bytes:
-    """
-    The bytes of a regular file no longer than a session file may be. ``OSError``
-    for anything else.
-
-    Judged through the descriptor, not by a ``stat`` of the name beforehand.
-    ``O_NONBLOCK`` makes opening a FIFO return and ``O_NOFOLLOW`` refuses a link
-    outright: ``update`` only ever renames or links a regular file into place, so
-    a link under the name is not something this module wrote. Read to one byte
-    past the limit and no further, so the file's size is never the allocation's.
-    """
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"{path.name} is not a regular file")
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            held = handle.read(MAX_FILE_BYTES + 1)
-        if len(held) > MAX_FILE_BYTES:
-            raise OSError(f"{path.name} is over the {MAX_FILE_BYTES} bytes a session file may be")
-        return held
-    finally:
-        if fd != -1:
-            os.close(fd)
-
-
-def _not_json(constant: str) -> Any:
-    # ``json.loads`` takes NaN and Infinity, which are not JSON and which this
-    # module could not write back.
-    raise ValueError(f"{constant} is not JSON")
+    return f"{jsonfields.shown(session_id)} is not a session id: it is not one directory name"
 
 
 def _load(path: Path) -> dict[str, Any] | Absent | Unreadable:
@@ -436,15 +375,15 @@ def _load(path: Path) -> dict[str, Any] | Absent | Unreadable:
     The object in the file, before any key is interpreted.
     """
     try:
-        held = _file_bytes(path)
+        held = read_regular(path, MAX_FILE_BYTES)
     except (FileNotFoundError, NotADirectoryError):
         return Absent()
     except OSError as exc:
         return Unreadable(f"{type(exc).__name__}: {exc}")
     try:
-        obj = json.loads(held.decode("utf-8"), parse_constant=_not_json)
+        obj = json.loads(held.decode("utf-8"), parse_constant=jsonfields.not_json)
     except (ValueError, RecursionError) as exc:
-        return Unreadable(f"not JSON ({type(exc).__name__}: {_shown(str(exc))})")
+        return Unreadable(f"not JSON ({type(exc).__name__}: {jsonfields.shown(str(exc))})")
     if not isinstance(obj, dict):
         return Unreadable(f"not a JSON object but {_kind(obj)}")
     return obj
@@ -492,7 +431,7 @@ def listing(root: Path | None = None) -> Listing:
             with contextlib.suppress(OSError):
                 if (
                     entry.is_dir(follow_symlinks=False)
-                    and boardlog.session_dir(base, entry.name) is not None
+                    and files.session_dir(base, entry.name) is not None
                 ):
                     ids.append(entry.name)
     except FileNotFoundError:
@@ -525,10 +464,12 @@ def _checked(changes: Mapping[str, object]) -> dict[str, Any] | Unwritten:
         if key in ("session_id", "format"):
             return Unwritten(f"{key!r} is not changed: the directory and the build decide it")
         if key not in _FIELDS:
-            return Unwritten(f"{_shown(key)} is not a key of {FILE_NAME} this build writes")
+            return Unwritten(
+                f"{jsonfields.shown(key)} is not a key of {FILE_NAME} this build writes"
+            )
         decoded = _FIELDS[key][0](given.value if isinstance(given, Policy) else given)
-        if decoded is _BAD:
-            return Unwritten(f"{key!r} cannot be {_shown(given)}")
+        if decoded is jsonfields.BAD:
+            return Unwritten(f"{key!r} cannot be {jsonfields.shown(given)}")
         # As it reads back: a whole number given for a time is written as a float.
         out[key] = decoded.value if isinstance(decoded, Policy) else decoded
     return out
@@ -621,24 +562,15 @@ def _update(
         if len(data) > MAX_FILE_BYTES:
             return Unwritten(f"{len(data)} bytes, over the {MAX_FILE_BYTES} a session file may be")
         directory.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=".session-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if isinstance(found, Absent):
-                # Linked, not renamed: the name was free when it was read, and a
-                # rename would replace whatever has been put there since without
-                # reading it.
-                try:
-                    os.link(tmp, path)
-                except FileExistsError:
-                    continue
-            else:
-                os.replace(tmp, path)
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
+        if isinstance(found, Absent):
+            # Linked, not renamed: the name was free when it was read, and a
+            # rename would replace whatever has been put there since without
+            # reading it.
+            try:
+                create_once(directory, (FILE_NAME,), data)
+            except FileExistsError:
+                continue
+        else:
+            replace(path, data, durable=True)
         return Written(path=path, record=after, skipped=tuple(skipped))
     return Unwritten(f"{FILE_NAME} kept being created by another writer; not written")

@@ -28,17 +28,17 @@ from typing import Any, cast
 import pytest
 
 from pptmstr import cli_version
-from pptmstr.approval import Policy
 from pptmstr.bridge import Bridge
 from pptmstr.cli_version import BelowFloor, FloorCheck, MeetsFloor, Unreadable
 from pptmstr.driver import AgentSession
+from pptmstr.gate.policy import Policy
 from pptmstr.log import LOG, Level
 from pptmstr.model import BEFORE_RESTART, LaunchSpec
 from pptmstr.settings import RoleChoice, Settings, legacy_faces
 from pptmstr.store import Store
 from pptmstr.ui.launcher import FailedLaunch
 
-# Stands in for what `sandbox.containment_settings()` returns. Its content does not
+# Stands in for what `gate.sandbox.containment_settings()` returns. Its content does not
 # matter to `_launch` -- it is opaque text that must arrive unchanged -- and a literal
 # keeps these tests from depending on the sandbox module's current spelling.
 CONTAINMENT = '{"sandbox": {"network": {"strictAllowlist": true}}}'
@@ -1212,7 +1212,7 @@ def test_the_frame_loop_gives_the_seam_its_turn_between_frames(
 
 def test_the_frame_loop_pumps_the_figures_every_frame(monkeypatch: pytest.MonkeyPatch) -> None:
     """
-    ``figures.host.pump`` is where a figure's pixels arrive, where a render past its
+    ``figure_host.pump`` is where a figure's pixels arrive, where a render past its
     time is stopped, and where textures are let go of. Nothing else calls it: unwired,
     a hostile render runs on with no figure on screen and every test of the host,
     which pumps the way the app does, still passes.
@@ -1950,6 +1950,24 @@ def test_quitting_ends_the_figure_render_process(monkeypatch: pytest.MonkeyPatch
     assert ended == [1]
 
 
+def test_main_wires_the_font_callback_and_installs_the_figure_renderer() -> None:
+    """
+    ``main`` needs a window and is not run here, so its wiring is read: the font
+    callback loads the text library's faces after the chrome's
+    (``typeset.load_application_fonts``; ``theme.load_fonts`` alone does not), and
+    the figure renderer is installed with the typeset seam's faces, which
+    ``figures`` cannot name itself.
+    """
+    import inspect
+
+    from pptmstr import app
+
+    source = inspect.getsource(app.main)
+    assert "runner.callbacks.load_additional_fonts = typeset.load_application_fonts" in source
+    assert "figure_render.install(typeset.figure_fonts)" in source
+    assert source.index("figure_render.install(") < source.index("immapp.run(runner)")
+
+
 def test_quitting_waits_for_the_pool_longer_than_the_pool_waits_for_its_runs() -> None:
     """
     The pool gives up on a run that will not end and says which. A draw thread that
@@ -1987,7 +2005,7 @@ def test_a_contained_launch_into_pptmstrs_own_checkout_starts_nothing(
     The launcher asks whether the directory is pptmstr's own source when the button
     is pressed, and the version read is awaited between that and the session. A spec
     that arrives here contained and pointing inside the checkout -- because the path
-    moved in between -- must not become an unattended session writing ``approval.py``.
+    moved in between -- must not become an unattended session writing ``pptmstr/gate/``.
 
     Refused after the version read and not instead of it, so the question is asked
     as late as this function can ask it.
@@ -2606,8 +2624,8 @@ def _asked_and_read(root: Path, *, answered: bool) -> tuple[str, str]:
     and the process ends. The question and its delivery are in ``s``'s log, an
     answer in ``z``'s. ``s`` and ``z``, in that order.
     """
+    from pptmstr.channels.records import EVERY_CHANNEL
     from pptmstr.intents import ChannelLinked, PeerInboxRead, PeerSent
-    from pptmstr.model import EVERY_CHANNEL
 
     with _Process(root) as first:
         first.launch()
@@ -2632,8 +2650,8 @@ def _asked_and_read(root: Path, *, answered: bool) -> tuple[str, str]:
 
 def _second_start(process: _Process, s: str, z: str) -> None:
     """The link back, as a start restores it from its log before any launch."""
+    from pptmstr.channels.records import Channel
     from pptmstr.intents import ChannelsRestored
-    from pptmstr.model import Channel
 
     members = frozenset({s, z})
     process.bridge.emit(ChannelsRestored((Channel("k1", "brand", members, "c", 1.0),)))
@@ -2667,7 +2685,7 @@ def test_two_resumed_leads_are_each_restored_between_their_announce_and_anyone_e
 ) -> None:
     """
     What keeps a lead that answered in an earlier run from being told it owes
-    (``store._peer_waking``'s ``BoardRestored`` arm): with both leads resumed at
+    (``store.waking._peer_waking``'s ``BoardRestored`` arm): with both leads resumed at
     once, no other session's restore is applied between a session's announce
     and its own restore, so the asker's restore never meets the recipient
     wakeable without its answer. The two launches race on the log reads they
@@ -2724,7 +2742,7 @@ def test_were_the_askers_restore_applied_inside_the_recipients_it_would_wake_it_
     recipient's restore is held back until the asker's is in, so the asker's
     restore meets the recipient announced and wakeable but without its
     answer: it is woken for a question it answered. Its own restore then lets
-    the wake go (``store._still_owed``), and the shell, which waits while the
+    the wake go (``store.waking._still_owed``), and the shell, which waits while the
     session is still starting, drops it unsent (``app._still_to_read``).
     """
     import asyncio
@@ -2854,17 +2872,17 @@ def test_no_log_io_runs_on_the_thread_that_applies_the_frame(
     thread it ran on. None is the thread that calls ``apply_intents`` -- here the
     test's own -- and the read is not on the bridge's loop either.
     """
-    from pptmstr import boardlog
+    from pptmstr.journal import files as journal_files
 
     seen: list[tuple[str, threading.Thread]] = []
     for name in ("append", "read", "next_ordinal"):
-        real = getattr(boardlog, name)
+        real = getattr(journal_files, name)
 
         def noting(*args: object, _real=real, _name=name, **kwargs: object):  # type: ignore[no-untyped-def]
             seen.append((_name, threading.current_thread()))
             return _real(*args, **kwargs)
 
-        monkeypatch.setattr(boardlog, name, noting)
+        monkeypatch.setattr(journal_files, name, noting)
 
     session_id, _ = _first_run(tmp_path)
     with _Process(tmp_path, _one_more_task()) as second:
@@ -2890,9 +2908,10 @@ def test_a_record_reaches_the_log_on_the_wall_clock_and_not_the_stores(
     import time
 
     from pptmstr import boardlog
+    from pptmstr.journal import files as journal_files
 
     session_id, _ = _first_run(tmp_path)
-    log = boardlog.read(tmp_path / session_id / "board")
+    log = journal_files.read(tmp_path / session_id / "board", boardlog.KINDS)
     assert len(log.records) >= 6
     now = time.time()
     # Not a vacuous comparison on a machine that booted less than a minute
@@ -3043,7 +3062,7 @@ def test_a_session_that_is_taken_and_then_fails_to_start_keeps_its_board_on_its_
     Both end a row that was announced, so the restored board is not invisible --
     it is the board of a failed session the operator can see and relaunch.
     """
-    from pptmstr.board import has_board
+    from pptmstr.board.rows import has_board
     from pptmstr.intents import AgentFinished
     from pptmstr.model import AgentState
 
@@ -3135,7 +3154,7 @@ def test_a_team_session_resumed_solo_still_has_its_board_drawn(tmp_path: Path) -
     ``has_board`` reads the template, and the template is this launch's. The
     restored facts are what the pane asks about instead.
     """
-    from pptmstr.board import board_tasks, has_board
+    from pptmstr.board.rows import board_tasks, has_board
     from pptmstr.ui import board_pane
 
     session_id, _ = _first_run(tmp_path)
@@ -3158,19 +3177,19 @@ def test_a_record_that_does_not_land_stops_the_session_and_is_kept_as_state(
     shell keeps it: frames later the entry still says stopped, why, and how many
     records are not in the log.
     """
-    from pptmstr import boardlog
+    from pptmstr.journal import files as journal_files
     from pptmstr.ui import board_pane
 
-    real = boardlog.append
+    real = journal_files.append
     calls = [0]
 
     def failing(directory: Path, record: object, **kwargs: object):  # type: ignore[no-untyped-def]
         calls[0] += 1
         if calls[0] == 3:
-            return boardlog.Unwritten("no space left on device")
+            return journal_files.Unwritten("no space left on device")
         return real(directory, record, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(boardlog, "append", failing)
+    monkeypatch.setattr(journal_files, "append", failing)
     with _Process(tmp_path, _a_working_team) as run:
         run.launch()
         run.frame()
@@ -3420,7 +3439,7 @@ def _named_alike(run: _Process, session_id: str) -> dict[tuple[str, str | None],
     checked that the driver, the board and the log's record agree on it and that
     the address routes back to the node.
     """
-    from pptmstr import board, boardfacts
+    from pptmstr import addresses, boardfacts
 
     session = run.sessions[(session_id, None)]
     snap = run.state.store.snapshot()
@@ -3429,7 +3448,7 @@ def _named_alike(run: _Process, session_id: str) -> dict[tuple[str, str | None],
         node = record.node_id
         routed = session.role_of(node)
         assert routed is not None
-        assert board.role_name(snap, node, session_id) == routed
+        assert addresses.role_name(snap, node, session_id) == routed
         assert boardfacts._address(snap, node) == routed
         assert session.resolve_role(routed) == node
         names[node] = routed
@@ -3460,7 +3479,7 @@ def test_an_agent_has_one_name_on_every_surface_across_two_restarts(tmp_path: Pa
     process is told two agents answered to ``builder`` and reserves the name of
     neither's successor.
     """
-    from pptmstr import board
+    from pptmstr import addresses
 
     session_id, _ = _first_run(tmp_path)
     old = (session_id, _BUILDER)
@@ -3472,7 +3491,7 @@ def test_an_agent_has_one_name_on_every_surface_across_two_restarts(tmp_path: Pa
         _claims(second, new, "t-4")
         assert _named_alike(second, session_id) == {new: "builder-2"}
         snap = second.state.store.snapshot()
-        assert board.role_name(snap, old, session_id) == f"builder, {BEFORE_RESTART}"
+        assert addresses.role_name(snap, old, session_id) == f"builder, {BEFORE_RESTART}"
 
     with _Process(tmp_path) as third:
         third.launch(resume=session_id)
@@ -3482,8 +3501,8 @@ def test_an_agent_has_one_name_on_every_surface_across_two_restarts(tmp_path: Pa
         newest = _start_builder(third, session_id, "agent-new-2")
         assert _named_alike(third, session_id) == {newest: "builder-3"}
         snap = third.state.store.snapshot()
-        assert board.role_name(snap, new, session_id) == f"builder-2, {BEFORE_RESTART}"
-        assert board.role_name(snap, old, session_id) == f"builder, {BEFORE_RESTART}"
+        assert addresses.role_name(snap, new, session_id) == f"builder-2, {BEFORE_RESTART}"
+        assert addresses.role_name(snap, old, session_id) == f"builder, {BEFORE_RESTART}"
 
 
 def _logged_team():  # type: ignore[no-untyped-def]
@@ -3534,7 +3553,7 @@ def test_the_driver_the_board_and_the_log_name_every_agent_alike_in_any_start_or
     """
     import asyncio
 
-    from pptmstr import app, board, boardfacts, boardlog
+    from pptmstr import addresses, app, boardfacts, boardlog
     from pptmstr.intents import BoardRestored
     from pptmstr.templates import FEATURE
 
@@ -3553,7 +3572,7 @@ def test_the_driver_the_board_and_the_log_name_every_agent_alike_in_any_start_or
         store.apply(intent)
     clock = boardlog.Clock(wall=5_000.0, monotonic=100.0)
     store.apply(BoardRestored(sid, logged, clock), now=clock.monotonic)
-    assert board.restored_table(store.snapshot(), sid) == session._restored
+    assert addresses.restored_table(store.snapshot(), sid) == session._restored
     assert session._restored == {"builder": "old-1", "builder-2": "old-2", "reviewer": None}
 
     for agent_id, agent_type in order:
@@ -3566,7 +3585,7 @@ def test_the_driver_the_board_and_the_log_name_every_agent_alike_in_any_start_or
         for record in snap.subagents_of((sid, None)):
             node = record.node_id
             names[node[1]] = session.role_of(node)
-            assert board.role_name(snap, node, sid) == names[node[1]]
+            assert addresses.role_name(snap, node, sid) == names[node[1]]
             assert boardfacts._address(snap, node) == names[node[1]]
             assert session.resolve_role(names[node[1]] or "") == node
         assert len(set(names.values())) == len(names)
@@ -3575,7 +3594,11 @@ def test_the_driver_the_board_and_the_log_name_every_agent_alike_in_any_start_or
             assert names["old-2"] == "builder-2"
         # The agent that has not come back is named alike too, and unroutably.
         gone = f"builder, {BEFORE_RESTART}"
-        assert session.role_of((sid, "old-1")) == board.role_name(snap, (sid, "old-1"), sid) == gone
+        assert (
+            session.role_of((sid, "old-1"))
+            == addresses.role_name(snap, (sid, "old-1"), sid)
+            == gone
+        )
         assert session.resolve_role(gone) is None and session.resolve_role("builder") is None
 
     assert set(names.values()) == {"builder-2", "builder-3", "builder-4", "reviewer-2"}
@@ -3609,7 +3632,7 @@ def test_a_session_relaunched_in_the_same_window_carries_on_from_its_own_table(
     -- the earlier agent's name -- while the board called the new one
     ``builder-2``.
     """
-    from pptmstr import board
+    from pptmstr import addresses
     from pptmstr.model import AgentState
 
     with _Process(tmp_path) as run:
@@ -3625,7 +3648,7 @@ def test_a_session_relaunched_in_the_same_window_carries_on_from_its_own_table(
         assert ended.nodes[first].state is AgentState.CANCELLED
         # Ended, and still of the run the store has for the session: nothing is
         # of an earlier run until the session is announced again.
-        assert board.role_name(ended, first, session_id) == "builder"
+        assert addresses.role_name(ended, first, session_id) == "builder"
 
         run.launch(resume=session_id)
         run.frame()
@@ -3636,12 +3659,14 @@ def test_a_session_relaunched_in_the_same_window_carries_on_from_its_own_table(
         snap = run.state.store.snapshot()
 
         assert (
-            relaunched.role_of(second) == board.role_name(snap, second, session_id) == "builder-2"
+            relaunched.role_of(second)
+            == addresses.role_name(snap, second, session_id)
+            == "builder-2"
         )
         assert relaunched.resolve_role("builder-2") == second
         gone = f"builder, {BEFORE_RESTART}"
         assert snap.of_earlier_run(first) and not snap.of_earlier_run(second)
-        assert relaunched.role_of(first) == board.role_name(snap, first, session_id) == gone
+        assert relaunched.role_of(first) == addresses.role_name(snap, first, session_id) == gone
         assert relaunched.resolve_role("builder") is None and relaunched.resolve_role(gone) is None
 
         # Woken by the relaunched run under the id it had: the same name again,
@@ -3704,16 +3729,20 @@ def test_a_session_whose_board_log_could_not_be_opened_is_reported_as_running(
 def test_quitting_closes_the_writer_before_the_pool_and_logs_what_did_not_land(
     tmp_path: Path,
 ) -> None:
-    from pptmstr import app, boardlog, boardsync
+    from pptmstr import app, boardsync
+    from pptmstr.journal import codec
+    from pptmstr.journal import files as journal_files
 
     order: list[str] = []
-    record = boardlog.RecordingStopped(at=0.0, reason="x")
+    record = codec.RecordingStopped(at=0.0, reason="x")
 
     class _Writer:
         def close(self) -> tuple[boardsync.Report, ...]:
             order.append("writer")
             return (
-                boardsync.Outcome("s-1", record, boardlog.Unwritten("still queued; not written")),
+                boardsync.Outcome(
+                    "s-1", record, journal_files.Unwritten("still queued; not written")
+                ),
             )
 
     class _Pool:
@@ -3766,10 +3795,13 @@ def test_a_session_minted_by_this_launch_is_adopted_and_not_left_to_a_listing(
     it. The writer would otherwise decide by listing the directory, and a listing
     that fails for one moment refuses the session for the life of the process.
     """
-    from pptmstr import boardlog, boardsync
+    from pptmstr import boardsync
+    from pptmstr.journal import files as journal_files
 
     monkeypatch.setattr(
-        boardlog, "next_ordinal", lambda directory: boardlog.Unlisted("EIO for one moment")
+        journal_files,
+        "next_ordinal",
+        lambda directory: journal_files.Unlisted("EIO for one moment"),
     )
     with _Process(tmp_path, _a_working_team) as run:
         run.launch()
@@ -3787,10 +3819,12 @@ def test_relaunching_a_session_whose_recording_stopped_does_not_call_it_recorded
     The writer never restarts a stopped session, so an entry rebuilt at the
     relaunch would say "recorded" over a log nothing is being added to.
     """
-    from pptmstr import boardlog
+    from pptmstr.journal import files as journal_files
 
     monkeypatch.setattr(
-        boardlog, "append", lambda directory, record, **kw: boardlog.Unwritten("disk full")
+        journal_files,
+        "append",
+        lambda directory, record, **kw: journal_files.Unwritten("disk full"),
     )
     said = iter([_a_working_team, _one_more_task()])
     with _Process(tmp_path, lambda session: next(said)(session)) as run:
@@ -4208,7 +4242,7 @@ def test_a_layout_saved_before_digest_existed_gets_it_in_boards_node(tmp_path: P
 def test_a_saved_layout_that_cannot_be_rewritten_is_said_and_the_app_still_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from pptmstr import app, layout_ini
+    from pptmstr import app
     from tests.test_layout_ini import SAVED
 
     ini = tmp_path / "pptmstr.ini"
@@ -4217,7 +4251,7 @@ def test_a_saved_layout_that_cannot_be_rewritten_is_said_and_the_app_still_start
     def refuse(*args: object) -> None:
         raise PermissionError("read-only")
 
-    monkeypatch.setattr(layout_ini.os, "replace", refuse)
+    monkeypatch.setattr(os, "replace", refuse)
     mark = LOG.snapshot()[1]
     app._keep_saved_layouts(ini)
 
@@ -4422,7 +4456,8 @@ def test_a_session_run_here_comes_back_after_a_restart_as_a_closed_card_and_noth
     session file byte for byte what the first process left -- a recall is not an
     end, and a card that rewrote its own file would read "just now" at every start.
     """
-    from pptmstr import boardlog, boardsync, sessionfile
+    from pptmstr import boardsync, sessionfile
+    from pptmstr.journal import files as journal_files
     from pptmstr.model import AgentState, EndedHow, TranscriptPresence
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
@@ -4436,9 +4471,9 @@ def test_a_session_run_here_comes_back_after_a_restart_as_a_closed_card_and_noth
     def unread(*a: object, **k: object) -> object:
         raise AssertionError("a closed card's board log was read")
 
-    for module, name in ((boardsync, "find"), (boardsync, "load"), (boardlog, "read")):
+    for module, name in ((boardsync, "find"), (boardsync, "load"), (journal_files, "read")):
         monkeypatch.setattr(module, name, unread)
-    monkeypatch.setattr(boardlog, "next_ordinal", unread)
+    monkeypatch.setattr(journal_files, "next_ordinal", unread)
 
     state = _started(monkeypatch, lambda: [_row(session_id)])
     _frames(state, 3)
@@ -8232,6 +8267,195 @@ def test_a_request_the_store_refuses_writes_no_file(commands: _Commands) -> None
     assert commands.state.command_pending == set() and not commands.root.exists()
 
 
+def test_a_command_record_that_cannot_be_queued_is_said_once_and_the_batch_is_kept(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    ``_record_commands`` must not raise: ``apply_all`` would abandon the batch,
+    and the session file's half of the same step would go with it. A writer
+    that refuses the same way on every step is one line in the log, the error
+    held on ``AppState``, and every intent applied.
+    """
+    from pptmstr import app, fleetsync
+    from pptmstr.command import Command
+    from pptmstr.intents import AgentSpawned, CommandRequested, StateChanged
+    from pptmstr.model import AgentState
+
+    class Fleet(fleetsync.FleetWriter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.submitted: list[fleetsync.Change] = []
+
+        def submit(self, change: fleetsync.Change) -> int:
+            self.submitted.append(change)
+            return 0
+
+    fleet = Fleet()
+
+    class Unqueueable(app.CommandFiles):
+        def __init__(self) -> None:
+            super().__init__(tmp_path / "sessions")
+            self.asked: list[str] = []
+            self.fleet_at_first: int | None = None
+
+        def request(self, command: Command) -> None:
+            if self.fleet_at_first is None:
+                self.fleet_at_first = len(fleet.submitted)
+            self.asked.append(command.id)
+            raise OSError("no room")
+
+        def end(self, command: Command) -> None:
+            raise AssertionError("nothing here gains an end")
+
+    logged: list[tuple[str, str]] = []
+    monkeypatch.setattr(LOG, "error", lambda where, said: logged.append((where, said)))
+    monkeypatch.setattr(LOG, "debug", lambda where, said: None)
+    files = Unqueueable()
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    state.fleet_writer = fleet
+    state.command_files = files
+
+    def asked(serial: int) -> CommandRequested:
+        command = Command(
+            id=f"cmd-20261013T101500Z-{serial:012x}",
+            asker=_CROOT,
+            asked="true",
+            reason="why",
+            expects="what",
+            asked_at=1.0,
+        )
+        return CommandRequested(_CROOT, command, None, time.time())
+
+    first, second = asked(1), asked(2)
+    for intent in (
+        AgentSpawned(
+            node_id=_CROOT,
+            parent=None,
+            task="rotate the key",
+            model="claude-opus-5",
+            started_at=0.0,
+            cwd="/work",
+        ),
+        StateChanged(_CROOT, AgentState.THINKING),
+        first,
+        StateChanged(_CROOT, AgentState.AWAITING_INPUT),
+    ):
+        state.bridge.emit(intent)
+    app.apply_intents(state)
+    state.bridge.emit(second)
+    app.apply_intents(state)
+
+    held = state.store.snapshot()
+    assert set(held.commands) == {first.command.id, second.command.id}
+    assert held.nodes[_CROOT].state is AgentState.AWAITING_INPUT
+    # Each step is derived on its own: the second request was still handed over.
+    assert files.asked == [first.command.id, second.command.id]
+    assert state.command_pending == {first.command.id, second.command.id}
+    assert state.command_observer_failed == "OSError: no room"
+    assert [where for where, _ in logged] == ["command"]
+    # The session file's half ran for the step after the one that failed.
+    assert files.fleet_at_first is not None
+    assert len(fleet.submitted) > files.fleet_at_first
+
+
+# Every arm of ``store._apply`` that rebinds ``commands``, and what it does to the
+# map. ``_record_commands`` derives every record from the two maps except one bit,
+# whether an appeared command came from a file, which only the intent can say: it
+# is read as ``isinstance(intent, ...)``. An arm that adds commands read from a
+# file and is not named there is taken for "asked in this window", and its
+# commands are not marked as read back (``AppState.command_restored``).
+_COMMAND_ARMS = {
+    "CommandRequested": "adds one asked in this window",
+    "CommandsRestored": "adds those read from a session's files",
+    "CommandApproved": "changes one held",
+    "CommandRefused": "changes one held",
+    "CommandWithdrawn": "changes one held",
+    "CommandStopAsked": "changes one held",
+    "CommandEnded": "changes one held",
+    "CommandsRead": "changes one held",
+}
+_FROM_FILES = "adds those read from a session's files"
+
+
+def _class_names(pattern: object) -> set[str]:
+    import ast
+
+    match pattern:
+        case ast.MatchClass(cls=ast.Name(id=name)):
+            return {name}
+        case ast.MatchOr(patterns=alternatives):
+            return set().union(*(_class_names(each) for each in alternatives))
+        case ast.MatchAs(pattern=inner) if inner is not None:
+            return _class_names(inner)
+        case _:
+            raise AssertionError(f"a case pattern this test does not read: {ast.dump(pattern)}")  # type: ignore[arg-type]
+
+
+def test_every_intent_that_brings_commands_in_from_files_is_read_as_a_restore() -> None:
+    """
+    The one open edge of the snapshot diff: a second intent that loads commands
+    from files would be read as asked in this window, every test of the reducer
+    passing. So every arm that rebinds ``commands`` is named above with what it
+    does, and the intents ``_record_commands`` reads as a restore are exactly
+    the ones the table says add commands from files.
+    """
+    import ast
+    import inspect
+
+    from pptmstr import app, store
+
+    tree = ast.parse(inspect.getsource(store))
+    (apply,) = (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_apply")
+
+    def rebinds_commands(nodes: list[ast.stmt]) -> bool:
+        return any(
+            isinstance(target, ast.Name) and target.id == "commands"
+            for node in nodes
+            for each in ast.walk(node)
+            if isinstance(each, ast.Assign | ast.AugAssign | ast.AnnAssign)
+            for target in (each.targets if isinstance(each, ast.Assign) else [each.target])
+        )
+
+    arms: set[str] = set()
+    inside: set[int] = set()
+    for match in (n for n in ast.walk(apply) if isinstance(n, ast.Match)):
+        assert isinstance(match.subject, ast.Name) and match.subject.id == "intent"
+        for case in match.cases:
+            inside.update(id(n) for stmt in case.body for n in ast.walk(stmt))
+            if rebinds_commands(case.body):
+                arms |= _class_names(case.pattern)
+    assert arms == set(_COMMAND_ARMS), (
+        "the arms of _apply that rebind ``commands`` changed: say in _COMMAND_ARMS what"
+        " each does to the map, and if it adds commands read from files,"
+        " _record_commands must read it as a restore"
+    )
+    # Outside the arms, ``commands`` is only bound to the snapshot's.
+    outside = [
+        ast.unparse(n)
+        for n in ast.walk(apply)
+        if isinstance(n, ast.Assign | ast.AugAssign | ast.AnnAssign)
+        and id(n) not in inside
+        and rebinds_commands([n])
+    ]
+    assert outside == ["commands = snap.commands"]
+
+    observer = ast.parse(inspect.getsource(app._record_commands))
+    read_as_restore = {
+        name.id
+        for call in ast.walk(observer)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "isinstance"
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "intent"
+        for name in ast.walk(call.args[1])
+        if isinstance(name, ast.Name)
+    }
+    assert read_as_restore == {
+        intent for intent, does in _COMMAND_ARMS.items() if does == _FROM_FILES
+    }
+
+
 def test_the_readme_states_the_runners_numbers_as_the_code_has_them() -> None:
     """
     The README's section for the operator spells numbers the code owns. Each
@@ -8795,6 +9019,10 @@ def test_what_a_commands_own_directory_cost_its_environment_is_logged_at_its_end
     ]
 
 
+# The handler only counts, and the loop says so. A handler that printed could
+# run while the main thread was still inside print("ready"), after the line was
+# out but before the stdout buffer was released, and the nested write raises
+# "reentrant call inside <_io.BufferedWriter>". A loaded machine hits that window.
 _SIGNALLED_TWICE = """
 import signal, sys, time
 from pptmstr import app
@@ -8802,11 +9030,14 @@ from pptmstr import app
 asked = []
 def request():
     asked.append(1)
-    print("asked", len(asked), flush=True)
 
 app.exit_on_signals(request)
 print("ready", flush=True)
+said = 0
 while True:      # a shutdown that has hung
+    if len(asked) > said:
+        said = len(asked)
+        print("asked", said, flush=True)
     time.sleep(0.05)
 """
 
@@ -8994,8 +9225,12 @@ def test_every_frame_looks_for_an_approval_that_started_nothing_and_reads_the_lo
     assert main.index("the_loop_returned()") < main.index("_shut_down(state)")
 
 
+# The handler only records, and the loop looks, as the window loop looks at
+# app_shall_exit. An Event set from the handler can deadlock: the handler runs
+# on the main thread between two bytecodes, which may be inside the wait on that
+# same Event with its lock held, and set() then waits for that lock for ever.
 _SIGNALLED = """
-import os, sys, threading, time
+import os, sys, time
 from pathlib import Path
 from pptmstr import app, commandfile, commandrun
 from pptmstr.command import Command, Run
@@ -9005,23 +9240,26 @@ asked = Command(id="cmd-20261013T101500Z-00000000beef", asker=("s", None), asked
                 reason="", expects="", asked_at=1.0)
 commandfile.write_request(asked, root)
 runner = commandrun.Runner(lambda ended: None, root=root, grace_s=0.3, drain_s=0.2)
-asked_to_exit = threading.Event()
+asked_to_exit = []
 if handled:
-    app.exit_on_signals(asked_to_exit.set)
+    app.exit_on_signals(lambda: asked_to_exit.append(1))
 import dataclasses
 runner.start(dataclasses.replace(asked, run=Run("sleep 1000 & wait", shell, cwd, 600.0, 2.0)))
 while commandfile.read_started("s", asked.id, root) is None:
     time.sleep(0.01)
 print("ready", flush=True)
 try:
-    while not asked_to_exit.wait(0.05):   # the window loop
-        pass
+    while not asked_to_exit:   # the window loop
+        time.sleep(0.05)
 finally:
     runner.close(5.0)
 """
 
 
-@pytest.mark.parametrize("handled", [False, True])
+# The handled case is serial: it ends on Gone, which holds only while nothing
+# else that cannot be read is started in this process's control group
+# (tests/test_commandrun.py, ALONE_IN_ITS_GROUP).
+@pytest.mark.parametrize("handled", [False, pytest.param(True, marks=pytest.mark.serial)])
 def test_a_sigterm_or_sighup_closes_the_runner_and_without_the_handler_orphans_the_command(
     tmp_path: Path, command_mark: str, handled: bool
 ) -> None:
@@ -9137,6 +9375,10 @@ def _tagged_orphan(commands: _Commands, command_mark: str, script: str, old: str
     return orphan, started, child
 
 
+# Serial: what it says of the orphan holds only while nothing else that cannot
+# be read is started in this process's control group (tests/test_commandrun.py,
+# ALONE_IN_ITS_GROUP).
+@pytest.mark.serial
 def test_a_command_whose_shell_died_owes_a_row_and_holds_its_session_by_its_tag(
     commands: _Commands, command_mark: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -9429,7 +9671,9 @@ def test_a_link_and_its_close_survive_a_restart_through_the_channel_log() -> Non
     ``apply_intents``, written by the channel writer, and read back by the next
     ``_start`` before anything else is queued.
     """
-    from pptmstr import app, channels
+    from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
+    from pptmstr.channels import log as channel_log
     from pptmstr.intents import AgentSpawned, ChannelsRestored
     from pptmstr.settings import Loaded
     from pptmstr.ui.board_pane import LogState
@@ -9444,7 +9688,7 @@ def test_a_link_and_its_close_survive_a_restart_through_the_channel_log() -> Non
         app.apply_intents(first)
 
         linked = app.link_leads(first, "brand", frozenset({a, b}), "the brand work")
-        assert not isinstance(linked, channels.Refused)
+        assert not isinstance(linked, channel_log.Refused)
         app.apply_intents(first)
         assert app.close_channel(first, linked.channel_id) is None
         app.apply_intents(first)
@@ -9455,8 +9699,8 @@ def test_a_link_and_its_close_survive_a_restart_through_the_channel_log() -> Non
         app._close_board_log(first)
 
     assert (
-        channels.FileChannels().state(channels.LinkKey("brand", linked.channel_id))
-        == channels.Whole()
+        channel_log.FileChannels().state(channel_facts.LinkKey("brand", linked.channel_id))
+        == channel_facts.Whole()
     )
     second = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
     try:
@@ -9470,7 +9714,8 @@ def test_a_link_and_its_close_survive_a_restart_through_the_channel_log() -> Non
 
 
 def test_a_link_the_store_refuses_is_said_and_written_nowhere() -> None:
-    from pptmstr import app, channels
+    from pptmstr import app
+    from pptmstr.channels import log as channel_log
     from pptmstr.settings import Loaded
 
     state = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
@@ -9487,7 +9732,7 @@ def test_a_link_the_store_refuses_is_said_and_written_nowhere() -> None:
     said = [e.text for e in entries[len(entries) - (revision - mark) :] if e.source == "channel"]
     assert said == ["the leads were not linked: a member is not a running session"]
     assert state.store.snapshot().channels == {}
-    assert channels.FileChannels().links() == ()
+    assert channel_log.FileChannels().links() == ()
 
 
 def test_no_channel_log_is_read_or_written_where_no_board_is() -> None:
@@ -9525,21 +9770,25 @@ def test_a_link_whose_log_is_short_restores_not_live_and_its_name_links_afresh()
     A link, a damaged record, then a close the damage hides: the link is said
     and withheld, never live, and linking the name again gets a log of its own.
     A damaged log can never restore live, so the relink appends nothing to it
-    (``channels.owes_close``): it is left byte for byte. After the next start
+    (``channels.facts.owes_close``): it is left byte for byte. After the next start
     the earlier link is still not live and the new one is.
     """
-    from pptmstr import app, channels
+    from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
+    from pptmstr.channels import log as channel_log
     from pptmstr.intents import ChannelsRestored
     from pptmstr.settings import Loaded
 
-    log = channels.FileChannels()
-    old = channels.LinkKey("brand", "k1")
-    created = channels.LinkCreated(
+    log = channel_log.FileChannels()
+    old = channel_facts.LinkKey("brand", "k1")
+    created = channel_facts.LinkCreated(
         at=1.0, channel_id="k1", members=("lead-a", "lead-b"), charter=""
     )
-    assert log.append(old, created) == channels.Appended()
+    assert log.append(old, created) == channel_log.Appended()
     (log.root / "brand" / "k1" / "00000001.json").write_text("torn\n")
-    assert log.append(old, channels.LinkClosed(at=3.0, channel_id="k1")) == channels.Appended()
+    assert (
+        log.append(old, channel_facts.LinkClosed(at=3.0, channel_id="k1")) == channel_log.Appended()
+    )
     written = log.read(old)
     before = {f.name: f.read_bytes() for f in (log.root / "brand" / "k1").iterdir()}
 
@@ -9558,7 +9807,7 @@ def test_a_link_whose_log_is_short_restores_not_live_and_its_name_links_afresh()
 
         _running_and_recorded(state, "lead-c", "lead-d")
         linked = app.link_leads(state, "brand", frozenset({"lead-c", "lead-d"}), "again")
-        assert not isinstance(linked, channels.Refused)
+        assert not isinstance(linked, channel_log.Refused)
         app.apply_intents(state)
         assert state.store.snapshot().channels[linked.channel_id].live
     finally:
@@ -9568,11 +9817,11 @@ def test_a_link_whose_log_is_short_restores_not_live_and_its_name_links_afresh()
     assert {f.name: f.read_bytes() for f in (log.root / "brand" / "k1").iterdir()} == before
     assert log.read(old) == written
 
-    fresh = channels.LinkKey("brand", linked.channel_id)
+    fresh = channel_facts.LinkKey("brand", linked.channel_id)
     assert log.links() == tuple(sorted((old, fresh)))
-    assert log.state(fresh) == channels.Whole()
-    restored = channels.restore_all(log)
-    assert not isinstance(restored, channels.Unlisted)
+    assert log.state(fresh) == channel_facts.Whole()
+    restored = channel_log.restore_all(log)
+    assert not isinstance(restored, channel_log.Unlisted)
     by_link = {r.link: r for r in restored}
     assert by_link[old].withheld is not None
     assert by_link[fresh].withheld is None
@@ -9587,17 +9836,19 @@ def test_while_the_channel_logs_cannot_be_listed_no_link_is_made() -> None:
     """
     import os
 
-    from pptmstr import app, channels
+    from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
+    from pptmstr.channels import log as channel_log
     from pptmstr.intents import ChannelsRestored
     from pptmstr.settings import Loaded
 
     if os.geteuid() == 0:
         pytest.skip("root lists any directory")
-    log = channels.FileChannels()
-    created = channels.LinkCreated(
+    log = channel_log.FileChannels()
+    created = channel_facts.LinkCreated(
         at=1.0, channel_id="k1", members=("lead-a", "lead-b"), charter=""
     )
-    assert log.append(channels.LinkKey("brand", "k1"), created) == channels.Appended()
+    assert log.append(channel_facts.LinkKey("brand", "k1"), created) == channel_log.Appended()
     mark = LOG.snapshot()[1]
     log.root.chmod(0o300)
     try:
@@ -9614,18 +9865,19 @@ def test_while_the_channel_logs_cannot_be_listed_no_link_is_made() -> None:
         mark = LOG.snapshot()[1]
         refused = app.link_leads(state, "ops", frozenset({"lead-c", "lead-d"}), "")
 
-        assert isinstance(refused, channels.Refused)
+        assert isinstance(refused, channel_log.Refused)
         assert "could not be listed at startup" in refused.reason
         assert list(state.bridge.drain()) == []
         assert _channel_lines(mark) == [f"#ops: the leads were not linked: {refused.reason}"]
     finally:
         app._close_channel_log(state)
         app._close_board_log(state)
-    assert log.links() == (channels.LinkKey("brand", "k1"),)
+    assert log.links() == (channel_facts.LinkKey("brand", "k1"),)
 
 
 def test_a_charter_over_the_limit_is_refused_and_says_the_limit() -> None:
-    from pptmstr import app, channels
+    from pptmstr import app
+    from pptmstr.channels import log as channel_log
     from pptmstr.intents import ChannelLinked
     from pptmstr.settings import Loaded
 
@@ -9634,12 +9886,12 @@ def test_a_charter_over_the_limit_is_refused_and_says_the_limit() -> None:
         _running_and_recorded(state, "lead-a", "lead-b")
         pair = frozenset({"lead-a", "lead-b"})
 
-        refused = app.link_leads(state, "brand", pair, "x" * (channels.CHARTER_CHARS + 1))
+        refused = app.link_leads(state, "brand", pair, "x" * (channel_log.CHARTER_CHARS + 1))
 
-        assert isinstance(refused, channels.Refused)
-        assert f"over the {channels.CHARTER_CHARS}" in refused.reason
+        assert isinstance(refused, channel_log.Refused)
+        assert f"over the {channel_log.CHARTER_CHARS}" in refused.reason
         assert list(state.bridge.drain()) == []
-        linked = app.link_leads(state, "brand", pair, "x" * channels.CHARTER_CHARS)
+        linked = app.link_leads(state, "brand", pair, "x" * channel_log.CHARTER_CHARS)
         assert isinstance(linked, ChannelLinked)
     finally:
         app._close_channel_log(state)
@@ -9651,7 +9903,9 @@ def test_a_close_on_a_channel_whose_recording_stopped_is_said_and_returned() -> 
     The link's own fact did not land, so the channel stopped being recorded;
     the operator's close then holds for this run only, and is said to.
     """
-    from pptmstr import app, channels
+    from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
+    from pptmstr.channels import log as channel_log
     from pptmstr.intents import AgentSpawned
     from pptmstr.settings import Loaded
     from pptmstr.ui.board_pane import LogState
@@ -9660,37 +9914,39 @@ def test_a_close_on_a_channel_whose_recording_stopped_is_said_and_returned() -> 
         """Every channel log there is, on a disk with no room for a fact."""
 
         def __init__(self) -> None:
-            self.inner = channels.FileChannels()
+            self.inner = channel_log.FileChannels()
 
         def links(
             self, name: str | None = None
-        ) -> tuple[channels.LinkKey, ...] | channels.Unlisted:
+        ) -> tuple[channel_facts.LinkKey, ...] | channel_log.Unlisted:
             return self.inner.links(name)
 
-        def append(self, link: channels.LinkKey, fact: channels.Fact) -> channels.NotAppended:
-            return channels.NotAppended("no space left on device")
+        def append(
+            self, link: channel_facts.LinkKey, fact: channel_facts.Fact
+        ) -> channel_log.NotAppended:
+            return channel_log.NotAppended("no space left on device")
 
-        def read(self, link: channels.LinkKey) -> channels.Read:
+        def read(self, link: channel_facts.LinkKey) -> channel_facts.Read:
             return self.inner.read(link)
 
-        def state(self, link: channels.LinkKey) -> channels.ChannelState:
+        def state(self, link: channel_facts.LinkKey) -> channel_facts.ChannelState:
             return self.inner.state(link)
 
     a, b = "lead-a", "lead-b"
     state = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
     assert state.channel_writer is not None
     state.channel_writer.close()
-    state.channel_writer = channels.ChannelWriter(Full())
+    state.channel_writer = channel_log.ChannelWriter(Full())
     try:
         for sid in (a, b):
             state.bridge.emit(AgentSpawned((sid, None), None, "lead", "m", 0.0))
             state.board_logs[sid] = LogState(directory="", recording=True)
         app.apply_intents(state)
         linked = app.link_leads(state, "brand", frozenset({a, b}), "")
-        assert not isinstance(linked, channels.Refused)
+        assert not isinstance(linked, channel_log.Refused)
         app.apply_intents(state)
         deadline = time.monotonic() + 5.0
-        link = channels.LinkKey("brand", linked.channel_id)
+        link = channel_facts.LinkKey("brand", linked.channel_id)
         while state.channel_writer.refusal(link) is None:
             assert time.monotonic() < deadline, "the failed link never stopped the channel"
             time.sleep(0.01)
@@ -9718,18 +9974,19 @@ class _FailingCloses:
     """Every channel log, on a disk that takes a link and refuses a close."""
 
     def __init__(self) -> None:
-        from pptmstr import channels
+        from pptmstr.channels import log as channel_log
 
-        self.inner = channels.FileChannels()
+        self.inner = channel_log.FileChannels()
 
     def links(self, name: str | None = None) -> Any:
         return self.inner.links(name)
 
     def append(self, link: Any, fact: Any) -> Any:
-        from pptmstr import channels
+        from pptmstr.channels import facts as channel_facts
+        from pptmstr.channels import log as channel_log
 
-        if isinstance(fact, channels.LinkClosed):
-            return channels.NotAppended("no space left on device")
+        if isinstance(fact, channel_facts.LinkClosed):
+            return channel_log.NotAppended("no space left on device")
         return self.inner.append(link, fact)
 
     def read(self, link: Any) -> Any:
@@ -9741,14 +9998,15 @@ class _FailingCloses:
 
 def _linking_state(log: Any = None) -> Any:
     """A started app with two running, recorded leads, and ``log`` behind its writer."""
-    from pptmstr import app, channels
+    from pptmstr import app
+    from pptmstr.channels import log as channel_log
     from pptmstr.settings import Loaded
 
     state = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
     if log is not None:
         assert state.channel_writer is not None
         state.channel_writer.close()
-        state.channel_writer = channels.ChannelWriter(log)
+        state.channel_writer = channel_log.ChannelWriter(log)
     _running_and_recorded(state, "lead-a", "lead-b")
     return state
 
@@ -9776,10 +10034,7 @@ def _settle_channel_writer(state: Any) -> None:
 
     writer = state.channel_writer
     deadline = time.monotonic() + 5.0
-    while True:
-        with writer._changed:
-            if not writer._pending:
-                break
+    while writer.outstanding:
         assert time.monotonic() < deadline, "the channel writer never settled"
         time.sleep(0.01)
     app.apply_intents(state)
@@ -9808,19 +10063,20 @@ def test_a_submitted_link_form_emits_exactly_one_link() -> None:
 
 
 def test_a_charter_over_the_cap_is_refused_in_the_form_and_nothing_is_emitted() -> None:
-    from pptmstr import app, channels
+    from pptmstr import app
+    from pptmstr.channels import log as channel_log
 
     state = _linking_state()
     try:
-        linked, form = _submit(state, charter="x" * (channels.CHARTER_CHARS + 1))
+        linked, form = _submit(state, charter="x" * (channel_log.CHARTER_CHARS + 1))
         queued = state.bridge.drain()
     finally:
         app._close_channel_log(state)
         app._close_board_log(state)
 
     assert not linked and queued == []
-    assert form.refused is not None and str(channels.CHARTER_CHARS) in form.refused
-    assert form.charter == "x" * (channels.CHARTER_CHARS + 1)
+    assert form.refused is not None and str(channel_log.CHARTER_CHARS) in form.refused
+    assert form.charter == "x" * (channel_log.CHARTER_CHARS + 1)
 
 
 def test_a_link_the_store_refuses_after_the_form_closed_is_put_in_front_of_the_operator() -> None:
@@ -9874,11 +10130,12 @@ def test_a_close_refused_at_once_is_put_in_front_of_the_operator() -> None:
     The link's own fact failed, so the link stopped being recorded; Close
     channel then holds for this run only, and the notice says so with why.
     """
-    from pptmstr import app, channels
+    from pptmstr import app
+    from pptmstr.channels import log as channel_log
 
     class Full(_FailingCloses):
         def append(self, link: Any, fact: Any) -> Any:
-            return channels.NotAppended("no space left on device")
+            return channel_log.NotAppended("no space left on device")
 
     state = _linking_state(Full())
     try:
@@ -10014,41 +10271,50 @@ def test_a_close_not_written_is_worded_by_whose_close_it_was() -> None:
       its stop marker did not land either, and not when it did. One that
       landed is not put in front of the operator.
     """
-    from pptmstr import app, channels
+    from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
+    from pptmstr.channels import log as channel_log
 
-    made = channels.LinkKey("brand", "new")
+    made = channel_facts.LinkKey("brand", "new")
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000.0))
-    full = channels.NotAppended("no space left on device")
+    full = channel_log.NotAppended("no space left on device")
     state = _linking_state()
     try:
         _submit(state, name="brand")
         app.apply_intents(state)
         (live,) = state.store.snapshot().channels
-        reports: tuple[channels.Report, ...] = (
-            channels.Outcome(
-                channels.LinkKey("brand", live), channels.LinkClosed(at=1.0, channel_id=live), full
+        reports: tuple[channel_log.Report, ...] = (
+            channel_log.Outcome(
+                channel_facts.LinkKey("brand", live),
+                channel_facts.LinkClosed(at=1.0, channel_id=live),
+                full,
             ),
-            channels.Swept(made, channels.Unlisted("EIO")),
-            channels.Swept(
+            channel_log.Swept(made, channel_log.Unlisted("EIO")),
+            channel_log.Swept(
                 made,
                 (
-                    channels.SweptClose(
-                        channels.LinkKey("brand", "e1"),
+                    channel_log.SweptClose(
+                        channel_facts.LinkKey("brand", "e1"),
                         1_700_000_000.0,
                         full,
-                        channels.NotAppended("disk full"),
+                        channel_log.NotAppended("disk full"),
                     ),
-                    channels.SweptClose(
-                        channels.LinkKey("brand", "e2"), 1_700_000_000.0, full, channels.Appended()
+                    channel_log.SweptClose(
+                        channel_facts.LinkKey("brand", "e2"),
+                        1_700_000_000.0,
+                        full,
+                        channel_log.Appended(),
                     ),
-                    channels.SweptClose(
-                        channels.LinkKey("brand", "e4"), 1_700_000_000.0, channels.Appended()
+                    channel_log.SweptClose(
+                        channel_facts.LinkKey("brand", "e4"),
+                        1_700_000_000.0,
+                        channel_log.Appended(),
                     ),
-                    channels.SweptClose(
-                        channels.LinkKey("brand", "e3"),
+                    channel_log.SweptClose(
+                        channel_facts.LinkKey("brand", "e3"),
                         None,
                         full,
-                        channels.NotAppended("disk full"),
+                        channel_log.NotAppended("disk full"),
                     ),
                 ),
             ),
@@ -10081,25 +10347,31 @@ def test_a_sweep_is_logged_as_the_sweeps_and_never_as_the_new_links_close() -> N
     could list none, as the new link linked with nothing checked. No line
     names a ``LinkClosed`` of the new link, which nothing closed.
     """
-    from pptmstr import app, channels
+    from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
+    from pptmstr.channels import log as channel_log
     from pptmstr.log import LOG
 
-    made = channels.LinkKey("brand", "new")
-    full = channels.NotAppended("no space left on device")
+    made = channel_facts.LinkKey("brand", "new")
+    full = channel_log.NotAppended("no space left on device")
     mark = LOG.snapshot()[1]
     app._read_channel_reports(
         (
-            channels.Swept(
+            channel_log.Swept(
                 made,
                 (
-                    channels.SweptClose(channels.LinkKey("brand", "e1"), 1.0, channels.Appended()),
-                    channels.SweptClose(
-                        channels.LinkKey("brand", "e2"), 1.0, full, channels.Appended()
+                    channel_log.SweptClose(
+                        channel_facts.LinkKey("brand", "e1"), 1.0, channel_log.Appended()
                     ),
-                    channels.SweptClose(channels.LinkKey("brand", "e3"), None, channels.Appended()),
+                    channel_log.SweptClose(
+                        channel_facts.LinkKey("brand", "e2"), 1.0, full, channel_log.Appended()
+                    ),
+                    channel_log.SweptClose(
+                        channel_facts.LinkKey("brand", "e3"), None, channel_log.Appended()
+                    ),
                 ),
             ),
-            channels.Swept(made, channels.Unlisted("EIO")),
+            channel_log.Swept(made, channel_log.Unlisted("EIO")),
         )
     )
     entries, revision = LOG.snapshot()
@@ -10142,7 +10414,8 @@ def test_a_sweep_report_drained_after_the_operator_closed_its_link_is_still_the_
     is what the operator's own close looks like; the notice is still the
     sweep's, and nothing says the operator's close failed.
     """
-    from pptmstr import app, channels
+    from pptmstr import app
+    from pptmstr.channels import facts as channel_facts
 
     log = _Unlistable()
     log.gate.clear()
@@ -10157,12 +10430,12 @@ def test_a_sweep_report_drained_after_the_operator_closed_its_link_is_still_the_
         log.gate.set()
         _settle_channel_writer(state)
         notices = list(state.not_done)
-        facts = log.inner.read(channels.LinkKey("brand", held.id)).facts
+        facts = log.inner.read(channel_facts.LinkKey("brand", held.id)).facts
     finally:
         app._close_channel_log(state)
         app._close_board_log(state)
 
-    assert [type(f) for f in facts] == [channels.LinkCreated, channels.LinkClosed]
+    assert [type(f) for f in facts] == [channel_facts.LinkCreated, channel_facts.LinkClosed]
     # Nothing in it says #brand is linked now, which it is not.
     assert notices == [UNLISTED_EIO.replace("(EIO)", "(OSError: permission denied)")]
 
@@ -10171,10 +10444,11 @@ class _Unwritable(_Unlistable):
     """A log that can list no name's links and takes no link's creation."""
 
     def append(self, link: Any, fact: Any) -> Any:
-        from pptmstr import channels
+        from pptmstr.channels import facts as channel_facts
+        from pptmstr.channels import log as channel_log
 
-        if isinstance(fact, channels.LinkCreated):
-            return channels.NotAppended("read-only file system")
+        if isinstance(fact, channel_facts.LinkCreated):
+            return channel_log.NotAppended("read-only file system")
         return self.inner.append(link, fact)
 
 
@@ -10213,12 +10487,14 @@ def test_an_earlier_link_the_sweep_cannot_close_is_named_apart_from_the_new_one(
     close and that fails too. The notice is about E, says so by when E was
     made, and says it may read live at the next start.
     """
-    from pptmstr import app, boardlog, channels
+    from pptmstr import app
+    from pptmstr.channels import log as channel_log
+    from pptmstr.journal import codec
 
     class Unmarkable(_FailingCloses):
         def append(self, link: Any, fact: Any) -> Any:
-            if isinstance(fact, boardlog.RecordingStopped):
-                return channels.NotAppended("read-only file system")
+            if isinstance(fact, codec.RecordingStopped):
+                return channel_log.NotAppended("read-only file system")
             return super().append(link, fact)
 
     state = _linking_state(Unmarkable())
@@ -10395,3 +10671,54 @@ def test_the_inbox_is_handed_go_to_and_resume_that_reach_the_shell(
     actions.go_to(("s-z", None))
     actions.resume(("s-z", None))
     assert reached == [("go_to", ("s-z", None)), ("resume", ("s-z", None))]
+
+
+# -- the docks' titles --------------------------------------------------------------
+
+# Byte for byte: a window's title is its ImGui id, which the saved layout ini keys
+# on, so a changed title is an operator's arrangement lost.
+_TITLES = (
+    "FLEET",
+    "NEEDS YOU",
+    "CONTEXT",
+    "DETAIL",
+    "BOARD",
+    "DIGEST",
+    "BRIEF",
+    "SESSION",
+    "HEALTH",
+    "LOG",
+)
+_TRIAGE = ("FLEET", "NEEDS YOU", "DETAIL", "BOARD", "DIGEST", "BRIEF", "CONTEXT", "LOG")
+_FOCUS = ("FLEET", "SESSION", "HEALTH", "DETAIL", "BOARD", "DIGEST", "BRIEF", "LOG")
+
+
+def test_the_panes_are_the_docks_the_app_has_always_drawn() -> None:
+    from pptmstr import app
+
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    assert tuple(app._panels(state)) == _TITLES
+
+
+def test_the_app_draws_every_dock_the_table_names_and_no_other() -> None:
+    """
+    ``panes.DOCKS`` is the table the titles come from, so a dock added to it and
+    not drawn by ``_panels``, or drawn and not added, fails here and not in a
+    window an operator has to notice is missing.
+    """
+    from pptmstr import app
+    from pptmstr.ui import panes
+
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    assert tuple(app._panels(state)) == tuple(dock.title for dock in panes.DOCKS)
+
+
+@pytest.mark.parametrize("layout, titles", [("_triage_layout", _TRIAGE), ("_focus_layout", _FOCUS)])
+def test_each_layout_declares_its_windows_under_the_titles_the_ini_keys_on(
+    layout: str, titles: tuple[str, ...]
+) -> None:
+    from pptmstr import app
+
+    panels = {title: (lambda: None) for title in _TITLES}
+    windows = getattr(app, layout)(panels).dockable_windows
+    assert tuple(window.label for window in windows) == titles

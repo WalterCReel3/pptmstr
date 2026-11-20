@@ -1087,16 +1087,19 @@ def test_the_typeset_faces_are_loaded_after_the_ui_font(monkeypatch) -> None:
     monkeypatch.setattr(
         theme, "_load_face", lambda asset, *, icons: order.append(asset.rsplit("/", 1)[-1]) or 1
     )
-    monkeypatch.setattr(typeset, "load_fonts", lambda bold=None: order.append(f"typeset:{bold}"))
-    theme.load_fonts()
+    monkeypatch.setattr(
+        typeset.gate, "load_fonts", lambda bold=None: order.append(f"typeset:{bold}")
+    )
+    typeset.load_application_fonts()
     bold = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
     assert order == ["Inconsolata-Medium.ttf", "Inconsolata-Bold.ttf", f"typeset:{bold}"]
 
 
 def test_a_failure_loading_the_typeset_faces_is_not_fatal(monkeypatch) -> None:
     """
-    ``load_fonts``' own contract, extended to the faces it now also loads: the app
-    starts, the panes keep the renderers they had, and the menu can say why.
+    ``theme.load_fonts``' own contract, extended to the faces the application's
+    callback loads after it: the app starts, the panes keep the renderers they had,
+    and the menu can say why.
     """
     from pptmstr.ui import typeset
 
@@ -1105,9 +1108,9 @@ def test_a_failure_loading_the_typeset_faces_is_not_fatal(monkeypatch) -> None:
 
     _fake_runner(monkeypatch)
     monkeypatch.setattr(theme, "_load_face", lambda asset, *, icons: object())
-    monkeypatch.setattr(typeset, "load_fonts", explode)
+    monkeypatch.setattr(typeset.gate, "load_fonts", explode)
     try:
-        theme.load_fonts()
+        typeset.load_application_fonts()
         assert not typeset.available() and not typeset.enabled()
         assert typeset.unavailable_reason() == (
             "the typesetting library failed and is not in use (RuntimeError: no fontTools)"
@@ -1127,8 +1130,8 @@ def test_without_a_ui_font_the_typeset_faces_are_not_loaded_at_all(monkeypatch) 
     called: list[object] = []
     _fake_runner(monkeypatch)
     monkeypatch.setattr(theme, "_load_face", lambda asset, *, icons: None)
-    monkeypatch.setattr(typeset, "load_fonts", lambda bold=None: called.append(1))
-    theme.load_fonts()
+    monkeypatch.setattr(typeset.gate, "load_fonts", lambda bold=None: called.append(1))
+    typeset.load_application_fonts()
     assert called == []
 
 
@@ -1143,9 +1146,9 @@ def test_with_typesetting_switched_off_the_faces_are_loaded_all_the_same(monkeyp
     calls: list[str] = []
     _fake_runner(monkeypatch)
     monkeypatch.setattr(theme, "_load_face", lambda asset, *, icons: object())
-    monkeypatch.setattr(typeset, "load_fonts", lambda bold=None: calls.append(bold.name))
+    monkeypatch.setattr(typeset.gate, "load_fonts", lambda bold=None: calls.append(bold.name))
     monkeypatch.setattr(typeset, "wanted", lambda: False)
-    theme.load_fonts()
+    typeset.load_application_fonts()
     assert calls == ["Inconsolata-Bold.ttf"]
 
 

@@ -12,12 +12,12 @@ is a team here.
 bottom:
 
 1. *Taken without you*: every decision of the session its asker filed as
-   already taken (``digest.taken_decisions``), the open ones first. Each is work
+   already taken (``board.digest.taken_decisions``), the open ones first. Each is work
    an agent went on from that the operator has not ratified, and an answer that
    disagrees means work to undo. An open one is a line that puts the cursor on
    its NEEDS YOU row, as a click on that row does.
 2. *Incidents*: those marked since the lead last read a digest first, then the
-   earlier ones (``digest.digest`` from the lead's mark, which splits them).
+   earlier ones (``board.digest.digest`` from the lead's mark, which splits them).
 3. Everything else -- changed, waiting, unverified -- behind one line that
    counts them, closed until the operator opens it. Open, it is the lead's
    slots as ``rest_rows`` draws them. Its open state is ImGui's, per session,
@@ -29,7 +29,7 @@ bottom:
    and they are the session's whether or not it is a team, so they are drawn
    under the one-line refusals too.
 
-``read_digest`` hands the lead the same ``digest.Digest`` in its own order and
+``read_digest`` hands the lead the same ``board.digest.Digest`` in its own order and
 with none of this; the reorganisation is this pane's alone.
 
 **The whole session, not a round.** The operator has no mark of their own -- a
@@ -53,9 +53,7 @@ from dataclasses import dataclass
 
 from imgui_bundle import imgui
 
-from ..board import board_concerns, board_tasks, has_board
-from ..command import Command, CommandId
-from ..digest import (
+from ..board.digest import (
     Digest,
     Reported,
     change_label,
@@ -68,6 +66,8 @@ from ..digest import (
     unverified_heading,
     unverified_label,
 )
+from ..board.rows import board_concerns, board_tasks, has_board
+from ..command import Command, CommandId
 from ..model import Answered, Decision, DecisionOwed, Dismissed, Snapshot
 from ..theme import P
 from . import command_view, decision_view, inbox, widgets

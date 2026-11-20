@@ -20,7 +20,6 @@ import asyncio
 import json
 import re
 import time
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,25 +54,17 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import SystemPromptCustom, SystemPromptPreset
 
-from . import plugins
-from .approval import (
-    Disposition,
-    Policy,
-    classify,
-    diff_texts,
-    inherits_to_subagents,
-    is_edit,
-    records_read,
-    records_written,
-    render_texts,
-    requires_containment,
-    summarize,
-)
-from .board import ROOT_NAMES, address_for
+from . import commandbus, ids, plugins
 from .bridge import Bridge
 from .bus import CALLED_AT_KEY, EDITED_KEY, FROM_KEY, SERVER_NAME, build_server, offered_tools
 from .cli_version import BelowFloor, MeetsFloor, Unreadable, VersionRead, check_floor
 from .figures import fences
+from .gate.classify import classify
+from .gate.diff import render_texts
+from .gate.park import diff_texts, summarize
+from .gate.policy import Disposition, Policy, inherits_to_subagents, requires_containment
+from .gate.reach import records_read, records_written
+from .gate.rows import is_edit
 from .intents import (
     AgentFinished,
     AgentResumed,
@@ -104,6 +95,7 @@ from .model import (
     UsageRollup,
     written_path,
 )
+from .naming import ROOT_NAMES, address_for
 from .settings import McpConnector
 from .templates import SOLO, WorkTemplate, lead_briefing, worker_prompt
 from .transcript import SegmentKind, Transcript
@@ -156,7 +148,7 @@ MAX_STREAM_FRAME = 64 * 1024 * 1024
 # return <settings>.includeGitInstructions ?? true``). A setting therefore loses to
 # any value of the variable the operator's shell exports, while ``options.env`` is
 # merged over the inherited environment by the transport and so replaces that value.
-# The setting would also have to be spliced into ``sandbox.containment_settings``'s
+# The setting would also have to be spliced into ``gate.sandbox.containment_settings``'s
 # string and would give an uncontained launch a ``--settings`` flag it does not have.
 #
 # What this does not reach: a settings file's own ``env`` block, which the CLI applies
@@ -238,8 +230,8 @@ SESSION_TAG = "pptmstr"
 
 # The names that mean the root session, and so can never be allocated to a
 # sub-agent. A worker calls the agent that gave it the job by whichever of these
-# comes to mind, and all three have to land on the same node. The board's own
-# tuple, because ``board.address_for`` is what steps over them.
+# comes to mind, and all three have to land on the same node. ``naming``'s own
+# tuple, because ``naming.address_for`` is what steps over them.
 ROOT_ADDRESSES = ROOT_NAMES
 
 # pptmstr's own source tree, which a session that writes unattended is never started
@@ -1107,7 +1099,7 @@ class AgentSession:
         # it, because a minted id would be a second candidate and the whole point of
         # this path is that the CLI is never handed two ids to choose between:
         # ``_options`` sets ``resume`` and omits ``session_id`` entirely.
-        self.session_id = resume or str(uuid.uuid4())
+        self.session_id = resume or ids.session()
         self.node_id: NodeId = (self.session_id, None)
         # Whether the CLI has named an id and it matched. Only a resumed session acts
         # on this; a fresh one supplied its own id and is not re-litigating it here.
@@ -1122,7 +1114,7 @@ class AgentSession:
         self.cwd = cwd
         self.session_base = session_base
         # §8's containment configuration as the JSON string ``settings`` takes -- what
-        # ``sandbox.containment_settings`` returns -- or None for a launch that is not
+        # ``gate.sandbox.containment_settings`` returns -- or None for a launch that is not
         # contained. Carried as text rather than as anything structured because three of
         # §8's keys have no slot in the SDK's ``SandboxSettings``; the comment in
         # ``_options`` says why the typed field must stay unset. Read through the
@@ -1406,12 +1398,12 @@ class AgentSession:
         The policy a call classifies under, given the node that made it.
 
         Whether a sub-agent inherits is the rung's own answer, read from
-        ``approval.inherits_to_subagents``. Both widened rungs inherit, by different
+        ``gate.policy.inherits_to_subagents``. Both widened rungs inherit, by different
         routes: ``AUTONOMOUS`` because the sandbox is per CLI process and a sub-agent
         shares its parent's, ``PERMISSIVE`` because ``shellscan`` is re-run per
         command and its verdict does not weaken with fan-out. What still costs an
         approval under both is the spawn itself at ``PERMISSIVE`` -- ``Task``/
-        ``Agent`` stay in ``_REVIEW`` there -- so agent count is operator-bounded one
+        ``Agent`` stay in ``REVIEW`` there -- so agent count is operator-bounded one
         at a time, under a ``subagent_cap`` no policy can widen.
 
         The rung decides and this function applies it, rather than the branch living
@@ -1488,7 +1480,7 @@ class AgentSession:
 
         An agent of an earlier run that has not started in this one is
         ``builder, from an earlier run``, as the board names it
-        (``board.role_name``), and that is deliberately not a name anything
+        (``addresses.role_name``), and that is deliberately not a name anything
         routes: a reply to it is answered by ``role_status``, which says why.
         None for a node this session has no name for at all, which includes a
         party the log knew by address and not by id.
@@ -1567,7 +1559,7 @@ class AgentSession:
         """
         The address a sub-agent answers to, allocated once and never moved.
 
-        Decided by ``board.address_for`` over ``addresses()``, which is the
+        Decided by ``naming.address_for`` over ``addresses()``, which is the
         function and the table the board names the same agent from: the name
         mail is routed by and the name every board read shows are one answer.
 
@@ -1761,7 +1753,7 @@ class AgentSession:
         # veto lasts only as long as the gate does -- narrower than it should be, but a
         # veto that cannot be lowered is the failure worth avoiding.
         call_id = str(data.get("tool_use_id", ""))
-        key = call_id or f"anon-{uuid.uuid4().hex}"
+        key = ids.call_key(call_id)
 
         # Stamped on the way in and again on the way out of the gate. Neither stamp is
         # what keeps a long call alive -- the veto does that -- but a denied call gets no
@@ -2029,7 +2021,7 @@ class AgentSession:
         Its own sentence because ``_no_reviewer_reason``'s would send the agent
         the wrong way under ``AUTONOMOUS``: that one says the tool is one this
         build does not recognise and to use a tool it does, and here the tool is
-        ``Read`` and the path is what was refused. ``approval.records_read`` says
+        ``Read`` and the path is what was refused. ``gate.reach.records_read`` says
         which path and where the session's own records are; this adds only why
         nobody was asked, in ``_no_reviewer_reason``'s two cases and its order.
         """
@@ -2098,7 +2090,7 @@ class AgentSession:
         runs the tool -- and so fires the SubagentStart this pairs with -- only
         after the hook permits it, so an id recorded any earlier belongs to a call
         that may still be denied, cancelled, or overtaken by another spawn while a
-        human sits in the gate. `Agent` is in `_REVIEW`, so that gap is a human's
+        human sits in the gate. `Agent` is in `REVIEW`, so that gap is a human's
         latency rather than a scheduling accident.
 
         Appended rather than assigned: several calls can be admitted before the
@@ -2224,7 +2216,7 @@ class AgentSession:
         """
         texts = diff_texts(tool_name, tool_input)
         pending = PendingApproval(
-            id=f"{self.session_id[:8]}-{tool_use_id or uuid.uuid4().hex[:8]}",
+            id=ids.pending(self.session_id, tool_use_id),
             node=node,
             tool_name=tool_name,
             tool_use_id=tool_use_id,
@@ -2498,7 +2490,7 @@ class AgentSession:
         Keyed by the operator's own name for the server, which is what the CLI
         prefixes its tools with and therefore what the operator sees on a parked call.
         """
-        servers: dict[str, Any] = {SERVER_NAME: build_server(self)}
+        servers: dict[str, Any] = {SERVER_NAME: build_server(self, commandbus.TOOLS)}
         for connector in self.connectors:
             servers[connector.name] = cast(
                 Any, {"type": "claudeai-proxy", "url": connector.url, "id": connector.id}
@@ -2555,7 +2547,7 @@ class AgentSession:
             # delete the whole containment with no error. It could not carry a
             # replacement either: `SandboxSettings` has no `failIfUnavailable` or
             # `credentials`, and `SandboxNetworkConfig` no `strictAllowlist`
-            # (pptmstr/sandbox.py).
+            # (pptmstr/gate/sandbox.py).
             #
             # Piping the CLI's error stream is what this field is for: the transport
             # passes `stderr=PIPE` only when a callback is set, so without one every
@@ -2590,7 +2582,7 @@ class AgentSession:
             # so they park in front of the operator at every policy, `AUTONOMOUS`
             # included, and no policy can widen that. What a config file can do that
             # the gate does not see is *connect*: an stdio server named there is
-            # spawned by the CLI process, which `sandbox.py` records as running outside
+            # spawned by the CLI process, which `gate/sandbox.py` records as running outside
             # the sandbox. That happens before any tool call exists, so the gate never
             # gets a say and `toggle_mcp_server` cannot undo it. Naming the admitted
             # set here is what keeps an unadmitted server from ever starting.
@@ -2807,13 +2799,13 @@ class AgentSession:
         string reaches the CLI as the flag's value and counts as present here.
 
         Only ``app._launch`` supplies the value and it supplies
-        ``sandbox.containment_settings()`` or ``None``, so neither blank reaches
+        ``gate.sandbox.containment_settings()`` or ``None``, so neither blank reaches
         this from the application: the edge is the guard's own, not a route in.
 
         So this does not establish a working sandbox, or a sandbox at all. The
         string is not parsed: ``"{}"`` passes, as would a string that is not JSON
         or one whose JSON names no sandbox key. That the string is the one
-        ``sandbox.containment_settings`` builds is a property of the single call
+        ``gate.sandbox.containment_settings`` builds is a property of the single call
         site that supplies it, ``app._launch``, and not of this check.
 
         Whether the CLI honours the keys inside it is a different question again,
@@ -3155,7 +3147,7 @@ class AgentSession:
 
     async def wake(self, text: str) -> bool:
         """
-        Send the session a message of pptmstr's own (``bus.wake_message``): that
+        Send the session a message of pptmstr's own (``waketext.wake_message``): that
         something it was waiting for has arrived. True when a connected client
         took it, False when there was none, and then nothing is written.
 

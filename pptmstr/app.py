@@ -22,7 +22,6 @@ import tempfile
 import threading
 import time
 import traceback
-import uuid
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, fields
@@ -31,48 +30,53 @@ from typing import assert_never
 
 from imgui_bundle import hello_imgui, imgui, immapp
 
-from . import board as board_mod
 from . import (
     boardfacts,
     boardlog,
     boardsync,
-    bus,
-    channels,
     cli_version,
     commandfile,
     commandrun,
     drawable,
     effects,
     fleetsync,
+    ids,
     layout_ini,
     links,
     model_catalog,
+    naming,
     sessionfile,
     templates,
     theme,
     tree,
+    waketext,
 )
 from . import brief as brief_mod
 from . import settings as settings_mod
 from . import version as version_mod
-from .approval import Policy, requires_containment
 from .bridge import Bridge
+from .channels import facts as channel_facts
+from .channels import log as channel_log
 from .command import (
     COMMAND_TAG,
     Command,
     CommandId,
     CommandState,
     End,
+    EndOwed,
     EndUnknown,
+    FromFile,
     NotStarted,
     Released,
+    RequestOwed,
     Survivor,
+    owed_records,
 )
 from .command import Withdrawn as CommandWithdrawnEnd
 from .driver import AgentSession, UncontainedAutonomy
 from .fake_driver import FakeDriver
-from .figures import host as figure_host
 from .figures import render as figure_render
+from .gate.policy import Policy, requires_containment
 from .intents import (
     BoardRestored,
     ChannelClosed,
@@ -92,6 +96,8 @@ from .intents import (
     SessionDetached,
     SessionSettled,
 )
+from .journal import codec
+from .journal import files as journal_files
 from .log import LOG
 from .model import (
     MAX_COMMAND_REFUSAL_CHARS,
@@ -122,6 +128,7 @@ from .ui import (
     launcher,
     link_form,
     main_menu,
+    panes,
     rail,
     resume_form,
     review,
@@ -134,6 +141,7 @@ from .ui import (
     widgets,
 )
 from .ui import focus as focus_mod
+from .ui.typeset import figure_host
 from .ui.widgets import flat_line, format_elapsed
 
 # The two arrangements of C. Same panels in both; the rail is in the same place in
@@ -574,15 +582,11 @@ def _abandon_command(state: AppState, command_id: CommandId) -> str:
 def _record_commands(state: AppState) -> Observer:
     """
     The commands' half of the observer: what each applied step means for a
-    command's files, queued for ``CommandFiles``, and which commands came from
-    a file.
+    command's files (``command.owed_records``), queued for ``CommandFiles``,
+    and which commands came from a file (``AppState.command_restored``).
 
-    Derived from the two snapshots and not from the intent, so a request the
-    store refused writes nothing: a command that appeared is asked, and gets
-    its ``request.json``; one that gained an end with no run was refused or
-    withdrawn, and gets its ``end.json``. A command that appeared under a
-    ``CommandsRestored`` is one a file already holds, and is only noted
-    (``AppState.command_restored``).
+    The one thing read off the intent is whether the step is a restore; the
+    rest is the difference between the two snapshots' commands.
 
     **It does not raise**, for the reason ``_record_board`` gives. A step it
     could not derive is a record a command does not get, said once.
@@ -593,22 +597,20 @@ def _record_commands(state: AppState) -> Observer:
             return
         try:
             files = state.command_files
-            from_file = isinstance(intent, CommandsRestored)
-            for command_id, command in after.commands.items():
-                was = before.commands.get(command_id)
-                if was is None:
-                    if from_file:
+            restoring = isinstance(intent, CommandsRestored)
+            for owed in owed_records(before.commands, after.commands, restoring=restoring):
+                match owed:
+                    case FromFile(command_id):
                         state.command_restored.add(command_id)
-                    elif files is not None and command.state is CommandState.ASKED:
-                        state.command_pending.add(command_id)
-                        files.request(command)
-                elif (
-                    files is not None
-                    and was.end is None
-                    and command.end is not None
-                    and command.run is None
-                ):
-                    files.end(command)
+                    case RequestOwed(asked):
+                        if files is not None:
+                            state.command_pending.add(asked.id)
+                            files.request(asked)
+                    case EndOwed(ended):
+                        if files is not None:
+                            files.end(ended)
+                    case _:
+                        assert_never(owed)
         except Exception as exc:  # noqa: BLE001 - see the docstring: this must not raise
             reason = f"{type(exc).__name__}: {exc}"
             if state.command_observer_failed != reason:
@@ -967,7 +969,7 @@ class AppState:
     # The one appender of channel logs, or None where no board is recorded: a
     # link between leads is only made between sessions being recorded, so with
     # no board writer there is nothing it could record. See ``_record_channels``.
-    channel_writer: channels.ChannelWriter | None = None
+    channel_writer: channel_log.ChannelWriter | None = None
     # Why startup could not look at the channel logs, or None when it could.
     # Every link is refused while it is set: a link there may be live under the
     # name asked for, and "could not look" is not "none" (``link_leads``).
@@ -1160,7 +1162,7 @@ def _hold_wake(state: AppState, wake: effects.SessionWoken) -> None:
 def _send_wakes(state: AppState) -> None:
     """
     Send each session whose wakes are due one message of pptmstr's naming all
-    of them (``bus.wake_message``), through the pool to its live client
+    of them (``waketext.wake_message``), through the pool to its live client
     (``SessionPool.wake``).
 
     **Only a session that is there to read it.** One whose root is gone,
@@ -1214,7 +1216,7 @@ def _send_wakes(state: AppState) -> None:
             _say_peer_wakes_spent(state, snap, held, [])
             continue
         try:
-            state.bridge.submit(_wake(pool, root=root, text=bus.wake_message(snap, owed)))
+            state.bridge.submit(_wake(pool, root=root, text=waketext.wake_message(snap, owed)))
         except RuntimeError as exc:
             # The bridge's loop is not running, so nothing was handed over: the
             # wakes are kept for a later frame, as a starting session's are, and
@@ -1233,7 +1235,7 @@ def _sendable(snap: Snapshot, session_id: str) -> bool:
     a card recalled from its file, not done, cancelled or failed, and on the
     fleet.
 
-    Must agree with the store's ``store._wakeable``, which asks it to never
+    Must agree with the store's ``store.waking._wakeable``, which asks it to never
     leave a peer wake pending that this would drop. Were this to refuse a
     session the store would wake, each drop is said (``intents.PeerWakeSent``)
     with nothing covered, the store asks a counted wake again, and the link's
@@ -1279,7 +1281,7 @@ def _say_decisions_named(
     """
     Tell the store which decisions raised on a channel the message ``sent``
     to ``session_id`` names as answered or dismissed, those folded past
-    ``bus.WAKE_DECISIONS_NAMED`` included, as the folded ids of a peer line
+    ``waketext.WAKE_DECISIONS_NAMED`` included, as the folded ids of a peer line
     count as told: the store marks them told to its lead
     (``PeerWakes.heard``). Called only once the send is handed to the pool
     (``_send_wakes``), so a session whose client is gone by then is taken as
@@ -1303,7 +1305,7 @@ def _still_to_read(snap: Snapshot, wake: effects.SessionWoken) -> bool:
     ordered, whose messages that are not quiet may have been withdrawn,
     whose decisions may have ended, and whose questions owed an answer
     (``Snapshot.peer_owing``) may have been answered. Quiet mail alone wakes nobody, here as in
-    the store (``store._still_owed``).
+    the store (``store.waking._still_owed``).
     """
     if wake.reason is not effects.WakeReason.PEER_MESSAGE:
         return True
@@ -1420,7 +1422,7 @@ def _observer(state: AppState, writer: boardsync.BoardWriter | None) -> Observer
 def _record_channels(state: AppState) -> Observer:
     """
     The channel logs' half of the observer: each applied link or close, as the
-    fact ``channels.outcomes`` reads off the store, queued for the channel
+    fact ``channels.facts.outcomes`` reads off the store, queued for the channel
     writer; and a link the store refused, said with the reason.
 
     The refusal is worked out from the snapshot the act met
@@ -1446,7 +1448,7 @@ def _record_channels(state: AppState) -> Observer:
             writer = state.channel_writer
             if writer is None:
                 return
-            for link, fact in channels.outcomes(before, intent, after):
+            for link, fact in channel_facts.outcomes(before, intent, after):
                 writer.submit(link, fact)
         except Exception as exc:  # noqa: BLE001 - see the docstring: this must not raise
             LOG.error(
@@ -1460,7 +1462,7 @@ def _record_channels(state: AppState) -> Observer:
 
 
 def _read_channel_reports(
-    reports: tuple[channels.Report, ...], state: AppState | None = None
+    reports: tuple[channel_log.Report, ...], state: AppState | None = None
 ) -> None:
     """
     Say each link fact that did not reach its log, and what each relink's
@@ -1478,17 +1480,17 @@ def _read_channel_reports(
     """
     for report in reports:
         match report:
-            case channels.Outcome():
+            case channel_log.Outcome():
                 _read_outcome(report, state)
-            case channels.Swept():
+            case channel_log.Swept():
                 _read_sweep(report, state)
             case _:
                 assert_never(report)
 
 
-def _read_outcome(report: channels.Outcome, state: AppState | None) -> None:
+def _read_outcome(report: channel_log.Outcome, state: AppState | None) -> None:
     """Say a submitted fact that did not reach its log; one that did is not said."""
-    if not isinstance(report.result, channels.NotAppended):
+    if not isinstance(report.result, channel_log.NotAppended):
         return
     if state is not None:
         _not_done(state, _not_written(report.link, type(report.fact), report.result.reason))
@@ -1499,20 +1501,20 @@ def _read_outcome(report: channels.Outcome, state: AppState | None) -> None:
     )
 
 
-def _stopped(marker: channels.Appended | channels.NotAppended | None) -> str:
+def _stopped(marker: channel_log.Appended | channel_log.NotAppended | None) -> str:
     """What a failed fact's report adds for the stop marker tried after it."""
     match marker:
         case None:
             return ""
-        case channels.Appended():
+        case channel_log.Appended():
             return "; its log says recording stopped"
-        case channels.NotAppended():
+        case channel_log.NotAppended():
             return f"; nor could its log be marked as stopped ({marker.reason})"
         case _:
             assert_never(marker)
 
 
-def _read_sweep(report: channels.Swept, state: AppState | None) -> None:
+def _read_sweep(report: channel_log.Swept, state: AppState | None) -> None:
     """
     Say what the sweep for ``report.made`` did: the earlier links it closed, in
     LOG, and each it could not close, or that it could list none, in LOG and in
@@ -1524,14 +1526,14 @@ def _read_sweep(report: channels.Swept, state: AppState | None) -> None:
         for notice in _sweep_notices(report):
             _not_done(state, notice)
     closes = report.closes
-    if isinstance(closes, channels.Unlisted):
+    if isinstance(closes, channel_log.Unlisted):
         LOG.error(
             "channel",
             f"{made}: was linked, and no earlier link under #{name} was checked or closed:"
             f" the links under #{name} could not be listed ({closes.reason})",
         )
         return
-    closed = [str(c.link) for c in closes if isinstance(c.result, channels.Appended)]
+    closed = [str(c.link) for c in closes if isinstance(c.result, channel_log.Appended)]
     if closed:
         LOG.info(
             "channel",
@@ -1539,7 +1541,7 @@ def _read_sweep(report: channels.Swept, state: AppState | None) -> None:
             f" under #{name} that could read live again: {', '.join(closed)}",
         )
     for close in closes:
-        if isinstance(close.result, channels.NotAppended):
+        if isinstance(close.result, channel_log.NotAppended):
             LOG.error(
                 "channel",
                 f"{close.link}: the close owed it when {made} was linked did not reach its"
@@ -1555,7 +1557,7 @@ _LEFT_LIVE = (
 )
 
 
-def _sweep_notices(report: channels.Swept) -> list[str]:
+def _sweep_notices(report: channel_log.Swept) -> list[str]:
     """
     What the operator is told of a sweep: one notice when the name's links
     could not be listed, one per earlier link it could not close, and nothing
@@ -1578,7 +1580,7 @@ def _sweep_notices(report: channels.Swept) -> list[str]:
     """
     name = report.made.name
     closes = report.closes
-    if isinstance(closes, channels.Unlisted):
+    if isinstance(closes, channel_log.Unlisted):
         return [
             f"#{name} was linked, but the earlier links under #{name} could not be listed"
             f" ({drawable.text(closes.reason)}), so none was checked or closed; until #{name}"
@@ -1586,7 +1588,7 @@ def _sweep_notices(report: channels.Swept) -> list[str]:
         ]
     said: list[str] = []
     for close in closes:
-        if not isinstance(close.result, channels.NotAppended):
+        if not isinstance(close.result, channel_log.NotAppended):
             continue
         made = (
             "its creation unreadable"
@@ -1597,7 +1599,7 @@ def _sweep_notices(report: channels.Swept) -> list[str]:
             f"an earlier link under #{name} ({made}, not the one just linked) could not be"
             f" closed: {drawable.text(close.result.reason)}"
         )
-        if not isinstance(close.marker, channels.Appended):
+        if not isinstance(close.marker, channel_log.Appended):
             notice += (
                 f"; nor could it be marked as stopped, so until #{name} is linked again,"
                 f" {_LEFT_LIVE.format(what='it', name=name)}"
@@ -1606,19 +1608,19 @@ def _sweep_notices(report: channels.Swept) -> list[str]:
     return said
 
 
-def _not_written(link: channels.LinkKey, kind: type, reason: str) -> str:
+def _not_written(link: channel_facts.LinkKey, kind: type, reason: str) -> str:
     """
     What the operator is told of a link fact that did not reach its log: one
     sentence for a close refused before it was queued (``close_channel``) and
     for one the writer reported, so the two read as one thing said.
     """
     what = drawable.text(reason)
-    if kind is channels.LinkClosed:
+    if kind is channel_facts.LinkClosed:
         return (
             f"#{link.name}: closed for this run only; the close did not reach the link's"
             f" log ({what}), and the next start reads the link as its log left it"
         )
-    if kind is channels.LinkCreated:
+    if kind is channel_facts.LinkCreated:
         return (
             f"#{link.name}: linked for this run only; the link did not reach its log"
             f" ({what}), and the next start does not restore it"
@@ -1632,7 +1634,7 @@ def _link_pressed(state: AppState, name: str, members: frozenset[str], charter: 
     emitted nothing, or None when it emitted the link.
     """
     linked = link_leads(state, name, members, charter)
-    return linked.reason if isinstance(linked, channels.Refused) else None
+    return linked.reason if isinstance(linked, channel_log.Refused) else None
 
 
 def _recording(state: AppState) -> frozenset[str]:
@@ -1642,7 +1644,7 @@ def _recording(state: AppState) -> frozenset[str]:
 
 def link_leads(
     state: AppState, name: str, members: frozenset[str], charter: str
-) -> ChannelLinked | channels.Refused:
+) -> ChannelLinked | channel_log.Refused:
     """
     Emit the operator's link of ``members`` as a channel called ``name``, and
     return it; or emit nothing, say why, and return the refusal.
@@ -1656,17 +1658,17 @@ def link_leads(
     afresh. **Two refusals live here, not in the store**, because only the
     shell knows of them:
 
-    - a charter longer than ``channels.CHARTER_CHARS``, whose first fact would
+    - a charter longer than ``channels.log.CHARTER_CHARS``, whose first fact would
       come close to the size a record may be, and fail to land;
     - any link while startup could not list the channel logs
       (``AppState.channels_unlisted``): a live link under ``name`` may be in
       what it could not see.
     """
     refused: str | None = None
-    if len(charter) > channels.CHARTER_CHARS:
+    if len(charter) > channel_log.CHARTER_CHARS:
         refused = (
             f"the charter is {len(charter)} characters, over the"
-            f" {channels.CHARTER_CHARS} a link's charter may be"
+            f" {channel_log.CHARTER_CHARS} a link's charter may be"
         )
     elif state.channels_unlisted is not None:
         refused = (
@@ -1675,9 +1677,9 @@ def link_leads(
         )
     if refused is not None:
         LOG.warn("channel", f"#{name}: the leads were not linked: {refused}")
-        return channels.Refused(refused)
+        return channel_log.Refused(refused)
     linked = ChannelLinked(
-        channel_id=str(uuid.uuid4()),
+        channel_id=ids.channel(),
         name=name,
         members=members,
         charter=charter,
@@ -1710,7 +1712,7 @@ def close_channel(state: AppState, channel_id: str) -> str | None:
     state.bridge.emit(ChannelClosed(channel_id=channel_id, at=time.time()))
     if held is None or not held.live or writer is None:
         return None
-    link = channels.LinkKey(held.name, held.id)
+    link = channel_facts.LinkKey(held.name, held.id)
     refused = writer.refusal(link)
     if refused is not None:
         LOG.warn(
@@ -1718,15 +1720,15 @@ def close_channel(state: AppState, channel_id: str) -> str | None:
             f"{link}: closed for this run only; the close cannot be written to its"
             f" log ({refused}), and the next start reads the link as its log left it",
         )
-        _not_done(state, _not_written(link, channels.LinkClosed, refused))
+        _not_done(state, _not_written(link, channel_facts.LinkClosed, refused))
     return refused
 
 
-def _restore_channels() -> tuple[channels.Restored, ...] | channels.Unlisted:
+def _restore_channels() -> tuple[channel_log.Restored, ...] | channel_log.Unlisted:
     """
     Read every link's log, once, and say each link withheld from the store and
     why: a log short or stopped, or several links live under one name. A
-    withheld link is never live (``channels.restore_all``); its log is still
+    withheld link is never live (``channels.log.restore_all``); its log is still
     there to read.
 
     ``Unlisted`` -- the logs could not be listed -- is said too, and is not
@@ -1741,11 +1743,11 @@ def _restore_channels() -> tuple[channels.Restored, ...] | channels.Unlisted:
     """
     LOG.info(
         "channel",
-        f"reading channel logs under {channels.root()}"
+        f"reading channel logs under {channel_log.root()}"
         " (a start that stops here is waiting on that directory)",
     )
-    restored = channels.restore_all(channels.FileChannels())
-    if isinstance(restored, channels.Unlisted):
+    restored = channel_log.restore_all(channel_log.FileChannels())
+    if isinstance(restored, channel_log.Unlisted):
         LOG.error(
             "channel",
             f"the channel logs could not be listed, so no link is restored and none can be"
@@ -1926,7 +1928,7 @@ def _settle_restore(
 def _stop_recording_everything(state: AppState, writer: boardsync.BoardWriter, reason: str) -> None:
     """
     End the recording of every session being recorded, and queue the record
-    that makes each log say so (``boardlog.RecordingStopped``).
+    that makes each log say so (``codec.RecordingStopped``).
 
     ``marked`` starts False and is corrected when the marker's own outcome is
     read: until then nothing on disk says the log ends early.
@@ -1939,20 +1941,18 @@ def _stop_recording_everything(state: AppState, writer: boardsync.BoardWriter, r
         )
         writer.submit(
             session_id,
-            boardlog.RecordingStopped(
-                at=time.time(), reason=reason[: boardsync.MARKER_REASON_CHARS]
-            ),
+            codec.RecordingStopped(at=time.time(), reason=reason[: codec.MARKER_REASON_CHARS]),
         )
 
 
-def _landed(result: boardlog.Written | boardlog.Unwritten | None) -> bool | None:
+def _landed(result: journal_files.Written | journal_files.Unwritten | None) -> bool | None:
     """
     Whether a stop marker is on disk where a restore will read it, or None when
     none was attempted.
     """
     if result is None:
         return None
-    return isinstance(result, boardlog.Written) and result.gap is None
+    return isinstance(result, journal_files.Written) and result.gap is None
 
 
 def _read_board_reports(state: AppState, reports: tuple[boardsync.Report, ...]) -> None:
@@ -1983,7 +1983,7 @@ def _read_board_reports(state: AppState, reports: tuple[boardsync.Report, ...]) 
             case boardsync.Outcome(record=record, result=result):
                 if entry is None:
                     continue
-                if isinstance(record, boardlog.RecordingStopped):
+                if isinstance(record, codec.RecordingStopped):
                     # The shell's own marker (``_stop_recording_everything``).
                     state.board_logs[report.session_id] = dataclasses.replace(
                         entry, marked=_landed(result)
@@ -2349,7 +2349,7 @@ def guarded(name: str, draw: Callable[[], None]) -> Callable[[], None]:
 # The panes that show a parked call, by the label each is docked under, and the
 # name each reports to the review state by. A draw of one of these that raises
 # holds every approve (``review.withheld``).
-_REVIEW_PANES = {"NEEDS YOU": review.INBOX, "DETAIL": review.DETAIL}
+_REVIEW_PANES = {panes.NEEDS_YOU.title: review.INBOX, panes.DETAIL.title: review.DETAIL}
 
 _APPROVE_HELD = (
     "nothing is approved while this pane cannot draw: a, A and the approve buttons "
@@ -2796,8 +2796,8 @@ def _addresses_of(board: boardlog.Board, session_id: str) -> dict[str, str | Non
     A party an older log knows by address alone is in it with no id. Nothing can
     be handed that address back, and nothing else may take it either.
 
-    Built by ``board.reserved``, as the board's own copy of this table is from
-    the ``Restore.parties`` the store makes of the same log (``board._addresses``):
+    Built by ``naming.reserved``, as the board's own copy of this table is from
+    the ``Restore.parties`` the store makes of the same log (``addresses._addresses``):
     the driver allocates from this one and the board names agents from that one,
     so they have to be one table.
     """
@@ -2819,7 +2819,7 @@ def _addresses_of(board: boardlog.Board, session_id: str) -> dict[str, str | Non
     for concern in board.concerns:
         bare(concern.sender)
         bare(concern.recipient)
-    return board_mod.reserved(named)
+    return naming.reserved(named)
 
 
 def _carried_addresses(state: AppState, session_id: str | None) -> dict[str, str | None]:
@@ -2831,7 +2831,7 @@ def _carried_addresses(state: AppState, session_id: str | None) -> dict[str, str
     that run allocated.
 
     One table and not the first that is found, because the two are different
-    facts about the same names and ``board.reserved`` is what says how they
+    facts about the same names and ``naming.reserved`` is what says how they
     combine.
     """
     if session_id is None:
@@ -2841,7 +2841,7 @@ def _carried_addresses(state: AppState, session_id: str | None) -> dict[str, str
         state.restored_addresses.get(session_id, {}),
         {} if earlier is None else earlier.addresses(),
     )
-    return board_mod.reserved(pair for table in tables for pair in table.items())
+    return naming.reserved(pair for table in tables for pair in table.items())
 
 
 def _open_board_log(state: AppState, session_id: str, logged: _Logged | None) -> None:
@@ -3857,7 +3857,7 @@ def _show_health(state: AppState, node: NodeId) -> None:
     state.focus.to_node(snap, (node[0], None), scope=focus_mod.Scope.SESSION)
     if hello_imgui.current_layout_name() != FOCUS:
         state.pending_layout = FOCUS
-    state.pending_pane = "HEALTH"
+    state.pending_pane = panes.HEALTH.title
 
 
 def _go_to_session(state: AppState, node: NodeId) -> None:
@@ -3875,7 +3875,7 @@ def _go_to_session(state: AppState, node: NodeId) -> None:
     state.focus.to_node(snap, (node[0], None), scope=focus_mod.Scope.SESSION)
     if hello_imgui.current_layout_name() != FOCUS:
         state.pending_layout = FOCUS
-    state.pending_pane = "SESSION"
+    state.pending_pane = panes.SESSION.title
 
 
 def _show_thread(state: AppState) -> None:
@@ -3885,7 +3885,7 @@ def _show_thread(state: AppState) -> None:
     link's thread, and in FOCUS it shares its space with HEALTH. The layout is
     left as it is, since both layouts dock DETAIL.
     """
-    state.pending_pane = "DETAIL"
+    state.pending_pane = panes.DETAIL.title
 
 
 def _resume_session(state: AppState, node: NodeId) -> None:
@@ -4001,7 +4001,7 @@ def _draw_card_overlays(state: AppState) -> None:
         snap,
         _recording(state),
         link=lambda name, members, charter: _link_pressed(state, name, members, charter),
-        charter_cap=channels.CHARTER_CHARS,
+        charter_cap=channel_log.CHARTER_CHARS,
         wrap=state.settings.wrap_inputs,
     )
     details = cards.details
@@ -4179,7 +4179,7 @@ def _menu_facts(state: AppState) -> main_menu.Facts:
     )
 
 
-_LOG_PANES = ("CONTEXT", "SESSION")
+_LOG_PANES = (panes.CONTEXT.title, panes.SESSION.title)
 """The panes that draw the focused card's log with its find row."""
 
 
@@ -4693,7 +4693,7 @@ def _fleet_window(fn: Callable[[], None]) -> hello_imgui.DockableWindow:
         _hold_fleet()
         fn()
 
-    w = _window("FLEET", "RailSpace", held)
+    w = _window(panes.FLEET.title, "RailSpace", held)
     w.can_be_closed = False
     w.is_visible = True
     # Shown whatever a saved layout says: one saved with the pane closed, from
@@ -4949,16 +4949,16 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         )
 
     return {
-        "FLEET": rail_pane,
-        "NEEDS YOU": _reviewing(state, "NEEDS YOU", inbox_pane),
-        "CONTEXT": context_pane,
-        "DETAIL": _reviewing(state, "DETAIL", detail_pane),
-        "BOARD": board_pane_fn,
-        "DIGEST": digest_pane_fn,
-        "BRIEF": brief_pane_fn,
-        "SESSION": session_pane,
-        "HEALTH": health_pane,
-        "LOG": _log_panel,
+        panes.FLEET.title: rail_pane,
+        panes.NEEDS_YOU.title: _reviewing(state, panes.NEEDS_YOU.title, inbox_pane),
+        panes.CONTEXT.title: context_pane,
+        panes.DETAIL.title: _reviewing(state, panes.DETAIL.title, detail_pane),
+        panes.BOARD.title: board_pane_fn,
+        panes.DIGEST.title: digest_pane_fn,
+        panes.BRIEF.title: brief_pane_fn,
+        panes.SESSION.title: session_pane,
+        panes.HEALTH.title: health_pane,
+        panes.LOG.title: _log_panel,
     }
 
 
@@ -5062,14 +5062,14 @@ def _triage_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.Docking
         _split("MainDockSpace", "ContextSpace", d.right, 0.32),
     ]
     params.dockable_windows = [
-        _fleet_window(panels["FLEET"]),
-        _window("NEEDS YOU", "MainDockSpace", panels["NEEDS YOU"]),
+        _fleet_window(panels[panes.FLEET.title]),
+        _window(panes.NEEDS_YOU.title, "MainDockSpace", panels[panes.NEEDS_YOU.title]),
         # First tab in the space, and deliberately in front of CONTEXT: the pane
         # answering "what exactly am I approving" outranks the one answering "what
         # was this agent doing beforehand", and the queue is what the operator is
         # here for. A tab-mate rather than a fourth split -- the 0.32 width was
         # already chosen so the inbox keeps room for identity, wait and summary.
-        _window("DETAIL", "ContextSpace", panels["DETAIL"]),
+        _window(panes.DETAIL.title, "ContextSpace", panels[panes.DETAIL.title]),
         # Behind DETAIL as a starting position: the queue is what the operator is
         # here for, and a team's board is context for a decision rather than the
         # decision. Only a default -- layout_condition is first_use_ever, so an
@@ -5077,19 +5077,19 @@ def _triage_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.Docking
         # ini keeps it. Absent in the common case without any layout help -- most
         # sessions are solo, and the pane draws its own "not a team" line rather
         # than an empty table.
-        _window("BOARD", "ContextSpace", panels["BOARD"]),
+        _window(panes.BOARD.title, "ContextSpace", panels[panes.BOARD.title]),
         # The tab after BOARD: a reading of that board, organised with it and not
         # in it. Declared in BOARD's space in both layouts, and ``main`` is what
         # puts it in BOARD's node for a layout saved before it existed.
-        _window("DIGEST", "ContextSpace", panels["DIGEST"]),
+        _window(panes.DIGEST.title, "ContextSpace", panels[panes.DIGEST.title]),
         # Behind BOARD. A brief is written once and amended rarely, where the board
         # moves every few minutes -- the resident tab should be the one that changes.
-        _window("BRIEF", "ContextSpace", panels["BRIEF"]),
-        _window("CONTEXT", "ContextSpace", panels["CONTEXT"]),
+        _window(panes.BRIEF.title, "ContextSpace", panels[panes.BRIEF.title]),
+        _window(panes.CONTEXT.title, "ContextSpace", panels[panes.CONTEXT.title]),
         # Reachable, not resident. LOG is a debugging surface, and its old status as
         # tab-mate to the review queue -- in front of it, at that -- was precisely
         # the inversion this layout exists to correct.
-        _window("LOG", "ContextSpace", panels["LOG"]),
+        _window(panes.LOG.title, "ContextSpace", panels[panes.LOG.title]),
     ]
     return params
 
@@ -5110,21 +5110,21 @@ def _focus_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.DockingP
         _split("MainDockSpace", "HealthSpace", d.right, 0.26),
     ]
     params.dockable_windows = [
-        _fleet_window(panels["FLEET"]),
-        _window("SESSION", "MainDockSpace", panels["SESSION"], SESSION_FLAGS),
-        _window("HEALTH", "HealthSpace", panels["HEALTH"]),
+        _fleet_window(panels[panes.FLEET.title]),
+        _window(panes.SESSION.title, "MainDockSpace", panels[panes.SESSION.title], SESSION_FLAGS),
+        _window(panes.HEALTH.title, "HealthSpace", panels[panes.HEALTH.title]),
         # Behind HEALTH here, in front of CONTEXT in TRIAGE. The pane is the same
         # object either way; what differs is what the arrangement is for. FOCUS is
         # for steering one session, and its facts -- cost, cwd, context headroom --
         # are the ones worth resident space.
-        _window("DETAIL", "HealthSpace", panels["DETAIL"]),
+        _window(panes.DETAIL.title, "HealthSpace", panels[panes.DETAIL.title]),
         # FOCUS is for steering one session, and a team's board is a fact about
         # that session in the same class as its cost and its context headroom --
         # which is why it sits with HEALTH here rather than with the queue.
-        _window("BOARD", "HealthSpace", panels["BOARD"]),
-        _window("DIGEST", "HealthSpace", panels["DIGEST"]),
-        _window("BRIEF", "HealthSpace", panels["BRIEF"]),
-        _window("LOG", "HealthSpace", panels["LOG"]),
+        _window(panes.BOARD.title, "HealthSpace", panels[panes.BOARD.title]),
+        _window(panes.DIGEST.title, "HealthSpace", panels[panes.DIGEST.title]),
+        _window(panes.BRIEF.title, "HealthSpace", panels[panes.BRIEF.title]),
+        _window(panes.LOG.title, "HealthSpace", panels[panes.LOG.title]),
     ]
     return params
 
@@ -5140,7 +5140,7 @@ def _keep_saved_layouts(ini: Path) -> None:
     the cost is that rebuild, which is a layout to drag back and not a session lost.
     """
     try:
-        done = layout_ini.keep_layout_for(ini, "DIGEST", "BOARD")
+        done = layout_ini.keep_layout_for(ini, panes.DIGEST.title, panes.BOARD.title)
     except (OSError, UnicodeDecodeError) as exc:
         LOG.warn(
             "app",
@@ -5176,7 +5176,7 @@ def _before_exit() -> None:
     The runner's last call with the GL and ImGui contexts still current.
 
     The text library's context goes before the ImGui context its fonts are on.
-    Figures hold no GL object (``figures.host`` draws on the draw list), so
+    Figures hold no GL object (``figure_host`` draws on the draw list), so
     nothing of theirs is released here; their render child is ended in
     ``_shut_down``.
     """
@@ -5212,7 +5212,7 @@ def _shut_down(state: AppState) -> None:
 def _close_channel_log(state: AppState) -> None:
     """
     Let the channel writer finish what is queued, for at most
-    ``channels.CLOSE_TIMEOUT``, and log every fact that did not reach its log.
+    ``serialworker.CLOSE_TIMEOUT``, and log every fact that did not reach its log.
     Beside ``_close_board_log`` and for its reasons; it raises nothing.
     """
     writer = state.channel_writer
@@ -5226,7 +5226,7 @@ def _close_channel_log(state: AppState) -> None:
 
 def _close_board_log(state: AppState) -> None:
     """
-    Let the writer finish what is queued, for at most ``boardsync.CLOSE_TIMEOUT``,
+    Let the writer finish what is queued, for at most ``serialworker.CLOSE_TIMEOUT``,
     and log every record that did not reach its log.
 
     Ahead of the pool's shutdown and not behind it. The frame loop has returned,
@@ -5250,7 +5250,7 @@ def _close_board_log(state: AppState) -> None:
         if isinstance(report, boardsync.Outcome) and not report.kept:
             reason = (
                 report.result.reason
-                if isinstance(report.result, boardlog.Unwritten)
+                if isinstance(report.result, journal_files.Unwritten)
                 else "written behind a break in the log"
             )
             lost.setdefault(report.session_id, []).append(reason)
@@ -5894,8 +5894,8 @@ def _start(
     if recorded:
         # Builds nothing on disk: a session's directory is made by its first record.
         state.board_writer = boardsync.BoardWriter()
-        state.channel_writer = channels.ChannelWriter(channels.FileChannels())
-    if isinstance(restored, channels.Unlisted):
+        state.channel_writer = channel_log.ChannelWriter(channel_log.FileChannels())
+    if isinstance(restored, channel_log.Unlisted):
         state.channels_unlisted = restored.reason
     elif restored is not None:
         # First in the queue: ahead of every recalled card and every launch.
@@ -6129,7 +6129,7 @@ def main(argv: list[str] | None = None) -> int:
         working = snap is not None and snap.any_active
         runner.fps_idling.enable_idling = not working
 
-    runner.callbacks.load_additional_fonts = theme.load_fonts
+    runner.callbacks.load_additional_fonts = typeset.load_application_fonts
     runner.callbacks.post_init = post_init
     # Guarded too: an exception here would stop intents being applied, which is
     # bad, but killing the window loses every session, which is worse.
@@ -6180,6 +6180,7 @@ def main(argv: list[str] | None = None) -> int:
     # link it refuses says why under the mouse. Before the loop, where no view
     # exists yet: a change of handler makes every view again (``follow_links``).
     typeset.follow_links(links.follow, refusal=links.followable)
+    figure_render.install(typeset.figure_fonts)
     the_loop_returned = exit_on_signals(_ask_window_to_close)
     try:
         immapp.run(runner)

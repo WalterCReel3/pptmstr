@@ -1111,10 +1111,10 @@ def test_one_closed_decision_copies_whole_with_the_two_hands_marked_apart(
 
 def test_the_clipboard_marks_are_the_ones_the_bus_hands_an_agent() -> None:
     """Spelled twice so the UI does not import the bus; this is what holds them equal."""
-    from pptmstr import bus
+    from pptmstr import replies
 
-    assert decision_view.ASKER_MARK == bus._QUOTE
-    assert decision_view.ANSWER_MARK == bus._ANSWER
+    assert decision_view.ASKER_MARK == replies._QUOTE
+    assert decision_view.ANSWER_MARK == replies._ANSWER
     assert decision_view.ASKER_MARK != decision_view.ANSWER_MARK
 
 

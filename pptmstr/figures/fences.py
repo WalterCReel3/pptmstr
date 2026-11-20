@@ -4,7 +4,7 @@ The fence languages a reply pane draws as something other than code, as one tabl
 
 Three readers, and the reason there is one table: **the views' dispatcher** decides
 by it which fences settle into a figure or a formula (``views.settles_rendered``,
-``views._captioned``, ``figures.host.is_figure_fence``), **the session prompt**
+``views._captioned``, ``figure_host.is_figure_fence``), **the session prompt**
 tells Claude by it what will be drawn (``prompt``, appended by
 ``driver.AgentSession._system_prompt``), and **the packaged skill** tells Claude
 how to write each one (``skill_text``, shipped as ``plugins.figures_skill``). A
@@ -21,7 +21,7 @@ importing the library in this process. A mermaid row asks more, because merman c
 be installed and not import (a wheel for another glibc), and a row promised then
 would send every graph to a fence that is always code: ``mermaid.import_probe``,
 a fresh interpreter importing it once per process, about 50-80 ms off the frame
-thread (measured 2026-10-21). ``figures.host.mark`` still accepts a fence by
+thread (measured 2026-10-21). ``figure_host.mark`` still accepts a fence by
 ``mermaid.version()`` alone, since it runs on the frame thread; where merman is
 installed and does not import, the render child refuses that fence with
 ``mermaid.missing_reason``, so the fence is code under a reason either way, and
@@ -53,7 +53,7 @@ class Fence:
     One fence language that is drawn once it has settled.
 
     ``word`` is the info string's first word, compared case-folded. ``kind`` is
-    which route draws it: a ``figure`` is hosted (``figures.host``), a
+    which route draws it: a ``figure`` is hosted (``figure_host``), a
     ``formula`` is spliced into the document (``views._formula_block``).
     ``needs`` are the distributions its route imports beyond those every row
     needs (``_TYPESET``). ``says`` is what the prompt tells Claude about it.

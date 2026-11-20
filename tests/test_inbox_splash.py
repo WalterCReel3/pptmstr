@@ -110,7 +110,7 @@ def test_a_fleet_of_crashed_sessions_is_not_an_empty_application(
 
 def test_the_trigger_asks_the_node_table_not_the_walk(monkeypatch: pytest.MonkeyPatch) -> None:
     """
-    ``store._preorder`` re-attaches orphans at the root so the walk can never be
+    ``store.nodes._preorder`` re-attaches orphans at the root so the walk can never be
     shorter than the node table, which makes ``order`` and ``nodes`` equivalent
     today. This pins the choice against that recovery regressing: a node table with
     something in it is a fleet, whatever the walk managed to reach.

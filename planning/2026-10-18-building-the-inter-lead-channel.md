@@ -9,7 +9,7 @@
   passed and 23 `[imgui-error]` lines, and `typecheck-all` at 1936. Round three is wakes, the
   backstop, decision wakes, and the unanswered-question and held-mail rows. None of it has been
   seen on a display or run between two live sessions.
-- Round four's first part comes from [the first three-lead run](2026-10-24-first-three-lead-run.md).
+- Round four's first part comes from [the first three-lead run](archive/2026-10-24-first-three-lead-run.md).
   It's on the board as P1–P5 (2026-10-24):
   - peer identity on every link surface;
   - owed answers named at resume;
@@ -490,3 +490,27 @@ on_operator_answers(d): wake(d.asker.session)
 - Whether a cold-cache read of the channel log at startup matters. It hasn't been measured, and
   it needs root.
 - The three-team run that comes before relaxing pairs-only. It isn't part of this build.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._REVIEW` | `gate.tools.REVIEW` |
+| `approval._BUS_AUTO` | `gate.tools.BUS_AUTO` |
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py`. B5's last step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what was
+left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`, `park`)
+and deleted it. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.summarize` | `gate.park.summarize` |

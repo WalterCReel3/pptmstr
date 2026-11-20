@@ -17,15 +17,15 @@ they never enter a Snapshot (I1).
 
 from __future__ import annotations
 
-import contextlib
 import json
 import math
 import os
-import tempfile
 from dataclasses import asdict, dataclass, fields, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from pptmstr import ondisk
 
 APP_NAME = "pptmstr"
 
@@ -41,9 +41,10 @@ class McpConnector:
     a transport detail.
 
     ``id`` is the account's ``mcpsrv_`` identifier. It is not re-validated at launch:
-    a rotated id means the CLI does not connect that server and the operator re-runs
-    `scripts/verify_mcp_status.py`. Checking it on every launch would put a network
-    fetch of every connector in front of every session to catch a rare case.
+    a rotated id means the CLI does not connect that server, and the operator notices
+    and re-admits it by editing ``admitted_connectors`` in ``settings.json``. Nothing
+    in the tree checks an id. Checking it on every launch would put a network fetch
+    of every connector in front of every session to catch a rare case.
     """
 
     name: str
@@ -153,11 +154,11 @@ class Settings:
     # The MCP servers a session may reach, and the whole of them. `driver` passes
     # these alongside the in-process bus under `strict_mcp_config=True`, so a server
     # the operator has not named here is one no session loads -- which is what keeps
-    # an stdio server out of a process the sandbox does not wrap (`sandbox.py`: "the
+    # an stdio server out of a process the sandbox does not wrap (`gate/sandbox.py`: "the
     # CLI process runs outside the sandbox").
     #
     # Admission is not a widening of the gate. Every `mcp__*` call still reaches
-    # `approval.classify`'s fail-closed fallthrough and parks in front of the
+    # `gate.classify.classify`'s fail-closed fallthrough and parks in front of the
     # operator at every policy, `AUTONOMOUS` included.
     admitted_connectors: tuple[McpConnector, ...] = ()
     # Whether a team session's board is written to disk as it changes and read
@@ -522,10 +523,11 @@ def save(
     """
     Write settings atomically, or refuse and say why. None is not a refusal.
 
-    Written to a temporary file in the same directory and renamed over the target,
-    so an interrupted write leaves the previous file intact instead of a truncated
-    one. rename(2) is atomic within a filesystem, which is why the temp file cannot
-    just go in /tmp.
+    Flushed to the device and renamed over the target by ``ondisk.replace``, so an
+    interrupted write, by a process crash or a power loss, leaves the previous file
+    intact instead of a truncated one, and the file keeps its permission bits. The
+    flush runs on the UI thread: on a disk busy writing back other data it can hold
+    the frame for seconds.
 
     **Refused in two cases, and both are about ``board_log``.** The file is
     written whole from ``settings``, so a save is the one place a value nobody
@@ -553,16 +555,10 @@ def save(
         return Unsaved(target, why)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".settings-", suffix=".json")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(encoded(settings), handle, indent=2, sort_keys=True)
-                handle.write("\n")
-            os.replace(tmp, target)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+        data = (json.dumps(encoded(settings), indent=2, sort_keys=True) + "\n").encode("utf-8")
+        # Durable: a lost settings file is silent. The cost is a stall on a busy disk
+        # while this is on the UI thread.
+        ondisk.replace(target, data, durable=True)
     except OSError:
         pass
     return None

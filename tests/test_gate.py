@@ -16,9 +16,10 @@ from pathlib import Path
 import pytest
 
 from pptmstr import driver as driver_module
-from pptmstr.approval import Disposition, Policy, classify
 from pptmstr.bridge import Bridge, Decision
 from pptmstr.driver import AgentSession
+from pptmstr.gate.classify import classify
+from pptmstr.gate.policy import Disposition, Policy
 from pptmstr.model import AgentState
 from pptmstr.store import Store
 
@@ -682,10 +683,11 @@ def _run_handler(session, arguments: dict) -> None:
     """Feed the gate's approved arguments to the real post_concern handler."""
     import asyncio
 
+    from pptmstr import commandbus
     from pptmstr.bus import build_server
     from tests.mcp_wire import call_tool
 
-    server = build_server(session)["instance"]
+    server = build_server(session, commandbus.TOOLS)["instance"]
     result = asyncio.run(call_tool(server, "post_concern", arguments))
     assert not result.is_error, result.content
 
@@ -840,7 +842,7 @@ def test_a_forged_edit_stamp_does_not_reach_the_concern(bridge: Bridge) -> None:
 
 # -- the spawn join (§3) -------------------------------------------------------
 #
-# `Agent` is in _REVIEW, so a spawn always passes through the gate with a human in
+# `Agent` is in REVIEW, so a spawn always passes through the gate with a human in
 # it. Nothing drove _pre_tool_use for an Agent call before these tests, which is why
 # an entry could be left behind by a refusal without anything noticing.
 
@@ -1152,7 +1154,7 @@ def test_a_spawn_from_inside_a_subagent_stays_out_of_the_spawn_ledger(bridge: Br
 
 # -- the session's policy, and its scope --------------------------------------
 #
-# What a preset *admits* is `approval.classify`'s business and is pinned in
+# What a preset *admits* is `gate.classify.classify`'s business and is pinned in
 # test_approval.py. What is pinned here is the driver's half: which policy each
 # node's call is classified under, and that nothing but the operator ever
 # changes which policy a session holds (2026-09-21 -- see the comment at the
@@ -1163,7 +1165,7 @@ def test_a_spawn_from_inside_a_subagent_stays_out_of_the_spawn_ledger(bridge: Br
 # `classify` so that these tests state a fact about the gate rather than about
 # whichever preset happens to be filled in -- a behavioural test written against
 # the real PERMISSIVE arm would assert nothing on the day that arm is empty, and
-# would start silently re-testing `approval.py` on the day it is not.
+# would start silently re-testing `gate/classify.py` on the day it is not.
 
 
 def _watch_policies(monkeypatch: pytest.MonkeyPatch) -> list[Policy]:
@@ -1402,7 +1404,7 @@ def test_nothing_but_the_operator_changes_the_policy(
     assert session.policy is Policy.PERMISSIVE
 
     # A message to another agent. It changes what that agent does next, which
-    # is why `_REVIEW` gates the send rather than the read -- and gating it is
+    # is why `REVIEW` gates the send rather than the read -- and gating it is
     # not the same fact as ending this session's own phase.
     message = bridge.submit(
         session._pre_tool_use(

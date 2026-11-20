@@ -25,7 +25,7 @@ from unittest.mock import MagicMock
 import pytest
 from imgui_bundle import imgui
 
-from pptmstr.approval import Policy, requires_containment
+from pptmstr.gate.policy import Policy, requires_containment
 from pptmstr.intents import (
     AgentFinished,
     AgentSpawned,

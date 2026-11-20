@@ -18,14 +18,30 @@ import dataclasses
 import enum
 import math
 import posixpath
-import re
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar
 
-from . import drawable
-from .approval import DiffText, Policy, peer_channel
+from . import drawable, ids
+from .channels.records import (
+    EVERY_CHANNEL,
+    LINK_MEMBERS,
+    WITHDRAW_PEER_TOOL,
+    Channel,
+    ChannelId,
+    Charter,
+    CitedQuestion,
+    EveryChannel,
+    LinkRefusal,
+    MoveOwner,
+    PeerRefusal,
+    ThreadMark,
+    ThreadWakeHeld,
+    WhoseMove,
+    _channel_refusal,
+    is_channel_name,
+)
 from .command import (
     TIMEOUT_CHOICES_S,
     Command,
@@ -34,6 +50,9 @@ from .command import (
     RequestRefusal,
     command_refusal,
 )
+from .gate.diff import DiffText
+from .gate.policy import Policy
+from .gate.tools import peer_channel
 from .transcript import Transcript
 
 # (session_id, agent_id). Root sessions have agent_id None; sub-agents carry the
@@ -344,9 +363,9 @@ class PendingApproval:
     diff: str | None = None
     # The before/after texts ``diff`` was rendered from; None exactly when the tool
     # has nothing diff-shaped. Both are carried although one follows from the other:
-    # ``diff`` is ``approval.render_texts`` of this, and deriving it on read would put
+    # ``diff`` is ``gate.diff.render_texts`` of this, and deriving it on read would put
     # ``difflib`` over a whole file on the frame path for as long as the call is
-    # parked. Built from one ``approval.diff_texts`` call at the construction site,
+    # parked. Built from one ``gate.park.diff_texts`` call at the construction site,
     # so the two cannot describe different reads of the file.
     #
     # Holds the file's whole text, twice for a whole-file Edit, in every snapshot
@@ -364,7 +383,7 @@ class PendingApproval:
     # Where in ``summary`` the description of the lead a call across a link
     # reaches stands, as a [start, end) span of characters; None on every other
     # row, and where the description was cut out of ``summary``. Set by the
-    # store with the row (``store._peer_row``) and read by the pane that clips
+    # store with the row (``store.approvals._peer_row``) and read by the pane that clips
     # the row to its width, so that the description gives way before the
     # subject does (``ui.inbox.summary_shown``).
     summary_peer: tuple[int, int] | None = None
@@ -786,7 +805,7 @@ class DecisionOwed:
     ``summary`` is composed by the store from structure -- the id, the asker's
     role, the standing, the reversibility, the tasks it blocks, what became of
     the asker -- and holds none of the asker's sentences. The queue draws a
-    summary in its own voice beside ``approval.summarize``'s, so a question shown
+    summary in its own voice beside ``gate.park.summarize``'s, so a question shown
     there would be an agent's text reading as the queue's. The texts are on
     ``decision``, for a surface that marks them as authored.
 
@@ -856,7 +875,7 @@ class WakeChainHeld:
     ``since`` is when the wake was held, on the store's clock. ``summary`` is
     composed from structure and holds nothing a lead wrote.
 
-    Ended by the operator acting on the link (``store._moved``: releasing it
+    Ended by the operator acting on the link (``store.waking._moved``: releasing it
     with ``intents.WakeChainReleased`` among them), by the lead reading its
     peer mail anyway, or by the lead's session ending or being resumed.
     """
@@ -941,7 +960,7 @@ class PeerMailHeld:
     (``Snapshot.peer_held``). Mail on a link closed in its log raises no
     row, whether the operator closed it or the relink sweep did: a closed
     link is never live again, so its mail can never be handed over
-    (``store._owing_peer_mail``).
+    (``store.waking._owing_peer_mail``).
     Without this the mail is kept in its sender's log and in the store, and
     nobody is told it exists: ``read_peer_messages`` tells the lead it is
     held, and only if the lead asks.
@@ -1160,7 +1179,7 @@ class LaunchSpec:
     # new conversation from the same premises, which is the opposite of this.
     resume: str | None = None
     # The containment configuration as the JSON string `ClaudeAgentOptions.settings`
-    # takes -- what `sandbox.containment_settings` returns -- or None for a launch that
+    # takes -- what `gate.sandbox.containment_settings` returns -- or None for a launch that
     # is not contained. Text rather than anything structured for the reason
     # `driver.AgentSession.containment` gives: several of the keys have no slot in the
     # SDK's `SandboxSettings`.
@@ -1501,7 +1520,7 @@ class AgentRecord:
     # sub-agent's node -- the reason this comes from the hook rather than from the
     # message stream.
     deliverable: str | None = None
-    # When this node last read a digest (``digest.py``), or None if it never has.
+    # When this node last read a digest (``board/digest.py``), or None if it never has.
     #
     # The mark a round is counted from, and it is here for the reason a delivered
     # concern carries ``delivered_at``: "since I last asked" kept in the bus
@@ -1633,7 +1652,7 @@ class Basis(enum.Enum):
 # instead. 300 is a judgement with two measurements behind it: the sentences this
 # was built from ran 119 and 137 characters, so the limit is twice the longest with
 # room to spare; and forty rows at the limit cost 12,000 characters, which leaves
-# more than half of ``bus._MAX_BOARD_CHARS`` for everything that is not a property.
+# more than half of ``replies._MAX_BOARD_CHARS`` for everything that is not a property.
 MAX_PROPERTY_CHARS = 300
 
 
@@ -1705,7 +1724,7 @@ class ConcernState(enum.Enum):
     once it has been delivered, the recipient has seen it, and pretending
     otherwise would make the store disagree with a transcript that already
     contains it. A peer message reaches it from DELIVERED too, by its sender's
-    withdrawal (``store._message_withdrawal_refusal``): ``delivered_at`` stays set, so
+    withdrawal (``store.mail._message_withdrawal_refusal``): ``delivered_at`` stays set, so
     the store still says the recipient read it, and the recipient's next read
     is told it was withdrawn (``Snapshot.withdrawn_untold``) rather than the
     transcript being contradicted.
@@ -1905,7 +1924,7 @@ class TaskRefusal(enum.Enum):
     from the amendment's and the close's for the reason the pairs above are.
     ``NOT_THE_WITHDRAWER`` is an agent withdrawing a task it did not declare,
     other than its session's root standing in for a declarer that has stopped
-    (``store._withdrawer_refusal``): the recovery is a concern to the declarer,
+    (``store.tasks._withdrawer_refusal``): the recovery is a concern to the declarer,
     and it is not ``NOT_THE_DECLARER``, whose words are about replacing a
     specification.
     ``WITHDRAW_FINISHED`` is a withdrawal of a task already finished, closed or
@@ -1919,7 +1938,7 @@ class TaskRefusal(enum.Enum):
     stopped it.
     ``WITHDRAW_HELD_LIVE`` is the root standing in for a stopped declarer, on a
     task held by an agent the root could not take the claim back from
-    (``store._may_reclaim``): one that can still be woken, and may be holding
+    (``store.tasks._may_reclaim``): one that can still be woken, and may be holding
     the task across a wait. It is not ``NOT_THE_WITHDRAWER``, whose recovery is
     the declarer: here the declarer has stopped, and the recovery is the holder,
     which can release the task, or waiting until it has.
@@ -2022,7 +2041,7 @@ def normalised_touches(paths: Iterable[str]) -> tuple[str, ...]:
     is a model choosing its own spelling, and the reducer compares what this stores,
     so a caller free to pad a path is free to miss the overlap check:
     ``"  pptmstr/store.py  "`` names the same file and would collide with nothing.
-    ``store._auto_depends`` is the whole of what keeps two agents out of one file, so
+    ``store.tasks._auto_depends`` is the whole of what keeps two agents out of one file, so
     that miss costs a concurrent write rather than a tidier string.
     ``tests/test_bus.py:test_a_caller_cannot_evade_the_overlap_check_with_its_own_spelling``
     is what pins it.
@@ -2042,10 +2061,10 @@ def normalised_touches(paths: Iterable[str]) -> tuple[str, ...]:
 
 
 # The tools whose approved call writes a named file. Spelled here rather than
-# imported from ``approval``: the reducer's module graph stops at ``model``, and
-# ``approval`` reads the disk. Deliberate duplication, and pinned by a test against
-# ``approval.summarize``'s own branch, because unpinned duplication is the thing
-# that drifts (`STYLE.md` §3).
+# taken from ``gate.rows.compose``, which branches on the same four names:
+# ``gate.rows`` imports ``model``, so the import would close a cycle. Deliberate
+# duplication, and pinned by a test against ``compose``'s own branch, because
+# unpinned duplication is the thing that drifts (`STYLE.md` §3).
 #
 # ``NotebookEdit`` is in the set and carries ``notebook_path`` rather than
 # ``file_path``; reading only ``file_path`` records a notebook write as no write.
@@ -2063,7 +2082,7 @@ class ApprovedWrites:
     eventually read a divergence that is a failed tool call.
 
     **Retained rather than derived, and it is the exception it looks like.**
-    ``approval.render_diff`` reads the current file from disk to build the diff at
+    ``gate.park.render_diff`` reads the current file from disk to build the diff at
     park time, so the "before" state lives only inside the parked record: once the
     write lands there is no snapshot the line counts follow from. `STYLE.md` §1's
     *derive; do not store* asks whether another fact in the same snapshot implies
@@ -2345,225 +2364,16 @@ def approved_write(
     return ApprovedWrites(paths=(placed,), lines_added=added, lines_removed=removed)
 
 
-class Charter(enum.Enum):
-    """
-    A declarer's answer to "is this request inside the channel's charter?".
-
-    **Three members, unstated among them.** Unlike ``Basis``, not saying is a
-    member and not ``None``: a provenance always carries an answer, and a
-    reader that tests ``if not provenance.inside_charter`` cannot read
-    unstated as no, because every member is truthy.
-
-    **The log carries the value, as text** (``boardlog.Declared``), for the
-    reason ``Declared.basis`` is text: a member a later build adds is then a
-    word this build reads as unstated, not a record it cannot read and a log
-    that ends at it.
-    """
-
-    YES = "yes"
-    NO = "no"
-    UNSTATED = "unstated"
-
-    @classmethod
-    def stated(cls, raw: object) -> Charter:
-        """
-        The member a declarer's own spelling names, and ``ValueError`` for
-        anything that is none of the three.
-
-        Not ``stated_flag``. That one reads ``"none"`` and ``"null"`` as no,
-        which for a two-valued flag claims nothing; here no is a statement (the
-        request is outside the charter) and reading an author's "none" as one
-        would put it in their mouth. So the spellings are few and an unknown one
-        is refused rather than guessed. Here rather than in ``bus.py`` for the
-        reason ``Basis.stated`` is: the parked row reads the same argument the
-        handler stores.
-
-        An unknown value is echoed only when it is short. The refusal is not a
-        place to print back an argument of any length, so a long one is named by
-        its length, as an over-long task_id is.
-        """
-        if raw is None:
-            return cls.UNSTATED
-        if isinstance(raw, bool):
-            return cls.YES if raw else cls.NO
-        word = str(raw).strip().lower()
-        if word in _CHARTER_YES:
-            return cls.YES
-        if word in _CHARTER_NO:
-            return cls.NO
-        if word in _CHARTER_UNSTATED:
-            return cls.UNSTATED
-        text = str(raw)
-        named = (
-            repr(text)
-            if len(text) <= _CHARTER_ECHOED
-            else f"(a value of {len(text)} characters, not repeated here)"
-        )
-        raise ValueError(
-            f"inside_charter {named} is not one of yes, no or unstated. Say yes or no, "
-            f"or omit it."
-        )
-
-
-# How an author spells each of the three answers to "inside the charter?".
-_CHARTER_YES = frozenset({"yes", "true", "inside"})
-_CHARTER_NO = frozenset({"no", "false", "outside"})
-_CHARTER_UNSTATED = frozenset({"", "unstated"})
-# The longest unknown charter mark a refusal repeats: room for a word or two.
-_CHARTER_ECHOED = 32
-
 # An id, wherever one is written rather than looked up; ``bus.py`` bounds every id
 # it is given by this. A channel's name has its own, shorter bound
 # (``MAX_CHANNEL_CHARS``) and a message id its fixed shape.
 MAX_ID_CHARS = 200
 
-# What the bus mints a concern's id as: ``c-`` and twelve hex digits
-# (``bus.post_concern``). A peer message is a concern, so ``re`` names one this way.
-_CONCERN_ID_HEX = 12
-_HEX_DIGITS = frozenset("0123456789abcdef")
-# What a channel may be called (``_channel_refusal``), and the longest it may be.
-MAX_CHANNEL_CHARS = 64
-_CHANNEL_NAME = re.compile(rf"[a-z0-9][a-z0-9._-]{{0,{MAX_CHANNEL_CHARS - 1}}}")
-
-
-def _channel_refusal(name: str) -> str | None:
-    """
-    Why ``name`` cannot be a channel's name, or None when it can.
-
-    **Plain:** ``^[a-z0-9][a-z0-9._-]{0,63}$`` -- lowercase ASCII letters and
-    digits, ``.``, ``_`` and ``-``, starting with a letter or a digit. The
-    operator names a channel, and the name becomes a directory once channels
-    are linked, so it is an identity two leads must both read the same way.
-    That is why nothing is allowed that draws like something else: no
-    invisible or control character (a zero-width space, an ANSI escape), no
-    letter from another script that draws as a Latin one, and no capitals, so
-    ``Brand`` and ``brand`` are not two channels on a filesystem that folds
-    case and one on another.
-
-    A name that passes is also one ``requests.address_refusal`` takes -- no
-    separator, no NUL, no leading dot, encodable, short of an entry's length --
-    and is its own drawable form (``drawable.text``), so the name checked is
-    the name the store keeps and the log writes. Both follow from the pattern
-    and are not checked again here (``requests`` imports this module); a test
-    keeps the two rules in step.
-
-    No whitespace, so a name is one word in the sentences that print it. That
-    does not stop a name from imitating the mark -- "ops.inside_charter-yes"
-    passes -- and nothing here tries to: what keeps the queue row honest is that
-    the row puts the mark before the channel (``approval.summarize``), so a
-    name can only follow it.
-    The name is not repeated: a refusal is not a place to print it back.
-    """
-    if len(name) > MAX_CHANNEL_CHARS:
-        return (
-            f"channel is {len(name)} characters and the limit is {MAX_CHANNEL_CHARS}. "
-            f"It is a name; put the rest in detail."
-        )
-    if _CHANNEL_NAME.fullmatch(name) is None:
-        return (
-            "channel is not a name a channel can have. A channel's name is lowercase "
-            "ASCII letters and digits, '.', '_' and '-', and starts with a letter or digit."
-        )
-    return None
-
-
-def is_channel_name(name: str) -> bool:
-    """Whether ``name`` is one a channel can have (``_channel_refusal``)."""
-    return _channel_refusal(name) is None
-
-
-def channel_refusal(name: str) -> str | None:
-    """
-    The sentence a tool refuses ``name`` with when it is not one a channel can
-    have, or None when it is (``_channel_refusal``).
-    """
-    return _channel_refusal(name)
-
-
-# A channel's id: a uuid the shell mints when the operator links two leads. Not
-# the name, which can be linked again once the channel under it is closed.
-ChannelId = str
-
-# How many sessions a link joins. The record holds a set, so relaxing this is a
-# rule changed here and not a format changed in the log.
-LINK_MEMBERS = 2
-
-
-class LinkRefusal(enum.Enum):
-    """
-    Why the operator's link of two leads was not made (``Snapshot.link_refusal``).
-    """
-
-    BAD_NAME = "the name is not one a channel can have"
-    NOT_A_PAIR = "a link joins exactly two sessions"
-    ID_HELD = "a channel under that id is already held"
-    NAME_LIVE = "a live channel already has that name"
-    NOT_RUNNING = "a member is not a running session"
-    NOT_RECORDING = "a member's board is not being recorded"
-
-
-@dataclass(frozen=True, slots=True)
-class Channel:
-    """
-    A link between leads, made by the operator, under a plain name.
-
-    Lives in its own log (``channels``), never in a member's board log. Closing
-    a link sets ``closed_at`` and nothing removes it: a closed channel stays in
-    the store, and its name can be linked again under a new id.
-
-    ``members`` is a set of session ids, though linking refuses any size but
-    ``LINK_MEMBERS``: a record made as a pair and widened later would otherwise
-    be misread as a pair by an older build.
-
-    ``charter`` is the operator's text as it was typed. It is written to the log
-    from here, so the store holds it verbatim (``store._VERBATIM``) and a pane
-    draws it through a helper that takes any ``str``.
-
-    Both times are wall-clock times, minted by the shell with the intent: they
-    are written to the log and read back by another process.
-    """
-
-    id: ChannelId
-    name: str
-    members: frozenset[str]
-    charter: str
-    created_at: float
-    closed_at: float | None = None
-
-    @builtins.property
-    def live(self) -> bool:
-        """Whether the link is open: it has not been closed."""
-        return self.closed_at is None
-
-    def joins(self, *sessions: str) -> bool:
-        """Whether the link is open and every one of ``sessions`` is a member."""
-        return self.live and all(s in self.members for s in sessions)
-
-
-class EveryChannel(enum.Enum):
-    """
-    "Every channel", as a reader of peer mail asks for it
-    (``Snapshot.peer_inbox_of``).
-
-    A value of its own and not None, because on ``Concern.channel`` None means
-    team mail: a caller handing a concern's channel through as the scope would
-    otherwise ask for every channel's mail when it held a team concern. With
-    this, the type says which of the two a caller meant.
-    """
-
-    EVERY = "every channel"
-
-
-EVERY_CHANNEL = EveryChannel.EVERY
-
-# Which peer mail a lead asks to read: the links of one name, or every link.
-ChannelScope = str | EveryChannel
-
 
 # How many wakes in a row one link may give its leads, with the operator not
 # acting on the link in between, before the next is held and the operator is
 # asked (``WakeChainHeld``). Only the operator's own acts on the link start
-# the count again (``store._moved``); a wake the system orders at a resume or
+# the count again (``store.waking._moved``); a wake the system orders at a resume or
 # a restore is not counted.
 #
 # Only the operator's, because the bound is the backstop on two agents waking
@@ -2593,7 +2403,7 @@ class PeerWakes:
     link with no chain.
 
     ``chain`` is how many wakes agents' messages have ordered on the link
-    since the operator last acted on it (``store._peer_waking`` says what
+    since the operator last acted on it (``store.waking._peer_waking`` says what
     counts). At ``PEER_WAKE_CHAIN`` the next wake is held instead.
 
     ``pending`` is every member session woken on this link whose wake the
@@ -2627,7 +2437,7 @@ class PeerWakes:
     ``Snapshot.peer_owing``). Only its ``SessionSettled``, an asker's
     ``BoardRestored`` that brings back a question it owes, or the operator's
     act on the link waking its held wake there, adds it
-    (``store._peer_waking``), and whatever lets go of the session's pending
+    (``store.waking._peer_waking``), and whatever lets go of the session's pending
     wake lets go of it too, so each names what is owed once and nothing
     after it re-arms that. A question is a
     thing the lead has already read, so naming it on every later wake would
@@ -2660,40 +2470,6 @@ class PeerWakes:
             untold=tuple(u for u in self.untold if u[0] != session_id),
             owing=self.owing - {session_id},
         )
-
-
-class MoveOwner(enum.Enum):
-    """
-    Who has to act next on a link (``Snapshot.whose_move``).
-
-    ``OPERATOR``: something on the link is parked on the operator. ``MEMBER``:
-    a member session's lead, which is running and will be woken or is already
-    at work. ``UNREACHABLE``: a member session's lead has to act and its session
-    is not running, so nothing moves until somebody resumes it. ``IDLE``:
-    nobody owes anything on it.
-    """
-
-    OPERATOR = "operator"
-    MEMBER = "member"
-    UNREACHABLE = "unreachable"
-    IDLE = "idle"
-
-
-@dataclass(frozen=True, slots=True)
-class WhoseMove:
-    """
-    Whose move it is on one link, derived from the store each time it is
-    asked (``Snapshot.whose_move``) and never stored.
-
-    ``session`` is the member session whose lead has to act, for ``MEMBER``
-    and ``UNREACHABLE``, and None otherwise. ``since`` is the oldest instant
-    among the things that make it that owner's move, on the store's clock, as
-    every obligation's ``since`` is; None for ``IDLE``.
-    """
-
-    owner: MoveOwner
-    session: str | None = None
-    since: float | None = None
 
 
 @dataclass(slots=True)
@@ -2734,26 +2510,6 @@ class PeerIndex:
     operator: Mapping[ChannelId, float]
     member: Mapping[tuple[ChannelId, str], float]
     waiting: Mapping[tuple[NodeId, ChannelId], int]
-
-
-class ThreadMark(enum.Enum):
-    """
-    Where one message on a link stands, as its thread says it
-    (``Snapshot.thread``). Read from the message's state first and its times
-    after: a message withdrawn after its lead read it is WITHDRAWN with
-    ``delivered_at`` set, so neither the state alone ("never read") nor the
-    time alone ("still delivered") says which it is.
-
-    ``ANSWERED`` is a message some message from its recipient's session
-    answers (``Snapshot.is_answered``), whether or not it asked for one. A
-    withdrawn message is marked withdrawn even when a reply cites it.
-    """
-
-    POSTED = "posted"
-    READ = "read"
-    ANSWERED = "answered"
-    WITHDRAWN_UNREAD = "withdrawn before it was read"
-    WITHDRAWN_READ = "read, then withdrawn by its sender"
 
 
 @dataclass(frozen=True, slots=True)
@@ -2799,18 +2555,6 @@ class ThreadParked:
     pending: PendingApproval
 
 
-@dataclass(frozen=True, slots=True)
-class ThreadWakeHeld:
-    """
-    A member's wake the link's chain held (``PeerWakes.held``), since
-    ``since`` on the store's clock: the other thing on a link that is the
-    operator's move without being a message or a decision.
-    """
-
-    session: str
-    since: float
-
-
 ThreadRow = ThreadMessage | ThreadDecision | ThreadParked | ThreadWakeHeld
 
 
@@ -2846,118 +2590,17 @@ class LinkThread:
     sides: tuple[ThreadSide, ...]
 
 
-# The bus tool a lead withdraws a peer message with, as the gate is handed its
-# name. Its arguments name no channel, so the link a parked withdrawal is on is
-# the withdrawn message's (``Snapshot.parked_link``).
-WITHDRAW_PEER_TOOL = "mcp__pptmstr__withdraw_peer_message"
-
-
-class PeerRefusal(enum.Enum):
-    """
-    Why a lead's message to a peer was not sent (``Snapshot.peer_route`` and
-    ``Snapshot.peer_send_refusal``).
-
-    ``NOT_A_LEAD`` is a worker that should ask its own lead to send it.
-    ``CLOSED`` is a name whose every link this store holds is closed;
-    ``NO_SUCH_CHANNEL`` is a name no link this store holds has, most likely a
-    typo -- or a link this run did not restore. ``NOT_A_MEMBER`` is a live link
-    between two other sessions, which this sender cannot see into. Those three
-    are apart for the store's tests and the operator's reading, and the sender
-    is told one sentence for all of them (``bus._peer_refusal_text``): which it
-    is would tell a lead probing names whether a link it is not on exists.
-    ``ID_HELD`` is a message id the store already holds, which a minted id
-    never is.
-
-    The last three bind a send to the link it was written for, so a link made
-    under the same name between the call and the filing does not take it to
-    another lead. ``LINKED_AFTER`` is a link that went live in this process
-    after the gate saw the call. ``OTHER_LINK`` is an ``re`` naming a peer
-    message sent over a different link than the one the name resolves to now.
-    ``UNHELD_RE`` is an ``re`` naming a message this store does not hold, so
-    which link it came over cannot be asked: after a restart whose sender's
-    session is not resumed yet, the message an answer cites may have come over
-    a link since closed, and the name may now reach another lead.
-
-    ``NOT_APPLIED`` is the member ``_apply`` never returns: the fallback for a
-    request the store never saw, as on ``TaskRefusal``.
-    """
-
-    NOT_A_LEAD = "not_a_lead"
-    NO_SUCH_CHANNEL = "no_such_channel"
-    CLOSED = "closed"
-    NOT_A_MEMBER = "not_a_member"
-    ID_HELD = "id_held"
-    LINKED_AFTER = "linked_after"
-    OTHER_LINK = "other_link"
-    UNHELD_RE = "unheld_re"
-    NOT_APPLIED = "not_applied"
-
-
-class PeerWithdrawRefusal(enum.Enum):
-    """
-    Why a withdrawal by an agent (``intents.ConcernWithdrawn`` with a node)
-    was not applied (``store._message_withdrawal_refusal``).
-
-    ``NOT_YOURS`` is a message this store does not hold, or one another agent
-    sent: one member for both, so a lead cannot tell an id that exists from
-    one that does not by trying to withdraw it. ``NOT_A_MEMBER`` is a peer
-    message sent over a link that is closed, or that the withdrawer's session
-    is no longer on. ``WITHDRAWN`` is one already withdrawn. ``ANSWERED`` is
-    one its recipient's session has answered: the answer cites it, and
-    withdrawing the question would leave the answer about nothing.
-    ``ALREADY_READ`` is a concern inside a team that its recipient has read;
-    only a peer message is withdrawn after it is read. ``TEAM_MAIL`` is a
-    concern inside a team asked of ``withdraw_peer_message``, which withdraws
-    only a message between teams (``intents.ConcernWithdrawn.peer_only``).
-
-    ``NOT_APPLIED`` is the member ``_apply`` never returns: the fallback for a
-    request the store never saw, as on ``PeerRefusal``.
-    """
-
-    NOT_YOURS = "not_yours"
-    NOT_A_MEMBER = "not_a_member"
-    WITHDRAWN = "withdrawn"
-    ANSWERED = "answered"
-    ALREADY_READ = "already_read"
-    TEAM_MAIL = "team_mail"
-    NOT_APPLIED = "not_applied"
-
-
-class CitedQuestion(enum.Enum):
-    """
-    Where the message a withdrawn answer cited (its ``re``) stands once the
-    answer is withdrawn (``Snapshot.cited_question``), so the withdrawer is
-    told what is true of it and not that it is always owed again.
-
-    ``OWED_AGAIN`` is a question its withdrawer is owed an answer to now
-    (``Snapshot.awaiting_answer``). The rest are why not: ``ASKED_NONE``, it
-    asked for no answer; ``WITHDRAWN``, its own sender withdrew it;
-    ``STILL_ANSWERED``, another message from the withdrawer's session answers
-    it; ``LINK_NOT_LIVE``, the link it came over is closed or not restored;
-    ``UNREAD``, the withdrawer's lead has not been handed it, and it is owed
-    once it is; ``NOT_HELD``, this run does not hold it.
-    """
-
-    OWED_AGAIN = "owed_again"
-    ASKED_NONE = "asked_none"
-    WITHDRAWN = "withdrawn"
-    STILL_ANSWERED = "still_answered"
-    LINK_NOT_LIVE = "link_not_live"
-    UNREAD = "unread"
-    NOT_HELD = "not_held"
-
-
 def why_held(world: Snapshot, link_id: ChannelId, messages: Iterable[Concern] = ()) -> str:
     """
     Why the link ``link_id`` hands ``messages`` over to nobody in this run, in
     words: a predicate of "the link". NEEDS YOU's ``PeerMailHeld`` row
-    (``store._owing_peer_mail``) and a link's thread (``Snapshot.thread``)
+    (``store.waking._owing_peer_mail``) and a link's thread (``Snapshot.thread``)
     both say it in these words.
     """
     link = world.channels.get(link_id)
     if link is None:
         # A channel log read short or stopped is withheld from the store whole
-        # (``channels.restore``), so the two look alike from here.
+        # (``channels.facts.restore``), so the two look alike from here.
         return "is not open in this run (not restored, or its log not read whole)"
     if not link.live:
         return "is closed"
@@ -2987,18 +2630,9 @@ def peer_addressed(sender: NodeId, recipient: NodeId) -> bool:
     Whether a message between leads may run from ``sender`` to ``recipient``:
     each is the lead of its session, and the sessions differ. Nothing else is
     one, so the reducer files no other (``store._apply``'s ``ConcernPosted``) and
-    a restore places no other (``store._restored_concern``).
+    a restore places no other (``store.restore._restored_concern``).
     """
     return sender[1] is None and recipient[1] is None and sender[0] != recipient[0]
-
-
-def is_concern_id(text: str) -> bool:
-    """Whether ``text`` has the shape of an id the bus gives a concern."""
-    return (
-        len(text) == 2 + _CONCERN_ID_HEX
-        and text.startswith("c-")
-        and all(c in _HEX_DIGITS for c in text[2:])
-    )
 
 
 def stated_provenance(channel: object, re: object, inside_charter: object) -> Provenance | None:
@@ -3010,7 +2644,7 @@ def stated_provenance(channel: object, re: object, inside_charter: object) -> Pr
     Absent and blank are both "not given", as for every optional argument. What
     is refused is a name that is not text, a channel that is not a plain name
     (``_channel_refusal``), an ``re`` that is not a concern id
-    (``is_concern_id``), a charter mark that is not yes, no or unstated
+    (``ids.is_concern_id``), a charter mark that is not yes, no or unstated
     (``Charter.stated``), and ``re`` or a stated mark with no channel, which
     would say a request arrived on nothing. Here for the reason
     ``Charter.stated`` is: the parked row and the handler read one rule, the
@@ -3038,10 +2672,10 @@ def stated_provenance(channel: object, re: object, inside_charter: object) -> Pr
     refused = _channel_refusal(on)
     if refused is not None:
         raise ValueError(refused)
-    if answers is not None and not is_concern_id(answers):
+    if answers is not None and not ids.is_concern_id(answers):
         raise ValueError(
             "re is not a message id. A peer message's id is the one the bus gave it: "
-            f"c- and {_CONCERN_ID_HEX} hex digits."
+            f"{ids.CONCERN.prefix} and {ids.CONCERN.hex_chars} hex digits."
         )
     return Provenance(on, answers, inside)
 
@@ -3055,7 +2689,7 @@ def kept_provenance(stated: Provenance | None, edited: bool) -> Provenance | Non
     sent, so an edit drops it to unstated, the way an edit drops a basis; the
     channel and the message stay, being what the operator approved whoever
     wrote them. The bus stores this (``bus.declare_task``) and the parked call
-    predicts it from the operator's draft (``approval.edited_provenance``): one
+    predicts it from the operator's draft (``gate.rows.edited_provenance``): one
     rule, so what the operator is told is what is stored.
     """
     if stated is None or not edited or stated.inside_charter is Charter.UNSTATED:
@@ -3102,7 +2736,7 @@ class Provenance:
         """
         The provenance as one line, the way DETAIL shows it: "requested on
         #<channel>, re <message>, inside charter: yes". The queue row says less
-        (``approval.summarize``).
+        (``gate.park.summarize``).
         """
         re = "" if self.re is None else f", re {self.re}"
         return f"requested on #{self.channel}{re}, inside charter: {self.inside_charter.value}"
@@ -3190,7 +2824,7 @@ class Task:
     # obliging every later arm to clear it. This is a domain fact -- an agent declined
     # this work -- and it is as much the board's business as who declared it.
     #
-    # ``store._pick_claim`` consults it for a bare claim only, so a declined task is
+    # ``store.tasks._pick_claim`` consults it for a bare claim only, so a declined task is
     # skipped by the agent that declined it, stays claimable by every other agent, and
     # is still takeable by id by anyone including its releaser. A task that no agent
     # could claim at all would be worse than the loop this prevents: a board nobody is
@@ -3303,7 +2937,7 @@ class Task:
     # amendment empties ``released_by`` because a declined offer no longer
     # exists, and "this agent has worked to this task's specification" has to
     # outlive exactly that. It is what the rule that an agent may not replace a
-    # specification it has been bound by is asked of (``store._amender_refusal``).
+    # specification it has been bound by is asked of (``store.tasks._amender_refusal``).
     # Written by the claim arm and by nothing else; nothing clears it.
     held_by: tuple[NodeId, ...] = ()
     # The operator closed this task (``intents.TaskClosed``): it is COMPLETED
@@ -3333,7 +2967,7 @@ class Task:
     # takes only an unfinished task.
     withdrawn: bool = False
     # Of a withdrawn task: it was its session's root that withdrew it, standing
-    # in for a declarer that had stopped (``store._withdrawer_refusal``), so the
+    # in for a declarer that had stopped (``store.tasks._withdrawer_refusal``), so the
     # reason is the root's words and not the declarer's. False on any task not
     # withdrawn. Stored for ``withdrawn``'s reason, and because who withdrew it is
     # not otherwise on the record.
@@ -3438,8 +3072,8 @@ class Task:
         session at once, which is precisely the "claim work you were never shown"
         hole this predicate closes.
 
-        One predicate rather than two agreeing filters: ``board.board_tasks`` shows
-        what it returns and ``store._pick_claim`` hands out what it returns, and
+        One predicate rather than two agreeing filters: ``board.rows.board_tasks`` shows
+        what it returns and ``store.tasks._pick_claim`` hands out what it returns, and
         those two had drifted -- the pane filtered by session and the reducer
         filtered by nothing.
         """
@@ -3501,7 +3135,7 @@ class Task:
         writer is done first. One that declares none drops out with the rest of
         the tasks that write nothing. Two gates that both declare touches would
         each wait on the other, so the declaration arm refuses the second as a
-        cycle (``store._cycle``). A withdrawn or operator-closed task is
+        cycle (``store.tasks._cycle``). A withdrawn or operator-closed task is
         COMPLETED, so it drops out with no step of its own.
 
         Empty once this task is COMPLETED. A finished task waits on nothing,
@@ -3551,7 +3185,7 @@ class Task:
 
 
 # What an agent of an earlier run of its session is called on every surface, after
-# its address (``Snapshot.of_earlier_run``). ``board.FOREIGN`` is the same
+# its address (``Snapshot.of_earlier_run``). ``addresses.FOREIGN`` is the same
 # qualifier in space; this one is in time.
 #
 # It says "run" and not "restart" because two things end a run and only one of
@@ -3671,7 +3305,7 @@ MAX_CLOSE_REASON_CHARS = MAX_ANSWER_CHARS
 # counted, and listed by the reads after it. Bounded because the "told" mark is
 # this run's: after a restart every one in the logs read is listed again, and an
 # old link's would otherwise flood the first read. Three, as many as a wake names
-# by id (``bus.WAKE_DECISIONS_NAMED``).
+# by id (``waketext.WAKE_DECISIONS_NAMED``).
 MAX_WITHDRAWALS_LISTED = 3
 
 # A declarer's reason for withdrawing a task. The same kind of text as the
@@ -4236,7 +3870,7 @@ class Snapshot:
         The peer messages ``session_id``'s lead was handed and their sender
         then withdrew, that no read has listed to it as withdrawn yet, over one
         of ``links`` that is live: the links a read covers
-        (``store._read_covers``), by id and not by name. Oldest handed over
+        (``store.peers._read_covers``), by id and not by name. Oldest handed over
         first.
 
         Only a live link's: a retraction is restored as untold in every run
@@ -4321,7 +3955,7 @@ class Snapshot:
         of a session not resumed in this run: after a restart that resumed only
         the asker, a question answered in an earlier run reads as unanswered.
         """
-        # Read on every step of the reducer (``store._owing_peer_mail``), so each
+        # Read on every step of the reducer (``store.waking._owing_peer_mail``), so each
         # test is ordered to turn team mail away first: only a peer message
         # carries ``re`` or ``needs_answer`` (``Concern.__post_init__``).
         answered = self._answered()
@@ -4352,7 +3986,7 @@ class Snapshot:
         Not owed an answer in ``awaiting_answer``'s sense, since the age runs
         from delivery (Decided 6); asked for the question whose recipient's
         session is not running, which can neither read nor answer it
-        (Decided 4, ``store._owing_peer_mail``).
+        (Decided 4, ``store.waking._owing_peer_mail``).
 
         A question already answered, by ``awaiting_answer``'s rule, is not
         here though it is unread: a reply may cite a message its sender was
@@ -4401,7 +4035,7 @@ class Snapshot:
         not a card recalled from its file, not ended, cancelled or failed. A
         session off the fleet has a root in a final state (``detach_refusal``),
         so the state answers for it. The test the store orders wakes under
-        (``store._wakeable``) and the shell sends them under (``app._sendable``).
+        (``store.waking._wakeable``) and the shell sends them under (``app._sendable``).
         """
         root = self.nodes.get((session_id, None))
         return (
@@ -4413,12 +4047,12 @@ class Snapshot:
     def parked_link(self, pending: PendingApproval) -> ChannelId | None:
         """
         The link a parked call would act on across, or None for a call that
-        acts on none: a send or a channel decision (``approval.peer_channel``)
+        acts on none: a send or a channel decision (``gate.tools.peer_channel``)
         on the live link of that name that the caller's session is a member
         of, or a withdrawal (``WITHDRAW_PEER_TOOL``) of a peer message the
         caller sent, on that message's link while it is live and the caller's
         session is on it -- the withdrawal the store would apply
-        (``store._message_withdrawal_refusal``). The id is read as the handler
+        (``store.mail._message_withdrawal_refusal``). The id is read as the handler
         reads it, stripped.
 
         A withdrawal of a message the caller did not send acts on no link, so
@@ -5018,7 +4652,7 @@ class Snapshot:
         holds only while nothing takes a record away.** ``intents.AgentRemoved``
         does, and nothing emits it. An emitter that removed a restored party
         which had since been woken and had finished its turn would make that
-        agent gone again here, and ``store._may_reclaim`` would hand its claim
+        agent gone again here, and ``store.tasks._may_reclaim`` would hand its claim
         to the root -- the reading of "gone" that function's docstring rules
         out. Whatever starts emitting it has to settle that first.
         """
@@ -5034,7 +4668,7 @@ class Snapshot:
 
         **This is the definition, and every reader asks it here** -- the store
         deciding whether a session's root may release a claim
-        (``store._may_reclaim``), the board naming the agent and marking mail to
+        (``store.tasks._may_reclaim``), the board naming the agent and marking mail to
         it, the log recording a reclaim. A run of a session is one CLI process
         driving it. A run ends when pptmstr exits, and also when the session is
         resumed or relaunched inside one window; an agent is of an earlier run
@@ -5166,7 +4800,7 @@ class Snapshot:
 
         Structural rather than presentational, which is why it sits beside
         ``children_of`` -- ``order`` is a pre-order walk this class already owns, and
-        the bus address projection in ``board.py`` needs it from outside ``ui/``.
+        the bus address projection in ``board/rows.py`` needs it from outside ``ui/``.
         """
         return tuple(
             self.nodes[nid]

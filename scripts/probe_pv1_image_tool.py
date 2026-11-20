@@ -68,7 +68,7 @@ MODEL = "haiku"
 TOOL = "show_figure"
 QUALIFIED = f"mcp__{SERVER_NAME}__{TOOL}"
 # CLI 2.1.301 defers MCP tools behind ToolSearch, so the model has to load the
-# schema first. pptmstr's gate auto-approves ToolSearch (approval._AUTO); so must
+# schema first. pptmstr's gate auto-approves ToolSearch (gate.tools.AUTO); so must
 # this one, or the tool is unreachable.
 ALLOWED = frozenset({QUALIFIED, "ToolSearch"})
 SIZE = 64

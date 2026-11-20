@@ -1,7 +1,7 @@
 # A break-glass command: the contained team asks, the operator reads it, pptmstr runs it
 
 **Dated:** 2026-10-13 · **Status:** a design agreed in conversation with the operator; built since —
-[`2026-10-13-building-the-break-glass-command.md`](2026-10-13-building-the-break-glass-command.md)
+[`2026-10-13-building-the-break-glass-command.md`](archive/2026-10-13-building-the-break-glass-command.md)
 records what and how far it was verified · **Found by:** the operator, asking
 whether work had happened on "the autonomous workteam that has access to a
 break-glass/privileged-actor concept" · **Continues:**
@@ -130,3 +130,15 @@ By reasoning about the pieces, not by a run.
   the sandbox" for a live autonomous session — the whole-session break-glass the 10-07 record
   recommended. Today's gate menu offers such a session only "narrow to strict", which keeps the
   sandbox on.
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py`. B5's last step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what was
+left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`, `park`)
+and deleted it. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.summarize` | `gate.park.summarize` |

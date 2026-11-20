@@ -8,7 +8,7 @@ whether denying a path is *possible*. Part two asks whether `Bash cat` returns t
 file anyway, which decides whether denying it is *useful*.
 
 pptmstr's `AgentSession._gate_tool_use` answers every `PreToolUse` with an explicit
-`permissionDecision`, and `approval._AUTO` makes that decision `allow` for `Read`,
+`permissionDecision`, and `gate.tools.AUTO` makes that decision `allow` for `Read`,
 `Grep`, `NotebookRead` and `ReadMcpResource` at **every** policy, `STRICT` included.
 The CLI would ordinarily bound those tools to the working directory and any
 additional directories. Upstream says the sandbox does not help here --
@@ -52,7 +52,7 @@ CLI's normal permission flow.
 sandboxed.** `Read` and `Grep` run in the CLI process, which the sandbox does not
 contain, so enabling it on those arms would add a variable that cannot move the
 result. `Bash` is the opposite case: the sandbox is the only thing that ever bounded
-it, so the S-arms apply `sandbox.containment_settings()` -- the configuration that
+it, so the S-arms apply `gate.sandbox.containment_settings()` -- the configuration that
 ships, not a hand-written block -- and pair each with an unsandboxed control.
 
 **Why part two exists at all.** `read-bound-probe` established that a deny rule beats
@@ -72,7 +72,7 @@ it might not be:
     reason to take it.
 
 **Why the credential leg plants a decoy instead of reading a key.** The four paths in
-`sandbox.DENIED_CREDENTIAL_FILES` are real credential locations, and the question is
+`gate.sandbox.DENIED_CREDENTIAL_FILES` are real credential locations, and the question is
 whether a denial at one of them is enforced -- which a file this script wrote and this
 script recognises answers exactly as well as a private key would, and can be answered
 without ever putting a secret on the wire. The decoy is created under `~/.ssh`,
@@ -115,10 +115,10 @@ The arms, and what each one is for:
       never by the absence of an error.
   G   in-cwd canary, deny rule naming **Read**, hook allows, and the model is asked to
       use **Grep** instead
-      The hole is `_AUTO` as a frozenset, not one tool. A fix that closes `Read` and
+      The hole is `AUTO` as a frozenset, not one tool. A fix that closes `Read` and
       leaves `Grep` returning the same bytes would look complete and not be.
 
-Part two, every arm a `Bash cat` and every S-arm under `sandbox.containment_settings()`:
+Part two, every arm a `Bash cat` and every S-arm under `gate.sandbox.containment_settings()`:
 
   S0  outside canary, no sandbox, hook allows
       The control. `cat` works and the file is readable; without this an S-arm denial
@@ -172,7 +172,7 @@ the verdict quotes the one that ran.
 **Why the tool inventory is printed for every arm.** A tool the session never offered
 comes back on the wire as an `is_error` result with no `PreToolUse` -- the same shape
 as a permission denial. The `init` message's tool list separates them, and each arm
-reports which of `approval._AUTO`'s four tools this session was actually handed.
+reports which of `gate.tools.AUTO`'s four tools this session was actually handed.
 
 Every verdict below is computed from the token appearing in a `ToolResultBlock` on the
 wire, cross-checked against the same token in the hook payload. The model's own
@@ -223,13 +223,13 @@ from claude_agent_sdk import (  # noqa: E402
 )
 
 from pptmstr.cli_version import read_cli_version, resolve_cli_path  # noqa: E402
-from pptmstr.sandbox import DENIED_CREDENTIAL_FILES, containment_settings  # noqa: E402
+from pptmstr.gate.sandbox import DENIED_CREDENTIAL_FILES, containment_settings  # noqa: E402
 
 # Named so that a stray one after a killed run is obviously this script's and
 # obviously not a key. It is removed in a `finally`; this is the belt to that brace.
 _DECOY_NAME = "pptmstr-read-bound-probe-decoy.txt"
 
-# `approval._AUTO`. A session that does not offer one of these cannot be used to
+# `gate.tools.AUTO`. A session that does not offer one of these cannot be used to
 # measure it, and the init inventory is how this script tells that apart from a
 # refusal.
 AUTO_TOOLS = ("Read", "Grep", "NotebookRead", "ReadMcpResource")
@@ -410,7 +410,7 @@ async def run_arm(spec: ArmSpec, session_dir: Path) -> ArmResult:
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
-                "permissionDecisionReason": "probe allow, standing in for approval._AUTO",
+                "permissionDecisionReason": "probe allow, standing in for gate.tools.AUTO",
             }
         }
 
@@ -483,7 +483,7 @@ def describe(arm: ArmResult) -> None:
         print(f"  DID NOT START: {arm.failed_to_start}")
     present = [t for t in AUTO_TOOLS if t in arm.session_tools]
     missing = [t for t in AUTO_TOOLS if t not in arm.session_tools]
-    print(f"  _AUTO tools this session offers: {present or 'NONE'}; absent: {missing or 'none'}")
+    print(f"  AUTO tools this session offers: {present or 'NONE'}; absent: {missing or 'none'}")
     print(f"  tool_use on the wire: {len(arm.wire_uses)}")
     for use in arm.wire_uses:
         print(f"     - {use['tool']} {use['input'][:160]}")
@@ -577,7 +577,7 @@ def _verdict_can_a_path_be_denied(arms: dict[str, ArmResult], cli_version: str) 
         decision = (
             "HOOK ALLOW BEATS DENY -- Ci was denied by the rule and Bi was not. A "
             "`permissions` block in `AgentSession._options` cannot re-bound Read while "
-            "the gate answers allow; the fix has to be in the gate or in `_AUTO`"
+            "the gate answers allow; the fix has to be in the gate or in `AUTO`"
         )
     elif outcome("Bi") in DENIALS:
         decision = (
@@ -646,7 +646,7 @@ def _verdict_can_a_path_be_denied(arms: dict[str, ArmResult], cli_version: str) 
         grep = (
             "DID NOT RUN -- Grep is not in this session's tool set, so nothing about it "
             "was measured. The question stands unanswered; it is not a pass. Note that "
-            "`_AUTO` names it anyway, and see the per-arm `_AUTO tools this session "
+            "`AUTO` names it anyway, and see the per-arm `AUTO tools this session "
             "offers` line for which of the four the CLI actually hands a session here"
         )
     elif not any(use["tool"] == "Grep" for use in arms["G"].wire_uses):
@@ -657,7 +657,7 @@ def _verdict_can_a_path_be_denied(arms: dict[str, ArmResult], cli_version: str) 
     elif outcome("G") == RETURNED:
         grep = (
             "NO -- a Read deny rule that blocks Read does not stop Grep returning the "
-            "same bytes. Any fix has to name every tool in `_AUTO`, not `Read` alone"
+            "same bytes. Any fix has to name every tool in `AUTO`, not `Read` alone"
         )
     else:
         grep = f"Grep is {outcome('G')} under the Read deny rule; it did not get the bytes"
@@ -786,7 +786,7 @@ def _verdict_is_denying_it_useful(arms: dict[str, ArmResult]) -> None:
     elif outcome("K1") in DENIALS:
         creds = (
             "ENFORCED -- the ~/.ssh decoy read unsandboxed (K0) and was denied under "
-            "`sandbox.containment_settings()` (K1), while a $HOME decoy on no "
+            "`gate.sandbox.containment_settings()` (K1), while a $HOME decoy on no "
             "credential path read fine under the same settings (K2). So the sandbox is "
             "masking the four named paths specifically rather than withholding the home "
             "directory, which is what §11 U1 was left asking. `credentials.files` is a "
@@ -797,7 +797,7 @@ def _verdict_is_denying_it_useful(arms: dict[str, ArmResult]) -> None:
         creds = (
             "NOT ENFORCED -- the decoy came back under the shipped containment. "
             "`sandbox.credentials.files` is doing nothing on this build, and §8c's "
-            "silent-key-acceptance finding is the likely reason. `sandbox.py`'s "
+            "silent-key-acceptance finding is the likely reason. `gate/sandbox.py`'s "
             "containment would then be protecting nothing at the four paths it names"
         )
     else:
@@ -993,7 +993,7 @@ async def main() -> int:
 
     session_dir = Path(tempfile.mkdtemp(prefix="pptmstr-probe-session-")).resolve()
     outside_dir = Path(tempfile.mkdtemp(prefix="pptmstr-probe-outside-")).resolve()
-    # Under the first entry of `sandbox.DENIED_CREDENTIAL_FILES`, which is the only
+    # Under the first entry of `gate.sandbox.DENIED_CREDENTIAL_FILES`, which is the only
     # way to ask whether that entry is enforced. A decoy this script wrote, never a
     # key: the question is whether the denial fires, and a file with a nonce in it
     # answers that exactly as well as a secret would.

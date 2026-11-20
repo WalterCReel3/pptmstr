@@ -35,10 +35,12 @@ from typing import assert_never
 from imgui_bundle import imgui
 
 from .. import brief as brief_mod
-from .. import cli_version, drawable, sandbox, sessionfile, templates, tree
+from .. import cli_version, drawable, sessionfile, templates, tree
 from .. import sessions as sessions_mod
 from .. import worktree as worktree_mod
-from ..approval import Disposition, Policy, classify, requires_containment
+from ..gate import sandbox
+from ..gate.classify import classify
+from ..gate.policy import Disposition, Policy, requires_containment
 from ..model import LaunchSpec, NewWorktree
 from ..model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
 from ..sessions import Overlay, SessionRow
@@ -49,7 +51,7 @@ from .widgets import Help, Notice, Tone
 TITLE = "New Task"
 
 # The rungs of the dial, read off the enum rather than listed, so a preset renamed
-# or added in approval.py cannot leave a stale second copy here. The consequence is
+# or added in gate/policy.py cannot leave a stale second copy here. The consequence is
 # that every member is offerable at launch: a preset that must not be is a
 # distinction `Policy` does not currently draw, and adding one means drawing it here
 # too.
@@ -1099,7 +1101,7 @@ def contained_text(directory: LaunchDirectory, layout: GitLayout) -> ContainedTe
 # ``parents[1]`` is the package directory -- this file is ``pptmstr/ui/launcher.py``
 # -- and ``source_tree_of`` widens that to the checkout holding it when there is one.
 # The widening is the load-bearing half: what needs protecting is not only
-# ``approval.py`` but everything beside it that decides what the next launch does.
+# the gate (``pptmstr/gate/``) but everything beside it that decides what the next launch does.
 OWN_CHECKOUT = tree.source_tree_of(str(Path(__file__).resolve().parents[1]))
 
 # ``{named}`` is the directory the refusal is about, in the words the modal uses for
@@ -1115,7 +1117,7 @@ _REFUSAL = (
     "it is inside pptmstr's own checkout, or it is a path that cannot be resolved at "
     "all; the check answers yes to both and cannot tell them apart.\n"
     "under this mode that directory is where an agent writes without being asked, and "
-    "pptmstr's own approval.py is in this checkout."
+    "pptmstr's own gate is in this checkout."
 )
 
 
@@ -1148,7 +1150,7 @@ def refusal_for(
     The sandbox's protected paths cover ``.claude/**``, ``.mcp.json``, ``.git/hooks``
     and ``.git/config`` -- not ordinary project source. ``cwd`` defaults to ``"."``,
     so the default launch would hand an agent that runs ``Bash`` unattended write
-    access to the ``approval.py`` that gates the *next* launch. The alternative
+    access to the ``pptmstr/gate/`` that gates the *next* launch. The alternative
     boundary is "the operator typed a different directory", enforced by nothing.
 
     **The message names two situations because the predicate cannot separate them.**
@@ -2808,23 +2810,25 @@ class LauncherState:
         """
         Whether this launch actually carries the mode: asked for, and not refused.
 
-        Only the top rung asks. ``PERMISSIVE`` is not a contained mode and never
-        consults the directory, so it is not "refused" here -- it is simply not this
-        question, and answering False for it is what keeps the containment machinery
-        off a rung that does not want it.
+        Only a rung that ``requires_containment`` asks, which today is the top one.
+        ``PERMISSIVE`` is not a contained mode and never consults the directory, so it
+        is not "refused" here -- it is simply not this question, and answering False
+        for it is what keeps the containment machinery off a rung that does not want
+        it.
         """
-        return self.policy is Policy.AUTONOMOUS and self.containment_refusal() is None
+        return requires_containment(self.policy) and self.containment_refusal() is None
 
     @property
     def granted_policy(self) -> Policy:
         """
         The rung this launch actually runs under, as opposed to the one asked for.
 
-        They differ in exactly one case: ``AUTONOMOUS`` asked for where containment is
-        refused. That falls back to ``STRICT`` rather than to ``PERMISSIVE``, and the
-        distance is deliberate -- an operator who reached the top rung was not asking
-        for the middle one, and quietly seating them one rung down would be a gate
-        nobody chose. The refusal is on screen; the launch is the one it describes.
+        They differ in exactly one case: a rung that ``requires_containment`` -- today
+        ``AUTONOMOUS`` -- asked for where containment is refused. That falls back to
+        ``STRICT`` rather than to ``PERMISSIVE``, and the distance is deliberate -- an
+        operator who reached the top rung was not asking for the middle one, and quietly
+        seating them one rung down would be a gate nobody chose. The refusal is on screen;
+        the launch is the one it describes.
 
         Never for a picked session: a resume the rung is refused for is held, not
         seated lower (``resume_gate_hold``), so the rung asked for is the only one
@@ -2832,7 +2836,7 @@ class LauncherState:
         """
         if self.picker.picked is not None:
             return self.policy
-        if self.policy is Policy.AUTONOMOUS and not self.dangerous_engaged:
+        if requires_containment(self.policy) and not self.dangerous_engaged:
             return Policy.STRICT
         return self.policy
 
@@ -2960,20 +2964,21 @@ class LauncherState:
         # stands: resolved again here it could name another place than the one the
         # worktree is made at, which ``LaunchSpec`` refuses.
         resolved_cwd = plan.path if plan is not None else resolved_directory(directory)
-        # Both or neither, and the pairing is the top rung. ``AUTONOMOUS`` releases
-        # every reviewed tool and the containment is the only thing bounding what a
-        # released ``Bash`` reaches, so a spec carrying that rung alone is an unattended
-        # agent with the whole machine, and one carrying the containment alone is a
-        # sandbox around a gate that is still asking. A draft that did not reach the top
-        # rung, or reached it in a directory it is refused for, produces the two
-        # defaults -- which is the spec this built before the mode existed.
+        # Both or neither, and the pairing is ``requires_containment``'s: today the top rung
+        # alone. ``AUTONOMOUS`` releases every reviewed tool and the containment is the only
+        # thing bounding what a released ``Bash`` reaches, so a spec carrying that rung
+        # alone is an unattended agent with the whole machine, and one carrying the
+        # containment alone is a sandbox around a gate that is still asking. A draft that
+        # did not reach the top rung, or reached it in a directory it is refused for,
+        # produces the two defaults -- which is the spec this built before the mode existed.
         #
         # ``PERMISSIVE`` is deliberately outside that pairing and carries no
         # containment. What the sandbox bounds is writes and network, which that rung
         # already refuses syntactically, so pairing them would cost the operator
-        # working invocations to buy the gate nothing. See ``approval.Policy``.
+        # working invocations to buy the gate nothing. See ``gate.policy.Policy``.
         engaged = (
-            self.policy is Policy.AUTONOMOUS and self._read_refusal(directory, resolved_cwd) is None
+            requires_containment(self.policy)
+            and self._read_refusal(directory, resolved_cwd) is None
         )
         return LaunchSpec(
             task=self.task.strip(),
@@ -3000,7 +3005,7 @@ class LauncherState:
             containment=sandbox.containment_settings() if engaged else None,
             # ``granted_policy``'s rule, from this reading rather than from the memo.
             policy=(
-                Policy.STRICT if self.policy is Policy.AUTONOMOUS and not engaged else self.policy
+                Policy.STRICT if requires_containment(self.policy) and not engaged else self.policy
             ),
             # Unconditionally, and not gated on ``engaged`` as the containment is. The
             # policy and the containment pair because the top rung without the
@@ -3487,7 +3492,7 @@ def boundary_unstated(directory: LaunchDirectory) -> str | None:
 
 
 # A tool name no build knows, handed to the classifier to ask what a rung does with
-# one. ``approval.classify`` parks it at every rung; asking rather than saying so
+# one. ``gate.classify.classify`` parks it at every rung; asking rather than saying so
 # keeps the line under the dial a reading of the classifier, as the probes are.
 _UNKNOWN_TOOL = "pptmstr-probe-of-a-tool-no-build-knows"
 _UNKNOWN_KIND = "a tool this build has never heard of"

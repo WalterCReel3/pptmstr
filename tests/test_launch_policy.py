@@ -19,9 +19,9 @@ from collections.abc import Iterator
 import pytest
 
 from pptmstr.app import AppState, _launch, _policy_of, _relaxed_count, _revoke_policy
-from pptmstr.approval import Policy, inherits_to_subagents, requires_containment
 from pptmstr.bridge import Bridge
 from pptmstr.driver import AgentSession
+from pptmstr.gate.policy import Policy, inherits_to_subagents, requires_containment
 from pptmstr.model import AgentRecord, AgentState, LaunchSpec, NodeId
 from pptmstr.pool import SessionPool
 from pptmstr.settings import Settings
@@ -88,7 +88,7 @@ def test_a_launch_nobody_touched_the_dial_on_is_strict() -> None:
 def test_the_default_does_not_depend_on_the_order_of_the_enum() -> None:
     """
     The draft holds the policy value, not an index into ``POLICIES``. Were it an
-    index, declaring a rung above ``STRICT`` in approval.py would silently move
+    index, declaring a rung above ``STRICT`` in gate/policy.py would silently move
     every launch onto it -- a widening of the gate with no edit to this file and
     nothing on screen to say so.
     """
@@ -264,14 +264,14 @@ def test_a_rung_that_releases_writes_pays_for_it_with_containment() -> None:
 
     This used to read "no rung admits writes or spawns", which was the right rule
     for a ladder whose top rung was ``PERMISSIVE``. ``AUTONOMOUS`` breaks it on
-    purpose: it releases the whole of ``_REVIEW`` and the allowlist stops being
+    purpose: it releases the whole of ``REVIEW`` and the allowlist stops being
     what bounds the session. Deleting the assertion at that point would have
     removed the guard rather than the mistake, so what is checked now is the trade
     rather than the prohibition -- a rung may stop parking writes, but only by
     requiring the containment that bounds them, which
     ``AgentSession._uncontained_autonomy`` then refuses to start without.
 
-    Both halves are read off ``approval`` rather than listed here, so a fourth rung
+    Both halves are read off ``gate.policy`` rather than listed here, so a fourth rung
     that released writes while answering False to ``requires_containment`` fails
     here, before it could put a reassuring line on the launcher.
     """
@@ -317,7 +317,7 @@ def test_a_rung_that_inherits_bounds_its_fleet_by_approval_or_by_containment() -
     its count. A rung that did neither would be §4's objection with nothing left
     answering it.
 
-    Read off ``approval`` rather than listed here, so a fourth rung has to pick one.
+    Read off ``gate.policy`` rather than listed here, so a fourth rung has to pick one.
     """
     for policy in Policy:
         if not inherits_to_subagents(policy):

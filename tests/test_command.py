@@ -44,11 +44,11 @@ from pptmstr.command import (
     TimedOut,
     Withdrawn,
     command_refusal,
-    is_valid_id,
     precludes_run,
     ran,
     request_refusal,
 )
+from pptmstr.ids import ID_HEX_CHARS, ID_TIME_FORMAT, is_command_id
 from pptmstr.ui import command_view
 
 ASKED = "make install"
@@ -449,11 +449,11 @@ def test_bash_reads_a_leading_dash_or_plus_as_options_and_nothing_else_so() -> N
 
 
 def test_an_id_minted_from_the_two_constants_is_valid() -> None:
-    stamp = datetime(2026, 10, 13, 10, 15, 0, tzinfo=UTC).strftime(c.ID_TIME_FORMAT)
+    stamp = datetime(2026, 10, 13, 10, 15, 0, tzinfo=UTC).strftime(ID_TIME_FORMAT)
     assert stamp == "20261013T101500Z"
-    assert is_valid_id(f"cmd-{stamp}-{'0123456789abcdef'[: c.ID_HEX_CHARS]}")
-    assert is_valid_id("cmd-20261013T101500Z-0123456789ab")
-    assert c.ID_HEX_CHARS == 12
+    assert is_command_id(f"cmd-{stamp}-{'0123456789abcdef'[: ID_HEX_CHARS]}")
+    assert is_command_id("cmd-20261013T101500Z-0123456789ab")
+    assert ID_HEX_CHARS == 12
 
 
 @pytest.mark.parametrize(
@@ -486,7 +486,7 @@ def test_an_id_minted_from_the_two_constants_is_valid() -> None:
     ],
 )
 def test_nothing_else_is_an_id_and_so_nothing_else_names_a_directory(bad: Any) -> None:
-    assert is_valid_id(bad) is False
+    assert is_command_id(bad) is False
 
 
 # -- bounds ------------------------------------------------------------------------
@@ -1012,3 +1012,104 @@ def test_what_left_the_session_is_said_with_a_line_that_looks_and_none_that_kill
     for pid in (0, 1):
         with pytest.raises(ValueError, match="escaped"):
             End(c.Exited(0), at=1.0, escaped=(pid,))
+
+
+# -- what a step owes the commands' files -----------------------------------------
+#
+# ``owed_records`` is typed on two maps so these can build what today's reducer
+# never produces: an end replaced on a command that never ran, and a command that
+# appears already closed outside a restore. Each is a guard of the derivation, and
+# only here can it be reached.
+
+_OTHER_ID = "cmd-20261013T101500Z-0123456789ac"
+
+
+def _ended_unrun(outcome: Any = None) -> Command:
+    return _command(end=End(Refused("no") if outcome is None else outcome, at=4.0))
+
+
+def test_the_same_map_owes_nothing() -> None:
+    held = {_command().id: _command()}
+    assert c.owed_records(held, held, restoring=False) == ()
+    assert c.owed_records(held, held, restoring=True) == ()
+
+
+def test_an_asked_command_that_appears_owes_its_request() -> None:
+    asked = _command()
+    assert c.owed_records({}, {asked.id: asked}, restoring=False) == (c.RequestOwed(asked),)
+
+
+@pytest.mark.parametrize(
+    "appeared",
+    [_command(run=_run()), _ended_unrun(), _command(run=_run(), end=End(Exited(0), at=4.0))],
+    ids=["running", "ended-unrun", "ended-after-a-run"],
+)
+def test_a_command_that_appears_not_asked_outside_a_restore_owes_nothing(
+    appeared: Command,
+) -> None:
+    assert c.owed_records({}, {appeared.id: appeared}, restoring=False) == ()
+
+
+@pytest.mark.parametrize(
+    "appeared",
+    [_command(), _command(run=_run()), _ended_unrun(), _ended_unrun(Withdrawn())],
+    ids=["asked", "running", "refused", "withdrawn"],
+)
+def test_a_command_that_appears_in_a_restore_is_from_a_file_and_never_owes_a_record(
+    appeared: Command,
+) -> None:
+    assert c.owed_records({}, {appeared.id: appeared}, restoring=True) == (c.FromFile(appeared.id),)
+
+
+@pytest.mark.parametrize("outcome", [Refused("no"), Withdrawn(), Lapsed()])
+def test_an_end_gained_with_no_run_owes_its_end(outcome: Any) -> None:
+    asked, ended = _command(), _ended_unrun(outcome)
+    assert c.owed_records({asked.id: asked}, {ended.id: ended}, restoring=False) == (
+        c.EndOwed(ended),
+    )
+
+
+def test_an_end_gained_after_a_run_owes_nothing_here() -> None:
+    # The runner writes that end, beside the run it closes.
+    running = _command(run=_run())
+    over = dataclasses.replace(running, end=End(Exited(0), at=4.0))
+    assert c.owed_records({running.id: running}, {over.id: over}, restoring=False) == ()
+
+
+def test_an_end_replaced_on_a_command_that_never_ran_owes_nothing() -> None:
+    refused, withdrawn = _ended_unrun(), _ended_unrun(Withdrawn())
+    assert c.owed_records({refused.id: refused}, {withdrawn.id: withdrawn}, restoring=False) == ()
+
+
+def test_a_change_that_is_not_an_end_owes_nothing() -> None:
+    asked = _command()
+    for changed in (
+        _command(run=_run()),
+        _command(run=_run(), stop_asked_at=3.0),
+        dataclasses.replace(_ended_unrun(), first_delivered_at=5.0),
+    ):
+        was = asked if changed.run is not None else _ended_unrun()
+        assert c.owed_records({was.id: was}, {changed.id: changed}, restoring=False) == ()
+
+
+def test_a_command_gone_from_the_map_owes_nothing() -> None:
+    asked = _command()
+    assert c.owed_records({asked.id: asked}, {}, restoring=False) == ()
+
+
+def test_what_is_owed_comes_in_the_order_the_map_after_holds() -> None:
+    first, second = _command(id=_OTHER_ID), _command()
+    after = {first.id: first, second.id: second}
+    assert c.owed_records({}, after, restoring=False) == (
+        c.RequestOwed(first),
+        c.RequestOwed(second),
+    )
+    assert c.owed_records({}, after, restoring=True) == (
+        c.FromFile(first.id),
+        c.FromFile(second.id),
+    )
+    # A refusal and an appearance in one step, each where ``after`` holds it.
+    refused = _ended_unrun()
+    assert c.owed_records(
+        {second.id: second}, {first.id: first, refused.id: refused}, restoring=False
+    ) == (c.RequestOwed(first), c.EndOwed(refused))

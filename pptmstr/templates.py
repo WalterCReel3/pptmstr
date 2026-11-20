@@ -6,13 +6,13 @@ what the lead is supposed to do with them. The driver turns roles into
 ``AgentDefinition``s and the lead briefing into a system-prompt append; nothing in
 here imports the SDK.
 
-That boundary is deliberate, and it is the same one ``approval.py`` keeps. A
+That boundary is deliberate, and it is the same one ``pptmstr.gate`` keeps. A
 template is configuration -- the kind of thing that eventually comes from a file
 the operator edits -- so it is worth being able to write, read and test one without
 an agent runtime anywhere near it.
 
 ``Policy`` is imported for the same reason: it is the one thing outside this module
-that a prompt has to agree with, and ``approval.py`` is as SDK-free as this file is.
+that a prompt has to agree with, and ``gate.policy`` is as SDK-free as this file is.
 A prompt here **describes** what the gate permits and never decides it -- this is a
 file the operator is invited to rewrite, and a sentence in it that settled a
 permission would put the dial somewhere an edit could move it (§6.7).
@@ -31,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import assert_never
 
-from .approval import Policy
+from .gate.policy import Policy
 
 # Tool names every role gets regardless of what else it is allowed, because they
 # are how a role participates in the team at all. A worker without read_inbox
@@ -832,7 +832,7 @@ FEATURE = WorkTemplate(
 )
 
 # A team shape, not a permission. What a session's gate admits without an
-# operator is decided by `approval.Policy`, and no template selects a policy:
+# operator is decided by `gate.policy.Policy`, and no template selects a policy:
 # `app._launch` resolves `LaunchSpec.template` -- a free name string -- and
 # falls back to `templates.SOLO` when nothing matches, so a policy keyed on a
 # template name could turn autonomy on with the containment silently off and

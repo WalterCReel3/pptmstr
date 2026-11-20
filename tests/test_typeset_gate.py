@@ -238,7 +238,7 @@ _LOAD_IN_A_BARE_CONTEXT = (
     "fonts = Path(imgui_bundle.__file__).parent / 'assets' / 'fonts'\n"
     "io.fonts.add_font_from_file_ttf(str(fonts / 'Inconsolata-Medium.ttf'), 16.0)\n"
     "typeset.configure(typeset=True, panes={})\n"
-    "theme._load_typeset_faces()\n"
+    "typeset.load_fonts_in_callback(theme.BOLD_FILE)\n"
     "typeset.pre_frame()\n"
     "print(typeset.can_draw(), typeset.available())\n"
     "print([pane.value for pane in typeset.Pane if typeset.enabled(pane)])\n"
@@ -400,7 +400,7 @@ def test_a_font_load_that_raises_leaves_pptmstr_drawing_and_the_reason_said(
 ) -> None:
     """
     The callback hello_imgui calls for fonts is not one an exception may leave:
-    ``theme.load_fonts`` reaches the gate from inside it. Whatever the library
+    ``typeset.load_application_fonts`` reaches the gate from inside it. Whatever the library
     raises there, the call returns, every pane is on its own renderer, and the
     sentence carries what was raised.
     """
@@ -413,7 +413,7 @@ def test_a_font_load_that_raises_leaves_pptmstr_drawing_and_the_reason_said(
     typeset.configure(typeset=True, panes={})
 
     assert typeset.load_fonts(BOLD) is False, "the gate's own call returns"
-    theme._load_typeset_faces()
+    typeset.load_fonts_in_callback(theme.BOLD_FILE)
 
     assert not typeset.can_draw() and not typeset.obtainable()
     assert not typeset.enabled() and not any(typeset.enabled(pane) for pane in Pane)
@@ -722,6 +722,10 @@ def test_at_a_display_scale_typeset_text_and_the_chrome_are_one_pixel_height(
 
         return _in_a_frame(seam, body)
 
+    # Twice: ``keep_baked_sizes`` does nothing before a context's first frame,
+    # so on a context no earlier test drew on, only the second frame records
+    # the size before the change, which the change is then measured against.
+    drawn()
     drawn()
     epoch = gate.epoch()
     try:
@@ -1012,10 +1016,10 @@ def test_a_view_held_from_one_display_density_is_made_again_at_another(seam: Any
     not run on a display whose density is not 1**, and what the library
     draws there nobody has measured.
     """
-    from pptmstr import approval
+    from pptmstr.gate.diff import DiffText
     from tests.test_typeset_views import frame
 
-    texts = (approval.DiffText("one\n", "two\n", "x.py"),)
+    texts = (DiffText("one\n", "two\n", "x.py"),)
     cache = typeset.ViewCache()
     io = seam.get_io()
     was = (float(io.display_framebuffer_scale.x), float(io.display_framebuffer_scale.y))

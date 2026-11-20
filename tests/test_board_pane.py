@@ -27,7 +27,7 @@ import imscribe
 import pytest
 from imgui_bundle import icons_fontawesome_6 as fa
 
-from pptmstr.board import BoardConcern, BoardTask, board_concerns, board_tasks
+from pptmstr.board.rows import BoardConcern, BoardTask, board_concerns, board_tasks
 from pptmstr.bridge import Bridge
 from pptmstr.model import (
     AgentRecord,
@@ -400,7 +400,7 @@ def test_a_concern_the_operator_rewrote_says_so() -> None:
 
 
 def test_waiting_mail_to_a_party_that_is_not_running_says_so_in_place_of_waiting() -> None:
-    from pptmstr.board import UNDELIVERABLE
+    from pptmstr.board.rows import UNDELIVERABLE
 
     stuck = dataclasses.replace(board_concern(), undeliverable=True)
 
@@ -423,7 +423,7 @@ def _concern_colours(monkeypatch, *, undeliverable: bool) -> dict[str, object]:
 def test_an_undeliverable_concern_is_drawn_in_the_warning_colour_and_a_waiting_one_is_not(
     monkeypatch,
 ) -> None:
-    from pptmstr.board import UNDELIVERABLE
+    from pptmstr.board.rows import UNDELIVERABLE
 
     stuck = _concern_colours(monkeypatch, undeliverable=True)
     waiting = _concern_colours(monkeypatch, undeliverable=False)
@@ -439,7 +439,7 @@ def test_a_concern_the_board_marks_undeliverable_reaches_the_pane_marked(monkeyp
     not one this file set: mail posted to a party a restored log named and
     nothing in this process answers to.
     """
-    from pptmstr.board import UNDELIVERABLE, board_concerns
+    from pptmstr.board.rows import UNDELIVERABLE, board_concerns
     from pptmstr.model import Restore
 
     gone: NodeId = ("s1", "agent-old")
@@ -506,11 +506,6 @@ def test_tasks_keep_the_head_because_dependencies_point_backwards() -> None:
 def test_concerns_keep_the_tail_because_a_conversation_is_watched_at_its_end() -> None:
     kept, dropped = board_pane.bound_rows(tuple(range(10)), 3, tail=True)
     assert (kept, dropped) == ((7, 8, 9), 7)
-
-
-def test_a_clipped_specification_reports_what_it_dropped() -> None:
-    assert board_pane.clip("abcdef", 4) == ("abcd", 2)
-    assert board_pane.clip("abc", 4) == ("abc", 0)
 
 
 def test_the_board_bounds_are_real_numbers_not_placeholders() -> None:
@@ -2263,7 +2258,7 @@ def test_the_panes_one_line_rule_is_the_one_the_board_tool_uses() -> None:
     ``one_line`` is spelled twice, here and in the bus, so the UI does not import
     the SDK. The two must call the same things a line break.
     """
-    from pptmstr import bus
+    from pptmstr import replies
 
     for text in (
         "plain",
@@ -2277,7 +2272,7 @@ def test_the_panes_one_line_rule_is_the_one_the_board_tool_uses() -> None:
         "\n\nleading",
         "",
     ):
-        assert board_pane.one_line(text) == bus._one_line(text), repr(text)
+        assert board_pane.one_line(text) == replies._one_line(text), repr(text)
 
 
 def test_amending_a_second_row_abandons_the_draft_left_on_the_first(monkeypatch) -> None:
@@ -3198,7 +3193,7 @@ def test_the_board_pane_draws_no_line_of_the_digest(monkeypatch, seed: int) -> N
     item or an alarm row -- and no triangle is the digest's. The bodies the digest
     quotes are not counted: a result and a note are on the board's own rows too.
     """
-    from pptmstr.digest import digest, digest_mark
+    from pptmstr.board.digest import digest, digest_mark
     from pptmstr.intents import DigestRead
     from pptmstr.ui import digest_pane
     from tests.test_digest import S1, generated_round
@@ -3291,7 +3286,7 @@ def _blocked_by_a_removed_session(monkeypatch) -> tuple[Snapshot, list[str]]:
     """
     A session on the fleet whose restore left out ``t1`` because the removed
     session's board has it. The report is written by hand -- it is what
-    ``store._restore`` records -- and whether its holder is off the fleet is the
+    ``store.restore._restored`` records -- and whether its holder is off the fleet is the
     reducer's.
     """
     from pptmstr.model import NotPlaced, Unplaced

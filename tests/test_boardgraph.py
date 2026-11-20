@@ -19,7 +19,7 @@ from types import MappingProxyType
 import pytest
 
 from pptmstr import drawable
-from pptmstr.boardgraph import (
+from pptmstr.board.graph import (
     DryRun,
     Edge,
     RootKind,

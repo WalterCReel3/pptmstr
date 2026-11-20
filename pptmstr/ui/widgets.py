@@ -20,7 +20,8 @@ from dataclasses import dataclass
 
 from imgui_bundle import imgui
 
-from ..approval import Disposition, Policy, classify
+from ..gate.classify import classify
+from ..gate.policy import Disposition, Policy
 from ..model import AgentRecord, AgentState, ContextSnapshot, EndedHow, TranscriptPresence
 from ..theme import STATE_GLYPH, STATE_LABEL, Color, LinkInks, P, dialog_colors, faded, link_inks
 
@@ -1132,8 +1133,8 @@ def one_line(text: str) -> str:
     carries a break would end the pane's line and start the next in whatever form
     its author chose.
 
-    The rule is ``bus._one_line``'s, spelled again because importing the bus would
-    bring the SDK into the UI layer. A test holds the two to one answer.
+    The rule is ``replies._one_line``'s, spelled again here. A test holds the two to
+    one answer.
     """
     return author_text(" ".join(text.splitlines()))
 

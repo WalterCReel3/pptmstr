@@ -60,7 +60,7 @@ captured is a tool call, not a sentence about one.
      *pointer* placed there is a pointer rather than the second copy
      `2026-08-15-an-operator-instruction-the-lead-cannot-see.md` refuses.
   7. **Which tool names does this CLI build offer, and how many has
-     `pptmstr.approval` never heard of?** The size of that gap has been inferred
+     `pptmstr.gate.classify` never heard of?** The size of that gap has been inferred
      twice and the two inferences disagreed, so this arm records the list instead
      of counting it. `message.data["tools"]` on the init message is the
      authoritative array for the *root*. A sub-agent has no init of its own -- see
@@ -114,14 +114,13 @@ from claude_agent_sdk import (  # noqa: E402
     tool,
 )
 
-from pptmstr import approval  # noqa: E402
+from pptmstr.gate.tools import AUTO, BUS_AUTO, REVIEW  # noqa: E402
 
-# The three sets `classify` dispatches on, unioned. Read off the private names
-# because the module exposes no accessor for them, and the measurement is
-# precisely "what does this module hold" -- a public wrapper would be a second
-# place for the answer to be wrong. `approval` imports no SDK, so pulling it in
-# here costs the probe nothing.
-CLASSIFIED = approval._AUTO | approval._REVIEW | approval._BUS_AUTO
+# The three sets `classify` dispatches on, unioned, read off the module that
+# holds them: the measurement is precisely "what does this module hold".
+# `gate.tools` imports nothing from pptmstr and no SDK, so pulling it in here
+# costs the probe nothing.
+CLASSIFIED = AUTO | REVIEW | BUS_AUTO
 
 REPORT_TOOL = "mcp__probe__report"
 SPAWN_TOOLS = ("Task", "Agent")
@@ -299,7 +298,7 @@ def _worker_prompt(name: str, extra: str = "") -> str:
 
 def _unclassified(names: list[str]) -> dict[str, list[str]]:
     """
-    Which of these names `approval.classify` has never heard of.
+    Which of these names `gate.classify.classify` has never heard of.
 
     Split by prefix because the two halves are different questions: an `mcp__`
     name belongs to whichever server this machine happens to have mounted and
@@ -808,10 +807,8 @@ def report_findings(workspace: Path) -> None:
     print(f"  {INIT_SEED:<24}{initial}")
     print(f"  {'':<24}carries the canary: {INITIAL_CANARY in initial}")
 
-    print("\n=== 7. which offered tool names has `approval` never heard of? ===")
-    print(
-        f"  classified by pptmstr.approval (_AUTO | _REVIEW | _BUS_AUTO): {len(CLASSIFIED)} names"
-    )
+    print("\n=== 7. which offered tool names has `gate.classify` never heard of? ===")
+    print(f"  classified by pptmstr.gate.tools (AUTO | REVIEW | BUS_AUTO): {len(CLASSIFIED)} names")
 
     print("\n  -- root/lead: the full offered array, off the init message --")
     if not observed["inits"]:

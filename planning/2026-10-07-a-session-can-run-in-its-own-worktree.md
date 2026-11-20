@@ -286,7 +286,7 @@ first version of this decision, and the tree that note records,
 only ground was a defect of our own: `brief.session_dir` turned only the path separator into `-`
 where the CLI turns every non-alphanumeric, so on a dotted path a session's briefs were filed
 apart from its transcripts
-([`2026-09-21-what-is-left-on-the-gate-policy-branch.md`](2026-09-21-what-is-left-on-the-gate-policy-branch.md)
+([`2026-09-21-what-is-left-on-the-gate-policy-branch.md`](archive/2026-09-21-what-is-left-on-the-gate-policy-branch.md)
 l.115-120). The record called that defect unfixed and placed around it, and its parent path,
 `<parent of repo>/<repo>-worktrees/<slug>`, was a lead proposal nothing depended on beyond
 "sibling, dotless". The defect is now gone at its cause rather than avoided:
@@ -434,6 +434,19 @@ by W6 and is not built.
 Raised while writing this record; not in the task. See "Invoke": the two existing refusals end
 differently — a refused directory downgrades to `STRICT`, a CLI below the floor holds the launch —
 and the new requirement has to pick one, or offer creation in place. Not chosen.
+
+### O5 — A gate run on a tree nobody is writing (O)
+
+*Carried from
+[`2026-08-15-what-the-board-does-not-carry.md`](2026-08-15-what-the-board-does-not-carry.md)
+§10 and
+[`2026-09-03-orca-made-the-opposite-bet-on-the-same-tradeoff.md`](2026-09-03-orca-made-the-opposite-bet-on-the-same-tradeoff.md)
+"What to steal" #1, 2026-11-06.* Both records name the structural answer to a gate that reads a
+tree mid-save: run `make check` against a worktree or snapshot copy that no agent is writing. D1
+does not deliver it (see "What this does not buy"), and nothing in the tree builds it. What is built
+is the prose half: the terminal *green the gate* task and the re-run-a-red rule. Orca's narrow
+version — a worktree for the gate run only, not per agent — is the one that leaves `touches`
+intact. Not designed.
 
 ---
 
@@ -931,8 +944,8 @@ None of these was edited.
     it." `driver._options` sets it on every session (`driver.py:2098`).
   - §8e.1 l.497 attributes the zero-containment conclusion to §4; §4 does not mention worktrees.
 - **`session_base` infers nothing from `.git`, and no planning record says so.**
-  [`2026-08-10-layout-proposals.md`](2026-08-10-layout-proposals.md) l.269 and
-  [`2026-08-10-research-sessions-under-the-inbox.md`](2026-08-10-research-sessions-under-the-inbox.md)
+  [`2026-08-10-layout-proposals.md`](archive/2026-08-10-layout-proposals.md) l.269 and
+  [`2026-08-10-research-sessions-under-the-inbox.md`](archive/2026-08-10-research-sessions-under-the-inbox.md)
   l.115 specify the project key as "enclosing git root";
   [`2026-09-04-two-mainline-defects-the-autonomous-mode-exposed.md`](2026-09-04-two-mainline-defects-the-autonomous-mode-exposed.md)
   l.72 proposes `git rev-parse --show-toplevel` and leaves it "not chosen". The code chose the
@@ -952,3 +965,19 @@ None of these was edited.
   Its `~/.pptmstr/worktrees/` convention is ruled out by D4. Its open item 2 is O4 here.
 - `launcher.scan_sessions`' docstring, l.109-111 — "This repo has no worktrees… a choice made on
   the reasoning rather than on a measurement." Both halves are now out of date.
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py` and `sandbox.py`. B5's last
+step (`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what
+was left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`,
+`park`) and deleted it, and moved `sandbox.py` to `pptmstr/gate/sandbox.py`
+unchanged. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.py` | deleted; its parts are `pptmstr/gate/rows.py`, `reach.py`, `classify.py` and `park.py`, beside the leaves |
+| `sandbox.ALLOWED_DOMAIN` | `gate.sandbox.ALLOWED_DOMAIN` |
+| `sandbox.containment_settings` | `gate.sandbox.containment_settings` |
+| `sandbox.py` | `gate/sandbox.py` |

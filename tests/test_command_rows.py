@@ -25,8 +25,8 @@ from unittest.mock import MagicMock
 import pytest
 from imgui_bundle import imgui as real_imgui
 
-from pptmstr import approval as policy
-from pptmstr import bus, commandbus, commandfile, commandrun, commandtext, digest, theme
+from pptmstr import commandbus, commandfile, commandrun, commandtext, replies, theme
+from pptmstr.board import digest
 from pptmstr.bridge import Bridge
 from pptmstr.command import (
     MAX_OPEN_PER_ASKER,
@@ -40,6 +40,8 @@ from pptmstr.command import (
     Run,
     Survivor,
 )
+from pptmstr.gate import park as gate_park
+from pptmstr.gate import rows as gate_rows
 from pptmstr.intents import (
     AgentFinished,
     AgentSpawned,
@@ -431,7 +433,7 @@ def test_the_queue_row_draws_the_command_as_a_bash_row_does_behind_where_it_runs
 ) -> None:
     """
     The user, 2026-10-15: it "should mirror any other bash request". The
-    summary is ``approval.summarize`` of it as a Bash call, escaped and
+    summary is ``gate.park.summarize`` of it as a Bash call, escaped and
     flattened as a Bash row's is; the store's own summary, built from
     structure, is the digest's and the rail's and not this row's.
     """
@@ -442,7 +444,7 @@ def test_the_queue_row_draws_the_command_as_a_bash_row_does_behind_where_it_runs
 
     drawn = _row_text(monkeypatch, snap, row)
 
-    said = policy.summarize("Bash", {"command": ASKED})
+    said = gate_park.summarize("Bash", {"command": ASKED})
     assert inbox.OUTSIDE + said in drawn
     assert said.startswith("2 lines · make ZQX-install")
     assert row.summary not in drawn
@@ -456,20 +458,20 @@ def test_a_change_to_how_a_bash_row_is_summarised_is_a_change_to_a_command_row_t
 ) -> None:
     """
     One function, so the two rows cannot drift: the gate parks a Bash call
-    with ``approval.summarize`` as its row, and a command's row is that same
+    with ``gate.park.summarize`` as its row, and a command's row is that same
     function of it. Here the Bash form inside it is changed, and a Bash call's
     row and a command's row both come out in the new form.
     """
     from pptmstr import driver, fake_driver
 
-    assert driver.summarize is policy.summarize and fake_driver.summarize is policy.summarize
-    real = policy.command_shown
+    assert driver.summarize is gate_park.summarize and fake_driver.summarize is gate_park.summarize
+    real = gate_rows.command_shown
 
     def shouting(tool_name: str, key: str, value: object) -> str | None:
         shown = real(tool_name, key, value)
         return None if shown is None else f"BASH<{shown.upper()}>"
 
-    monkeypatch.setattr(policy, "command_shown", shouting)
+    monkeypatch.setattr(gate_rows, "command_shown", shouting)
     store = team()
     request(store, 1, now=5.0, text="make install")
     snap = store.snapshot()
@@ -1113,8 +1115,8 @@ def test_only_a_command_that_started_a_process_has_a_log_to_point_at(
 
 
 def test_the_clipboards_three_marks_are_the_buss() -> None:
-    assert command_view.ASKER_MARK == bus._QUOTE
-    assert command_view.OPERATOR_MARK == bus._ANSWER
+    assert command_view.ASKER_MARK == replies._QUOTE
+    assert command_view.OPERATOR_MARK == replies._ANSWER
     assert command_view.OUTPUT_MARK == commandbus._OUTPUT
     assert len({command_view.ASKER_MARK, command_view.OPERATOR_MARK, command_view.OUTPUT_MARK}) == 3
 

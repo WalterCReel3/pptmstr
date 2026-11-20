@@ -2,7 +2,7 @@
 
 **Dated:** 2026-08-09 · **Status:** built 2026-08-09, `530d951` (theme) and
 `71e5c59` (tree pane, app shell, fake driver). The tree pane was removed again by
-[`2026-08-10-layout-proposals.md`](../2026-08-10-layout-proposals.md) in `2a8efa7`;
+[`2026-08-10-layout-proposals.md`](2026-08-10-layout-proposals.md) in `2a8efa7`;
 its columns survive as rail cards, so there is no `ui/tree.py` to look for ·
 **Follows:** design §8 step 2, §6.1
 

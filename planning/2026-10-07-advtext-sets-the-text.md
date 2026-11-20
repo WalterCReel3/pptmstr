@@ -7,7 +7,7 @@ a person has looked at it (§3); the last fix round's outcome is in §10 ·
 **Reverses, in part:** three decisions in
 [`archive/2026-08-10-transcript-markdown.md`](archive/2026-08-10-transcript-markdown.md)
 and one policy in `pyproject.toml` (§4) ·
-**Takes up:** [`2026-09-08-the-toolkit-was-never-the-constraint.md`](2026-09-08-the-toolkit-was-never-the-constraint.md)
+**Takes up:** [`2026-09-08-the-toolkit-was-never-the-constraint.md`](archive/2026-09-08-the-toolkit-was-never-the-constraint.md)
 §6, by adoption (§5) ·
 **Read with:** [`2026-10-07-font-survey.md`](2026-10-07-font-survey.md) and
 [`2026-10-07-which-fonts-ship.md`](2026-10-07-which-fonts-ship.md), which hold the font
@@ -208,7 +208,7 @@ at a time (`typeset.stream`), reading each view's blocks after every line
 
 ## 5. The September record's open direction was taken by adoption, and its measurement was taken first
 
-[`2026-09-08-the-toolkit-was-never-the-constraint.md`](2026-09-08-the-toolkit-was-never-the-constraint.md)
+[`2026-09-08-the-toolkit-was-never-the-constraint.md`](archive/2026-09-08-the-toolkit-was-never-the-constraint.md)
 §6 left one direction open: "a stronger text widget in `pptmstr/ui/`, in Python,
 against this application's real workload, before deciding whether it is ever
 extracted." What happened is the reverse order. The widget was built outside the tree
@@ -684,3 +684,16 @@ The same person, in another tree. Each of these is something the seam works arou
 - `Diff.from_texts` on the frame path, with no way to divide it.
 - Adding fonts between frames under a real renderer worked, in one run, where the
   library's docstring says unchecked.
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py`. B5's last step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what was
+left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`, `park`)
+and deleted it. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.diff_texts` | `gate.park.diff_texts` |
+| `render_diff` (in `approval.py`) | `gate.park.render_diff` |

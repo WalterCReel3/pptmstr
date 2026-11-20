@@ -39,9 +39,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from pptmstr import driver, plugins  # noqa: E402
-from pptmstr.approval import Disposition  # noqa: E402
 from pptmstr.bridge import Bridge, Decision  # noqa: E402
 from pptmstr.driver import AgentSession  # noqa: E402
+from pptmstr.gate.policy import Disposition  # noqa: E402
 from pptmstr.model import ApprovalNeeded  # noqa: E402
 from pptmstr.store import Store  # noqa: E402
 from pptmstr.transcript import SegmentKind  # noqa: E402

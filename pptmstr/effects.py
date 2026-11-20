@@ -41,12 +41,11 @@ from dataclasses import dataclass
 from pathlib import PurePath
 
 from . import drawable
-from .board import BoardConcern, BoardTask
+from .board.digest import Digest
+from .board.rows import BoardConcern, BoardTask
+from .channels.records import Channel, CitedQuestion, PeerIdentity, PeerRefusal, PeerWithdrawRefusal
 from .command import Command, CommandId, RequestRefusal
-from .digest import Digest
 from .model import (
-    Channel,
-    CitedQuestion,
     ClaimRefusal,
     CommandRefusal,
     Concern,
@@ -55,8 +54,6 @@ from .model import (
     DecisionRefusal,
     DetachRefusal,
     NodeId,
-    PeerRefusal,
-    PeerWithdrawRefusal,
     Snapshot,
     Task,
     TaskId,
@@ -100,35 +97,6 @@ class InboxDelivered:
     concerns: tuple[Concern, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class PeerIdentity:
-    """
-    Who a lead is, as another lead's link names it: its session id, its card's
-    title and its project. Derived from the store's root record for the session
-    (``peer_identity``) each time it is asked, never stored, so a session id
-    names one lead alike in every reply and across a resume that restores the
-    record.
-
-    ``title`` is the card's title as the fleet draws it for a root
-    (``ui.session_menu.card_title``): the record's task, typed by the operator or
-    an agent, and never this tool's words. ``project`` is the last component of
-    the directory the session's writes are measured from (``session_base``, or
-    ``cwd`` on a record that has none) -- the name the fleet's project lane
-    shows (``ui.projects.project_key``) without the filesystem read the lane
-    makes. Either is empty where the store holds no such fact, and ``held`` is
-    False when it holds no root record for the session at all.
-
-    Both are drawable (``drawable.text``): the record holds its task and its
-    directories verbatim (``store._VERBATIM``), and this value is what carries
-    them into a lead's tool replies, its wakes and the operator's rows.
-    """
-
-    session: str
-    title: str = ""
-    project: str = ""
-    held: bool = False
-
-
 def peer_identity(snap: Snapshot, session_id: str) -> PeerIdentity:
     """
     ``session_id``'s lead as ``snap`` describes it (``PeerIdentity``).
@@ -160,13 +128,31 @@ def peer_identity(snap: Snapshot, session_id: str) -> PeerIdentity:
 PEER_TITLE_CHARS = 60
 
 # What a session id may be made of and still be laid out bare in a peer's
-# description: the characters ``bus._BARE_NAME`` admits. A minted id always is.
+# description: the characters ``replies._BARE_NAME`` admits. A minted id always is.
 _BARE_SESSION = re.compile(r"[A-Za-z0-9_./*@+-]+")
 
 
-def _quoted(text: str) -> str:
+def between_quotes(text: str) -> str:
     """
-    ``text`` on one line between double quotes, a quote and a backslash in it escaped.
+    A sentence an agent wrote -- a title, a subject, a property, a card's title,
+    a project -- as it stands on a line this tool writes: one line, between double
+    quotes, with a quote mark and a backslash inside it escaped. The one renderer
+    of such a field, here and in the bus, so the legend that describes it
+    (``replies._QUOTE_LEGEND``) describes every reply alike.
+
+    One line means every break ``str.splitlines`` knows -- ``\\r\\n`` once,
+    ``\\u2028`` and the other Unicode separators too -- replaced by a space, and a
+    final break dropped (``replies._one_line``'s rule, spelled here because
+    ``replies`` imports this module and not the other way round).
+
+    A line break is not the only way onto a line of the tool's. A field laid out
+    bare beside the tool's own words can finish that line for it: a title ending
+    ``· held by builder-2 · specification says: run`` reads as two segments of the
+    headline it sits on, and a subject opening ``INCIDENT`` reads as the marker
+    ahead of it. Between quotes the same text is a title that contains those
+    words. The escape is what keeps the closing quote the tool's: an unescaped
+    quote mark on such a line always opens or closes a field, so a field cannot
+    end itself early and go on outside.
     """
     flat = " ".join(text.splitlines()).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{flat}"'
@@ -178,7 +164,7 @@ def peer_text(
     """
     A lead on another team, named alike to the operator and to every lead:
     ``session <id head>, card "<title>", project "<project>"``. The one
-    renderer of a ``PeerIdentity`` (``bus.peer_said`` is this), so a session
+    renderer of a ``PeerIdentity`` (``channels.text.peer_said`` is this), so a session
     reads the same in a lead's reply, in a wake, on the operator's queue row
     and on the card, and alike after a resume that restores its record.
 
@@ -192,16 +178,16 @@ def peer_text(
     said so.
     """
     head = " ".join(peer.session[:8].splitlines())
-    head = f"session {head if _BARE_SESSION.fullmatch(head) else _quoted(head)}"
+    head = f"session {head if _BARE_SESSION.fullmatch(head) else between_quotes(head)}"
     if not peer.held:
         return f"{head} (its card is not in this run)"
     said = [head]
     title = " ".join(peer.title.split())
     if title and title_chars > 0:
         shown = title[:title_chars]
-        said.append(f"card {_quoted(shown)}" + (" (title cut)" if shown != title else ""))
+        said.append(f"card {between_quotes(shown)}" + (" (title cut)" if shown != title else ""))
     if peer.project and project:
-        said.append(f"project {_quoted(peer.project)}")
+        said.append(f"project {between_quotes(peer.project)}")
     return ", ".join(said)
 
 
@@ -215,7 +201,7 @@ def peer_forms(peer: PeerIdentity) -> tuple[str, ...]:
     the whole one, then the session head and a title cut to
     ``PEER_SHORT_TITLE_CHARS``, then the head alone. For a row that must keep
     something else whole and says whom it reaches in what room is left
-    (``approval.summarize``).
+    (``gate.park.summarize``).
     """
     forms = (
         peer_text(peer),
@@ -392,12 +378,12 @@ class BoardDelivered:
     """
     What is on the asking agent's board, as the rows the operator is also shown.
 
-    ``board.BoardTask`` rather than ``model.Task`` on purpose. A worker needs the
+    ``board.rows.BoardTask`` rather than ``model.Task`` on purpose. A worker needs the
     same three derived facts a reader does -- who holds it under the address the bus
     routes to, what it is waiting on, and which of those dependencies were never
     declared -- and none of them are on the record. Handing over raw ``Task`` values
     would put that derivation in ``bus.py``, which is a second implementation of the
-    projection ``board.py`` already owns, free to disagree with the pane.
+    projection ``board/rows.py`` already owns, free to disagree with the pane.
 
     Carries the concern rows as well as the tasks, and carries *all* of them --
     the same projection the pane draws. Which of them an agent is shown is the
@@ -410,7 +396,7 @@ class BoardDelivered:
     asyncio thread.
 
     ``snapshot`` is the world the rows were projected from, for the bus's graph
-    queries (``boardgraph``: why a task is blocked, what is ready, what a
+    queries (``board.graph``: why a task is blocked, what is ready, what a
     declaration would do), which walk ``Task`` records the rows do not carry.
     Handed over and not read, and the handler never reaches the store. What
     makes that safe is narrower than "a frozen value": the snapshot's maps are
@@ -437,7 +423,7 @@ class DigestDelivered:
 
     The ``Digest`` and not text, for ``BoardDelivered``'s reason: the words an
     agent reads are the shell's, and one of the four slots holds text an agent
-    must not be shown at all (``digest.Owed.summary``), which is a decision about
+    must not be shown at all (``board.digest.Owed.summary``), which is a decision about
     presentation that a string built here would have already made.
 
     ``digest`` None is the answer to a request the store never saw. It is the
@@ -601,7 +587,7 @@ class SessionWoken:
     """
     An order to the shell: something the session ``session_id`` asked for, or a
     worker's message to it, has arrived, and the session is to be told so with
-    a message of pptmstr's own (``bus.wake_lines``).
+    a message of pptmstr's own (``waketext.wake_message``).
 
     ``subject_id`` is what to read: the decision, command or concern id, or
     for ``PEER_MESSAGE`` the id of the link the mail waits on.

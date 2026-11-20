@@ -192,9 +192,9 @@ def test_app_sets_no_pending_pane_but_health_session_and_detail() -> None:
     sets = [line.strip() for line in source.splitlines() if "pending_pane = " in line]
     assert sets == [
         "pane, state.pending_pane = state.pending_pane, None",
-        'state.pending_pane = "HEALTH"',
-        'state.pending_pane = "SESSION"',
-        'state.pending_pane = "DETAIL"',
+        "state.pending_pane = panes.HEALTH.title",
+        "state.pending_pane = panes.SESSION.title",
+        "state.pending_pane = panes.DETAIL.title",
     ]
 
 

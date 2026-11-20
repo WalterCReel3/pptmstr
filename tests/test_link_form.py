@@ -16,8 +16,9 @@ from collections.abc import Iterator
 import pytest
 from imgui_bundle import imgui
 
+from pptmstr.channels.records import LinkRefusal
 from pptmstr.intents import AgentFinished, AgentSpawned, StateChanged
-from pptmstr.model import AgentState, LinkRefusal, NodeId, Snapshot
+from pptmstr.model import AgentState, NodeId, Snapshot
 from pptmstr.store import Store
 from pptmstr.ui import link_form, widgets
 from pptmstr.ui.link_form import LinkForm, LinkForms

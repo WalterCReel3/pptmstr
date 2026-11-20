@@ -41,10 +41,7 @@ than a re-merge and, unlike one, it leaves the order the operator is reading alo
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
-import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -52,7 +49,7 @@ from typing import Any, Protocol
 
 from claude_agent_sdk import SDKSessionInfo, list_sessions
 
-from pptmstr import drawable, settings
+from pptmstr import drawable, ondisk, settings
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,9 +177,11 @@ def save_overlay(overlay: Overlay, path: Path | None = None) -> None:
     """
     Write the overlay atomically.
 
-    Temporary file in the same directory, renamed over the target, so an interrupted
-    write leaves the previous overlay intact rather than a truncated one. rename(2)
-    is atomic only within a filesystem, which is why the temp file cannot go in /tmp.
+    Flushed to the device and renamed over the target by ``ondisk.replace``, so an
+    interrupted write, by a process crash or a power loss, leaves the previous
+    overlay intact rather than a truncated one, and the file keeps its permission
+    bits. The flush runs on the UI thread: on a disk busy writing back other data it
+    can hold the frame for seconds.
 
     Failures are swallowed: this is called when the operator clicks a bookmark, and a
     read-only config directory must not take down a frame.
@@ -196,16 +195,10 @@ def save_overlay(overlay: Overlay, path: Path | None = None) -> None:
     payload: dict[str, Any] = {"sessions": entries}
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".sessions-", suffix=".json")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True)
-                handle.write("\n")
-            os.replace(tmp, target)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+        data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        # Durable: a lost overlay is silent, and a bookmark must survive the crash it
+        # guards against. The cost is a stall on a busy disk while this is on the UI thread.
+        ondisk.replace(target, data, durable=True)
     except OSError:
         return
 

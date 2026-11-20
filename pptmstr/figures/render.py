@@ -31,7 +31,7 @@ key that has a newer request waiting is dropped, not delivered.
 list with the diagram's natural size, as plain JSON. Nothing the child sends is
 unpickled (``_serve``). The I/O thread reads it a record at a time and checks every
 bound of it again (``displaylist.decode``) before the frame thread sees it. The
-pane draws the list natively (``host``); nothing is rasterised anywhere.
+pane draws the list natively (``ui.typeset.figure_host``); nothing is rasterised anywhere.
 """
 
 from __future__ import annotations
@@ -179,18 +179,10 @@ class Fonts:
     mono: str
 
 
-def imscribe_fonts() -> Fonts:
+class NotInstalled(RuntimeError):
     """
-    The faces imscribe sets prose and code in, as its registry names them now.
-
-    Asked of the typeset seam (``views.figure_fonts``), the one importer of the
-    library, so a proportional family pptmstr registered (``gate._register``) is the
-    one a figure is set in too. Read once per child, when it starts, on its I/O
-    thread.
+    ``renderer()`` asked before ``install`` named the fonts its child is set in.
     """
-    from ..ui.typeset.views import figure_fonts
-
-    return figure_fonts()
 
 
 _MERMAID = "mermaid"
@@ -249,13 +241,15 @@ class Renderer:
     nor raises.
 
     Construct it anywhere: nothing starts until the first ``lay_out``. ``fonts`` is
-    called on the I/O thread when a child starts, not on the frame thread.
+    called on the I/O thread when a child starts, not on the frame thread. It has no
+    default: the faces are the typeset seam's (``views.figure_fonts``), and this
+    package does not import ``ui``.
     """
 
     def __init__(
         self,
         *,
-        fonts: Callable[[], Fonts] = imscribe_fonts,
+        fonts: Callable[[], Fonts],
         timeout_s: float = RENDER_TIMEOUT_S,
         start_timeout_s: float = START_TIMEOUT_S,
         memory_limit_bytes: int | None = MEMORY_LIMIT_BYTES,
@@ -710,14 +704,25 @@ def em_ratio(path: str) -> float:
 _RENDERER: Renderer | None = None
 
 
-def renderer() -> Renderer:
+def install(fonts: Callable[[], Fonts]) -> None:
     """
-    The process's renderer, made on first use. Starting it costs nothing until a
-    diagram is asked for.
+    Make the process's renderer, set in ``fonts``: the composition root's call, once
+    at start-up (``app.main``), and a script's that draws figures without it. It
+    costs nothing until a diagram is asked for. One already made is ended first.
     """
     global _RENDERER
+    if _RENDERER is not None:
+        _RENDERER.shutdown()
+    _RENDERER = Renderer(fonts=fonts)
+
+
+def renderer() -> Renderer:
+    """
+    The process's renderer. Raises ``NotInstalled`` before ``install``: a figure
+    laid out in faces nobody named would be one set in faces nobody chose.
+    """
     if _RENDERER is None:
-        _RENDERER = Renderer()
+        raise NotInstalled("no figure renderer: call figures.render.install(fonts) first")
     return _RENDERER
 
 
@@ -736,9 +741,11 @@ __all__: Sequence[str] = (
     "Fonts",
     "Laid",
     "MEMORY_LIMIT_BYTES",
+    "NotInstalled",
     "RENDER_TIMEOUT_S",
     "Renderer",
     "Result",
+    "install",
     "renderer",
     "shutdown",
 )

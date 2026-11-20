@@ -6,7 +6,7 @@ Does the typeset seam work in a real window, through the app's own font path?
 (``tests/test_typeset_views.py``). Three things that cannot show there are what
 this is for:
 
-  1. **Fonts through ``theme.load_fonts``.** The real callback, under the real runner:
+  1. **Fonts through ``typeset.load_application_fonts``.** The real callback, under the real runner:
      Inconsolata is still the default font afterwards and the library can draw in
      the first frame.
   2. **A frame with a renderer.** A markdown document, two diffs, a stream, literal,
@@ -150,7 +150,8 @@ def main() -> int:
     import screenshot
     from imgui_bundle import hello_imgui, imgui, immapp
 
-    from pptmstr import approval, theme
+    from pptmstr import theme
+    from pptmstr.gate import park as gate_park
     from pptmstr.ui import typeset
 
     edit_file = ROOT / "shots" / ".verify-typeset-edit.py"
@@ -158,7 +159,7 @@ def main() -> int:
     edit_file.write_text(BEFORE, encoding="utf-8")
     # Read once, here, as the driver does when a call parks: the seam is handed
     # the texts and opens no file.
-    edit = approval.diff_texts(EDIT[0], {**EDIT[1], "file_path": str(edit_file)})
+    edit = gate_park.diff_texts(EDIT[0], {**EDIT[1], "file_path": str(edit_file)})
 
     cache = typeset.ViewCache()
     parts = tuple(
@@ -301,7 +302,7 @@ def main() -> int:
 
     def load_fonts() -> None:
         started = time.perf_counter()
-        theme.load_fonts()
+        typeset.load_application_fonts()
         loading["s"] = time.perf_counter() - started
 
     params.callbacks.load_additional_fonts = load_fonts
@@ -314,7 +315,7 @@ def main() -> int:
     immapp.run(params)
     edit_file.unlink(missing_ok=True)
 
-    print(f"theme.load_fonts took {loading['s']:.2f}s")
+    print(f"load_application_fonts took {loading['s']:.2f}s")
     check("Inconsolata is still the default font", "Inconsolata" in str(seen.get("default_font")))
     check(
         "the library could draw in the first frame",

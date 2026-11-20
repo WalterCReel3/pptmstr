@@ -23,7 +23,9 @@ import imscribe
 import pytest
 from imscribe import Diff, RowKind
 
-from pptmstr import approval, theme
+from pptmstr import theme
+from pptmstr.gate import park as gate_park
+from pptmstr.gate.diff import DiffText
 from pptmstr.model import NodeId, PendingApproval
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import Role, diffs, gate, roles
@@ -97,7 +99,7 @@ def test_a_record_with_a_unified_string_and_no_texts_is_still_shown() -> None:
 def test_a_text_with_no_before_is_a_new_file() -> None:
     from imscribe import FileStatus
 
-    built = typeset.diff_model((approval.DiffText(None, "a\nb\n", "/tmp/new.py"),))
+    built = typeset.diff_model((DiffText(None, "a\nb\n", "/tmp/new.py"),))
     (file,) = built.files
     assert file.status is FileStatus.NEW
     assert file.label == "/tmp/new.py"
@@ -114,13 +116,13 @@ def test_a_write_over_a_file_that_could_not_be_read_says_so_instead_of_calling_i
     target = tmp_path / "blob.bin"
     target.write_bytes(b"\xff\xfe\x00\x80binary")
     over = typeset.diff_model(
-        approval.diff_texts("Write", {"file_path": str(target), "content": "text\n"}) or ()
+        gate_park.diff_texts("Write", {"file_path": str(target), "content": "text\n"}) or ()
     )
     assert "not readable as text" in over.files[0].label
     assert rows(over, RowKind.ADD) == ["text"]
 
     fresh = typeset.diff_model(
-        approval.diff_texts("Write", {"file_path": str(tmp_path / "no"), "content": "t\n"}) or ()
+        gate_park.diff_texts("Write", {"file_path": str(tmp_path / "no"), "content": "t\n"}) or ()
     )
     assert "not readable" not in fresh.files[0].label
 
@@ -128,7 +130,7 @@ def test_a_write_over_a_file_that_could_not_be_read_says_so_instead_of_calling_i
 def test_an_edit_that_applies_is_numbered_as_the_file_is(tmp_path: Path) -> None:
     target = tmp_path / "a.py"
     target.write_text("".join(f"line {n}\n" for n in range(1, 41)))
-    texts = approval.diff_texts(
+    texts = gate_park.diff_texts(
         "Edit", {"file_path": str(target), "old_string": "line 30\n", "new_string": "thirty\n"}
     )
     built = typeset.diff_model(texts or ())
@@ -147,7 +149,7 @@ def test_why_an_edit_may_not_apply_reaches_the_view_worded_as_the_prediction_it_
     An unreadable file under an Edit is already named by that reason: the label is
     left alone.
     """
-    part = approval.DiffText(
+    part = DiffText(
         "old", "new", "/x.py", will_not_apply="file is not readable as text", unreadable=True
     )
     built = typeset.diff_model((part,))
@@ -159,9 +161,9 @@ def test_why_an_edit_may_not_apply_reaches_the_view_worded_as_the_prediction_it_
 
 def test_several_texts_are_one_file_of_the_diff_each() -> None:
     parts = (
-        approval.DiffText("a", "A", "edit 1"),
-        approval.DiffText("b\n", "B\n", "edit 3", will_not_apply="anchor not found in file"),
-        approval.DiffText("c", "", "edit 4"),
+        DiffText("a", "A", "edit 1"),
+        DiffText("b\n", "B\n", "edit 3", will_not_apply="anchor not found in file"),
+        DiffText("c", "", "edit 4"),
     )
     built = typeset.diff_model(parts)
     assert [file.label for file in built.files] == ["edit 1", "edit 3", "edit 4"]
@@ -175,7 +177,7 @@ def test_several_texts_are_one_file_of_the_diff_each() -> None:
 
 
 def test_a_text_with_no_label_is_still_a_file_with_a_name() -> None:
-    built = typeset.diff_model((approval.DiffText(None, "x\n", ""),))
+    built = typeset.diff_model((DiffText(None, "x\n", ""),))
     assert built.files[0].label == "(no path)"
 
 
@@ -188,7 +190,7 @@ def test_a_diff_rows_pitch_is_its_roles(seam: Any, monkeypatch: pytest.MonkeyPat
     the same table as every other pitch, and ``diff_row_height`` is what a pane
     sizes a cap in rows with.
     """
-    texts = approval.diff_texts("Write", {"file_path": "/x/a.py", "content": "one\ntwo\n"})
+    texts = gate_park.diff_texts("Write", {"file_path": "/x/a.py", "content": "one\ntwo\n"})
     cache = typeset.ViewCache()
     frame(seam, lambda: typeset.diff(cache, "d", texts))
     assert cache.view("d").grid.row == 18 == typeset.diff_row_height()
@@ -207,8 +209,8 @@ def test_a_diff_rows_pitch_is_its_roles(seam: Any, monkeypatch: pytest.MonkeyPat
 def test_a_capped_diff_is_no_taller_than_its_cap_and_a_short_one_is_its_rows(seam: Any) -> None:
     row = typeset.diff_row_height()
     short = "\n".join(f"line {n}" for n in range(40))
-    long = (approval.DiffText(short, short.replace("line 7", "LINE 7"), "f.py"),)
-    one = (approval.DiffText("a\n", "b\n", "f.py"),)
+    long = (DiffText(short, short.replace("line 7", "LINE 7"), "f.py"),)
+    one = (DiffText("a\n", "b\n", "f.py"),)
     cache = typeset.ViewCache()
     got: dict[str, float | None] = {}
 
@@ -269,12 +271,12 @@ def test_new_texts_under_a_key_are_a_new_diff_in_the_same_view_and_equal_ones_ar
     target.write_text("one\ntwo\n")
     args = {"file_path": str(target), "old_string": "two", "new_string": "2"}
     cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.diff(cache, "k", approval.diff_texts("Edit", args)))
+    frame(seam, lambda: typeset.diff(cache, "k", gate_park.diff_texts("Edit", args)))
     view = cache.view("k")
     model = view.diff
-    frame(seam, lambda: typeset.diff(cache, "k", list(approval.diff_texts("Edit", dict(args)))))
+    frame(seam, lambda: typeset.diff(cache, "k", list(gate_park.diff_texts("Edit", dict(args)))))
     assert cache.view("k") is view and view.diff is model
-    edited = approval.diff_texts("Edit", {**args, "new_string": "II"})
+    edited = gate_park.diff_texts("Edit", {**args, "new_string": "II"})
     frame(seam, lambda: typeset.diff(cache, "k", edited))
     assert cache.view("k") is view and view.diff is not model
     assert rows(view.diff, RowKind.ADD) == ["II"]
@@ -285,7 +287,7 @@ def test_an_equal_model_that_is_not_the_same_model_is_shown_in_place_of_it(seam:
     Two models with the same rows compare equal and may still differ in the context
     a click would expand, so a ``Diff`` is the same source only if it is the same one.
     """
-    texts = (approval.DiffText("a\n", "b\n", "x.py"),)
+    texts = (DiffText("a\n", "b\n", "x.py"),)
     one, other = typeset.diff_model(texts), typeset.diff_model(texts)
     assert one == other and one is not other
     cache = typeset.ViewCache()
@@ -325,11 +327,15 @@ def test_a_call_with_no_diff_is_none_and_stays_none_cheaply(
     assert [cache.view(key) for key in ("k", "none", "tuple", "list", "model")] == [None] * 5
 
 
-def test_a_diff_draws_its_gutter_and_both_sides(seam: Any, tmp_path: Path) -> None:
-    target = tmp_path / "a.py"
-    target.write_text("foo")
+def test_a_diff_draws_its_gutter_and_both_sides(
+    seam: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A relative path: the header above the view is wrapped to its width, and
+    # ``label`` below allows it one line. tmp_path's length is the runner's.
+    monkeypatch.chdir(tmp_path)
+    Path("a.py").write_text("foo")
     cache = typeset.ViewCache()
-    call = pending("Edit", {"file_path": str(target), "old_string": "foo", "new_string": "bar"})
+    call = pending("Edit", {"file_path": "a.py", "old_string": "foo", "new_string": "bar"})
     drawn: list[int] = []
 
     def body(**given: Any) -> None:
@@ -355,7 +361,7 @@ def test_one_model_may_be_drawn_by_two_panes_each_in_a_view_of_its_own(seam: Any
     Two panes can show the same parked call in one frame. The model is immutable
     and may be shared; a view holds one scroll position and one origin and may not.
     """
-    model = typeset.diff_model((approval.DiffText("a\n", "b\n", "x.py"),))
+    model = typeset.diff_model((DiffText("a\n", "b\n", "x.py"),))
     inbox, detail = typeset.ViewCache(), typeset.ViewCache()
 
     def body() -> None:
@@ -372,7 +378,7 @@ def test_a_diff_is_made_and_drawn_without_opening_a_file_or_asking_the_gate_agai
     seam: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    ``approval.diff_texts`` is the one place a call's effect on a file is decided, and
+    ``gate.park.diff_texts`` is the one place a call's effect on a file is decided, and
     it runs when the call parks. A second reader here would be a second answer -- and
     so would a second call to the first.
 
@@ -387,7 +393,7 @@ def test_a_diff_is_made_and_drawn_without_opening_a_file_or_asking_the_gate_agai
     target.write_text("something else entirely\n")
     cache = typeset.ViewCache()
     # Whatever a first diff view reads lazily -- a face's metrics -- is read here.
-    frame(seam, lambda: typeset.diff(cache, "warm", (approval.DiffText("a\n", "b\n", "w"),)))
+    frame(seam, lambda: typeset.diff(cache, "warm", (DiffText("a\n", "b\n", "w"),)))
 
     def refuse(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError(f"a file was opened: {args[:1]}")
@@ -400,7 +406,7 @@ def test_a_diff_is_made_and_drawn_without_opening_a_file_or_asking_the_gate_agai
         monkeypatch.setattr(owner, name, refuse)
     monkeypatch.setattr(Path, "read_text", refuse)
     monkeypatch.setattr(Path, "read_bytes", refuse)
-    monkeypatch.setattr(approval, "diff_texts", refuse)
+    monkeypatch.setattr(gate_park, "diff_texts", refuse)
     built = typeset.approval_diff(call)
     got: list[float | None] = []
     frame(seam, lambda: got.append(typeset.diff(cache, "k", call)))
@@ -412,7 +418,7 @@ def test_a_diff_is_made_and_drawn_without_opening_a_file_or_asking_the_gate_agai
 
 
 def test_a_pane_that_says_the_warning_itself_can_have_the_diff_leave_it_out(seam: Any) -> None:
-    texts = (approval.DiffText("a\n", "b\n", LONG_LABEL, will_not_apply="file not found"),)
+    texts = (DiffText("a\n", "b\n", LONG_LABEL, will_not_apply="file not found"),)
     cache = typeset.ViewCache()
     narrow(seam, lambda: typeset.diff(cache, "k", texts, warning=False), width=420.0)
     view = cache.view("k")
@@ -430,7 +436,7 @@ def test_a_diff_the_library_stops_under_says_so_and_reports_its_rows_missing(
 ) -> None:
     import imscribe
 
-    texts = (approval.DiffText("a\nb\n", "a\nc\nd\n", "x.py"),)
+    texts = (DiffText("a\nb\n", "a\nc\nd\n", "x.py"),)
     cache = typeset.ViewCache()
     frame(seam, lambda: typeset.diff(cache, "k", texts))
     assert cache.unbuilt("k") == 0
@@ -467,7 +473,7 @@ def test_a_diff_row_keeps_its_columns_at_the_advance_imgui_draws_the_face_at(sea
     """
     baked = _chrome_advance(seam, 16.0)
     assert baked == 8.0 and typeset.px(Role.DIFF) == 16.0
-    texts = (approval.DiffText("", "m" * 40 + "\n", "x"),)
+    texts = (DiffText("", "m" * 40 + "\n", "x"),)
     cache = typeset.ViewCache()
     lefts: list[float] = []
 
@@ -504,7 +510,7 @@ def test_a_diff_header_too_long_for_its_view_can_be_brought_on_screen(seam: Any)
     less than its own header's. A pane that adopts ``diff()`` says the warning
     itself (``warning=False``) and would have to say the path.
     """
-    texts = (approval.DiffText("a\n", "b\n", LONG_LABEL, will_not_apply="anchor not found"),)
+    texts = (DiffText("a\n", "b\n", LONG_LABEL, will_not_apply="anchor not found"),)
     cache = typeset.ViewCache()
     narrow(seam, lambda: typeset.diff(cache, "k", texts), width=420.0)
     view = cache.view("k")
@@ -527,7 +533,7 @@ def test_a_diff_the_library_refuses_a_view_for_reports_every_changed_row_missing
         raise imscribe.TypesetUnavailable("imtypeset is not in use: the library said no")
 
     monkeypatch.setattr(imscribe.TypesetDiffView, "__init__", refused)
-    texts = (approval.DiffText("a\nb\n", "a\nc\nd\n", "x.py"),)
+    texts = (DiffText("a\nb\n", "a\nc\nd\n", "x.py"),)
     cache = typeset.ViewCache()
     tall: list[float | None] = []
     frame(seam, lambda: tall.append(typeset.diff(cache, "k", texts)))
@@ -571,7 +577,7 @@ def test_a_diff_header_too_long_for_its_view_is_said_above_it_warning_first(
     says why not only where the library answers that one was cut), the warning
     before the path, wrapped to the view's width and so all in sight.
     """
-    texts = (approval.DiffText("a\n", "b\n", LONG_LABEL, will_not_apply="anchor not found"),)
+    texts = (DiffText("a\n", "b\n", LONG_LABEL, will_not_apply="anchor not found"),)
     cache = typeset.ViewCache()
     said = _said_with_sizes(seam, monkeypatch)
     narrow(seam, lambda: typeset.diff(cache, "k", texts), width=420.0)
@@ -597,10 +603,10 @@ def test_what_is_wrong_with_a_file_is_said_above_its_diff_before_its_name(
     So is a file shown as new because what is there could not be read.
     """
     texts = (
-        approval.DiffText("x = 1\n", "x = 1 \u202e# reversed\n", "bidi.py"),
-        approval.DiffText("a\n", "a\x07\n", "bell.py"),
-        approval.DiffText(None, "new\n", "blob.bin", unreadable=True),
-        approval.DiffText("a\r\nb\r\n", "a\nb\n", "crlf.txt"),
+        DiffText("x = 1\n", "x = 1 \u202e# reversed\n", "bidi.py"),
+        DiffText("a\n", "a\x07\n", "bell.py"),
+        DiffText(None, "new\n", "blob.bin", unreadable=True),
+        DiffText("a\r\nb\r\n", "a\nb\n", "crlf.txt"),
     )
     assert diffs.above(typeset.diff_model(texts)) == (
         ("contains invisible or bidirectional control characters: U+202E", True),
@@ -626,7 +632,7 @@ def test_what_a_file_holds_unseen_is_said_before_what_the_gate_predicts_of_it() 
     apply is about the call, and a bidirectional override in the text is about
     what the approver is reading while deciding whether that matters.
     """
-    texts = (approval.DiffText("a\n", "a \u202e\n", "x.py", will_not_apply="anchor not found"),)
+    texts = (DiffText("a\n", "a \u202e\n", "x.py", will_not_apply="anchor not found"),)
     assert diffs.above(typeset.diff_model(texts)) == (
         ("contains invisible or bidirectional control characters: U+202E", True),
         ("may not apply: anchor not found", True),
@@ -964,8 +970,8 @@ def test_a_row_wider_than_its_view_is_not_broken_and_its_end_is_in_reach(seam: A
     scrolls to the row's last character.
     """
     row = "x = '" + "a" * 293 + "Z'"
-    texts = (approval.DiffText("", f"short\n{row}\n", "x.py"),)
-    plain = (approval.DiffText("", "short\nalso short\n", "x.py"),)
+    texts = (DiffText("", f"short\n{row}\n", "x.py"),)
+    plain = (DiffText("", "short\nalso short\n", "x.py"),)
     cache = typeset.ViewCache()
 
     def body() -> None:
@@ -1284,7 +1290,7 @@ def _drawn_row(seam: Any, text: str) -> tuple[Any, list[float]]:
     A one-row diff drawn by the diff view in a window: the view, and the left
     edge of each of the row's glyphs, read from the window's draw list.
     """
-    texts = (approval.DiffText("", text + "\n", "x"),)
+    texts = (DiffText("", text + "\n", "x"),)
     cache = typeset.ViewCache()
     lefts: list[float] = []
 
@@ -1689,7 +1695,7 @@ def _said_by_the_seam(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return said
 
 
-_THREE = (approval.DiffText("one\ntwo\nthree\n", "one\n2\nthree\nfour\n", "x.py"),)
+_THREE = (DiffText("one\ntwo\nthree\n", "one\n2\nthree\nfour\n", "x.py"),)
 """
 A change of three rows: one removed, two added.
 """
@@ -1749,7 +1755,7 @@ def test_a_diff_the_view_set_less_of_than_it_was_handed_is_unset_and_then_the_pa
     typeset.pre_frame()
     assert typeset.can_draw()
 
-    again = (approval.DiffText("a\n", "b\n", "y.py"),)
+    again = (DiffText("a\n", "b\n", "y.py"),)
     frame(seam, lambda: got.append(typeset.diff(cache, "k", again)))
     assert got[2] is not None and cache.unbuilt("k") == 0, "another diff is asked of the library"
 
@@ -1766,7 +1772,7 @@ def test_a_diff_with_characters_no_face_has_is_set_whole_where_nothing_asks_abou
     """
     said = _said_by_the_seam(monkeypatch)
     monkeypatch.setattr(diffs, "unfit", lambda model: None)
-    texts = (approval.DiffText("a\n", "x \U0001f600 y 漢 π \x01 z\n", "x.py"),)
+    texts = (DiffText("a\n", "x \U0001f600 y 漢 π \x01 z\n", "x.py"),)
     cache = typeset.ViewCache()
     for _ in range(3):
         frame(seam, lambda: typeset.diff(cache, "k", texts))
@@ -1813,7 +1819,7 @@ def test_anything_else_the_library_raises_under_a_diff_is_the_library_stopping(
     """
     said = _said_by_the_seam(monkeypatch)
     cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.diff(cache, "k", (approval.DiffText("a\n", "b\n", "x.py"),)))
+    frame(seam, lambda: typeset.diff(cache, "k", (DiffText("a\n", "b\n", "x.py"),)))
     fault, doing = DIFF_FAULTS[where]
     got: list[float | None] = []
     with monkeypatch.context() as patched:
@@ -1846,7 +1852,7 @@ def test_a_diff_row_with_a_lone_surrogate_is_the_panes_own_and_stops_nothing(
     """
     said = _said_by_the_seam(monkeypatch)
     cache = typeset.ViewCache()
-    texts = (approval.DiffText("a\n", "b \udc80 c\n", "x.py"),)
+    texts = (DiffText("a\n", "b \udc80 c\n", "x.py"),)
     got: list[float | None] = []
     frame(seam, lambda: got.append(typeset.diff(cache, "k", texts)))
     assert got == [None] and cache.view("k") is None and cache.unbuilt("k") == 0
@@ -1885,8 +1891,8 @@ def test_what_the_seams_own_code_raises_under_a_diff_is_a_defect_and_is_not_caug
 # -- adoption is per diff as well as per library --------------------------------------
 
 
-def _one_row(text: str) -> tuple[approval.DiffText, ...]:
-    return (approval.DiffText("", text + "\n", "x.py"),)
+def _one_row(text: str) -> tuple[DiffText, ...]:
+    return (DiffText("", text + "\n", "x.py"),)
 
 
 def test_a_row_with_a_character_the_code_face_lacks_is_on_its_columns_where_they_hold(
@@ -2120,7 +2126,7 @@ def test_context_a_click_brings_in_is_asked_about_as_the_rows_before_it_were(
     before = ["# a\u20dd is defined here"] + [f"line_{n} = {n}" for n in range(1, 40)]
     after = list(before)
     after[30] = "line_30 = 'changed'"
-    texts = (approval.DiffText("\n".join(before) + "\n", "\n".join(after) + "\n", "x.py"),)
+    texts = (DiffText("\n".join(before) + "\n", "\n".join(after) + "\n", "x.py"),)
     cache = typeset.ViewCache()
     got: list[float | None] = []
     frame(columns_hold, lambda: got.append(typeset.diff(cache, "k", texts)))
@@ -2185,12 +2191,12 @@ def test_the_lines_a_diff_has_to_match_are_what_its_texts_do_not_share() -> None
     one[500] = "changed"
     scattered = [line + (" x" if n % 37 == 0 else "") for n, line in enumerate(file)]
     grown = file[:400] + ["new"] * 30 + file[400:]
-    assert diffs.work((approval.DiffText(text(file), text(one), "x"),)) == 1
-    assert diffs.work((approval.DiffText(text(file), text(scattered), "x"),)) == 1000
-    assert diffs.work((approval.DiffText(text(file), text(grown), "x"),)) == 30
-    assert diffs.work((approval.DiffText(None, text(file), "x"),)) == 1000
-    assert diffs.work((approval.DiffText(text(file), text(file), "x"),)) == 0
-    assert diffs.work((approval.DiffText("a", "b", "1"), approval.DiffText("c\nd", "e", "2"))) == 3
+    assert diffs.work((DiffText(text(file), text(one), "x"),)) == 1
+    assert diffs.work((DiffText(text(file), text(scattered), "x"),)) == 1000
+    assert diffs.work((DiffText(text(file), text(grown), "x"),)) == 30
+    assert diffs.work((DiffText(None, text(file), "x"),)) == 1000
+    assert diffs.work((DiffText(text(file), text(file), "x"),)) == 0
+    assert diffs.work((DiffText("a", "b", "1"), DiffText("c\nd", "e", "2"))) == 3
     assert diffs.work(()) == 0
 
 
@@ -2239,10 +2245,10 @@ def test_a_pane_that_says_a_files_warnings_itself_has_them_left_out_of_the_model
     """
     target = tmp_path / "blob.bin"
     target.write_bytes(b"\xff\xfe\x00\x80binary")
-    over = approval.diff_texts("Write", {"file_path": str(target), "content": "text\n"}) or ()
+    over = gate_park.diff_texts("Write", {"file_path": str(target), "content": "text\n"}) or ()
     assert "not readable as text" in typeset.diff_model(over).files[0].label
     assert typeset.diff_model(over, warned=False).files[0].label == str(target)
 
-    edit = (approval.DiffText("a", "b", "x.py", will_not_apply="anchor not found in file"),)
+    edit = (DiffText("a", "b", "x.py", will_not_apply="anchor not found in file"),)
     assert typeset.diff_model(edit).files[0].will_not_apply.startswith("may not apply")
     assert typeset.diff_model(edit, warned=False).files[0].will_not_apply == ""

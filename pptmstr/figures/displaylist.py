@@ -1,6 +1,6 @@
 """
 A Mermaid diagram as a bounded display list: paths, text runs and hit regions that
-the pane draws natively (``host.FigureWidget``), with no raster.
+the pane draws natively (``figure_host.FigureWidget``), with no raster.
 
 **Where it is made.** In the render child (``render._laid``), after merman, the
 post-pass and the sanitiser (``mermaid.layout``): ``from_mermaid`` parses the
@@ -160,13 +160,13 @@ The most points the pane may flatten a list's paths into at any width it draws i
 refused as too costly to draw, before the frame thread builds anything from it.
 
 A build costs about 0.9 us a point for a stroked curve and 1.8 us for a filled
-shape (``host.build``, 2026-10-22, ``shots/native-cost/test_build_cost.py``). The
+shape (``figure_host.build``, 2026-10-22, ``shots/native-cost/test_build_cost.py``). The
 largest diagrams merman lays out need at most 17,777 (an entity-relationship
 diagram of 42 entities; a 95-class diagram 10,592, a 155-state one 7,170, a
 105-node flowchart 6,268), so this is 1.8 times that. A frame budget of 16 ms
 would have refused that diagram, which takes 25 ms to build: the frame budget is
 not one merman's own output keeps, and a first build waits its turn, one figure a
-frame (``host._may_rebuild``). What a list at this bound costs to build, with its
+frame (``figure_host._may_rebuild``). What a list at this bound costs to build, with its
 dashes and text at theirs, is in the planning record (§11.3).
 """
 
@@ -307,7 +307,7 @@ class DisplayList:
     def weight(self) -> int:
         """
         About how many numbers and four-character runs of text this holds: what the
-        pane's held layouts are bounded by (``host.LAYOUT_BUDGET_WORDS``). Held as
+        pane's held layouts are bounded by (``figure_host.LAYOUT_BUDGET_WORDS``). Held as
         Python objects, a word costs ``WORD_BYTES``.
         """
         words = 8 * (len(self.items) + len(self.nodes) + len(self.edges))
@@ -2314,9 +2314,9 @@ def path_points(ops: str, xy: Sequence[float], scale: float, tol: float = FLATTE
 def drawn_points(dl: DisplayList) -> int:
     """
     At least as many points as the pane flattens ``dl``'s paths into at any width it
-    draws it: what a build's cost grows with (``host.build``). The pane draws a figure
+    draws it: what a build's cost grows with (``figure_host.build``). The pane draws a figure
     no wider than its natural width, so at most one pixel a unit, or a pixel's width
-    when the natural width is under one (``host.FigureWidget.size_for``).
+    when the natural width is under one (``figure_host.FigureWidget.size_for``).
     """
     scale = max(1.0, 1.0 / dl.width)
     return sum(path_points(it.ops, it.xy, scale) for it in dl.items if isinstance(it, PathItem))

@@ -99,8 +99,19 @@ deliberate exceptions, and each one has a reason attached in its own module:
 | `Transcript` | Append-only and internally synchronised (I7). Routing a token stream through the reducer would put one queue item per token on the frame path. |
 | `Bridge` | It *is* the thread boundary. Purity here would fight the threading model I5 exists to protect. |
 
-No `Result`/`Either`. The core is not failure-heavy, and exceptions at the boundary
-are fine.
+No `Result`/`Either` — no generic wrapper type. The core is not failure-heavy, and
+exceptions at the boundary are fine. Where a shell function can fail, what its
+caller has to do about it picks the shape:
+
+- **The caller must act on a refusal:** return a union named for the domain.
+  `boardlog.append` returns `Written | Unwritten`; `sessionfile.read` returns
+  `Found`, whose `Unreadable` is never written over.
+- **The failure only needs showing:** raise. `brief.write_entry` raises `OSError`,
+  because premises that fail to persist are invisible until a worker acts on their
+  absence.
+- **The failure costs only a preference:** swallow it and say so in the docstring.
+  `settings.save` swallows a failed write; a theme that does not persist must not
+  take down a frame.
 
 ---
 
@@ -178,8 +189,8 @@ this or X breaks", the design is wrong, not the comment. `TaskReleased` had to n
 `UnstampedCall` rather than guessing a sender. A default would silently attribute
 someone's message to a plausible-looking node, which is worse than a crash.
 
-**A duplicated constant with no test pinning it.** `approval.py` spells the bus
-server name rather than importing it, so the policy stays free of SDK imports. That
+**A duplicated constant with no test pinning it.** `gate/tools.py` spells the bus
+server name rather than importing it, so the gate stays free of SDK imports. That
 duplication is deliberate *and* pinned by a test that fails if the two lists drift.
 Deliberate duplication is fine; unpinned duplication is not.
 
@@ -232,7 +243,7 @@ distinction is tense, not subject matter. A live constraint earns a comment; the
 history of a defect does not.
 
 The exception is a decision whose *reasoning* is not visible from the result. When
-a module says why it takes the harder of two reasonable paths — why `approval.py`
+a module says why it takes the harder of two reasonable paths — why `gate/`
 has no SDK import, why the bus handler refuses instead of defaulting — that is not
 archaeology, it is the constraint that will otherwise be optimised away by the next
 reader.

@@ -12,7 +12,9 @@ import functools
 import importlib
 import inspect
 import json
+import os
 import re
+import stat
 from collections.abc import Callable, Iterator
 from dataclasses import fields
 from pathlib import Path
@@ -166,6 +168,73 @@ def test_save_is_atomic_and_leaves_no_temp_files(tmp_path: Path) -> None:
     save(Settings(theme="dark"), path, unread=None)
     assert load(path).theme == "dark"
     assert [p.name for p in tmp_path.iterdir()] == ["settings.json"]
+
+
+def test_a_save_whose_rename_fails_leaves_the_old_file_whole_and_no_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "settings.json"
+    save(Settings(theme="ghost"), path, unread=None)
+    held = path.read_bytes()
+
+    def refuse(*args: object) -> None:
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    assert save(Settings(theme="dark"), path, unread=None) is None
+
+    assert path.read_bytes() == held
+    assert [p.name for p in tmp_path.iterdir()] == ["settings.json"]
+
+
+def test_settings_are_written_as_sorted_indented_json(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    chosen = Settings(theme="café")
+
+    save(chosen, path, unread=None)
+
+    expected = json.dumps(settings_mod.encoded(chosen), indent=2, sort_keys=True) + "\n"
+    assert path.read_bytes() == expected.encode("utf-8")
+
+
+def test_a_save_flushes_the_written_bytes_to_the_device_before_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A lost ``settings.json`` resets every preference without a word, so the bytes
+    reach the device before the name moves onto them. Patched on the ``os`` module
+    itself: ``ondisk`` calls ``os.fsync`` and ``os.replace`` through it, and it is
+    the same object as ``ondisk.os``.
+    """
+    path = tmp_path / "settings.json"
+    steps: list[tuple[object, ...]] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd: int) -> None:
+        held = os.fstat(fd)
+        steps.append(("fsync", held.st_ino, os.pread(fd, held.st_size + 1, 0)))
+        real_fsync(fd)
+
+    def rename(src: str, dst: str | os.PathLike[str]) -> None:
+        steps.append(("replace", dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", rename)
+
+    assert save(Settings(theme="ghost"), path, unread=None) is None
+
+    assert steps == [("fsync", path.stat().st_ino, path.read_bytes()), ("replace", path)]
+
+
+def test_a_saved_file_keeps_its_permission_bits(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    save(Settings(theme="ghost"), path, unread=None)
+    path.chmod(0o644)
+
+    save(Settings(theme="dark"), path, unread=None)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
 
 def test_save_creates_the_directory(tmp_path: Path) -> None:

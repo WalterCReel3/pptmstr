@@ -1,0 +1,294 @@
+{
+ "unreachable_from_entry_point": [
+  "requests",
+  "ui.splash",
+  "ui.splash_art",
+  "ui.splash_view"
+ ],
+ "modules": 97,
+ "loc": 103758,
+ "import_edges": 445,
+ "import_edges_by_kind": {
+  "eager": 424,
+  "lazy": 19,
+  "typing": 6
+ },
+ "lazy_only_edges": 15,
+ "refs_total": 18443,
+ "refs_cross_module": 6844,
+ "refs_unresolved": 1,
+ "weighted_module_edges": 473,
+ "scc": {
+  "eager": [],
+  "eager+lazy": [
+   [
+    "approval",
+    "board",
+    "model",
+    "templates"
+   ],
+   [
+    "bus",
+    "commandbus"
+   ],
+   [
+    "figures.fences",
+    "figures.host",
+    "figures.render",
+    "theme",
+    "ui.typeset",
+    "ui.typeset.diffs",
+    "ui.typeset.find",
+    "ui.typeset.gate",
+    "ui.typeset.parts",
+    "ui.typeset.themes",
+    "ui.typeset.views"
+   ]
+  ],
+  "all (incl. TYPE_CHECKING)": [
+   [
+    "approval",
+    "board",
+    "command",
+    "model",
+    "templates"
+   ],
+   [
+    "figures.fences",
+    "figures.host",
+    "figures.render",
+    "theme",
+    "ui.typeset",
+    "ui.typeset.diffs",
+    "ui.typeset.find",
+    "ui.typeset.gate",
+    "ui.typeset.parts",
+    "ui.typeset.syntax",
+    "ui.typeset.themes",
+    "ui.typeset.views"
+   ],
+   [
+    "bus",
+    "commandbus",
+    "driver"
+   ]
+  ]
+ },
+ "cycles_closed_only_by_lazy_import": [
+  {
+   "lazy_import": "approval -> board",
+   "eager_path_back": [
+    "board",
+    "templates",
+    "approval"
+   ]
+  },
+  {
+   "lazy_import": "bus -> commandbus",
+   "eager_path_back": [
+    "commandbus",
+    "bus"
+   ]
+  },
+  {
+   "lazy_import": "figures.render -> ui.typeset.views",
+   "eager_path_back": [
+    "ui.typeset.views",
+    "figures.render"
+   ]
+  },
+  {
+   "lazy_import": "theme -> ui.typeset",
+   "eager_path_back": [
+    "ui.typeset",
+    "ui.typeset.diffs",
+    "theme"
+   ]
+  },
+  {
+   "lazy_import": "ui.typeset.views -> ui.typeset.diffs",
+   "eager_path_back": [
+    "ui.typeset.diffs",
+    "ui.typeset.views"
+   ]
+  }
+ ],
+ "layer_violations_non_ui_imports_ui": [
+  [
+   "figures.host",
+   "ui.typeset",
+   "lazy"
+  ],
+  [
+   "figures.render",
+   "ui.typeset.views",
+   "lazy"
+  ],
+  [
+   "theme",
+   "ui.typeset",
+   "lazy"
+  ]
+ ],
+ "sdk_importers": [
+  "bus",
+  "cli_version",
+  "driver",
+  "sessions",
+  "ui.session_details"
+ ],
+ "imgui_importers_outside_ui": [
+  "app",
+  "figures.host",
+  "theme"
+ ],
+ "modularity": {
+  "louvain_with_app": 0.409,
+  "louvain_without_app": 0.423,
+  "prefix_partition_without_app": 0.079,
+  "louvain_without_app_shuffled_runs": [
+   0.404,
+   0.423
+  ],
+  "louvain_without_app_or_hubs": 0.596
+ },
+ "louvain_with_app_communities": 6,
+ "louvain_without_app_communities": 8,
+ "label_prop_communities": 7,
+ "tests": {
+  "test_files": 146,
+  "test_functions": 7296,
+  "dotted_string_patches": 53,
+  "tests_with_dotted_string_patch": 28,
+  "module_object_setattr_patches_total": 859,
+  "module_object_setattr_patches": {
+   "pptmstr.ui.widgets": 61,
+   "pptmstr.ui.inbox": 58,
+   "pptmstr.app": 55,
+   "pptmstr.ui.launcher": 44,
+   "pptmstr.ui.typeset.gate": 41,
+   "pptmstr.ui.typeset": 38,
+   "pptmstr.ui.board_pane": 35,
+   "pptmstr.ui.transcript_pane": 34,
+   "pptmstr.commandrun": 34,
+   "pptmstr.ui.command_view": 28,
+   "pptmstr.ui.detail": 27,
+   "pptmstr.figures.mermaid": 27,
+   "pptmstr.boardlog": 24,
+   "pptmstr.settings": 20,
+   "pptmstr.pairing": 19,
+   "pptmstr.commandfile": 16,
+   "pptmstr.ui.link_form": 16,
+   "pptmstr.ui.typeset.diffs": 15,
+   "pptmstr.version": 15,
+   "pptmstr.brief": 14,
+   "pptmstr.ui.rail": 14,
+   "pptmstr.worktree": 13,
+   "pptmstr.ui.typeset.views": 12,
+   "pptmstr.figures.host": 12,
+   "pptmstr.ui.session_details": 10,
+   "pptmstr.ui.review": 10,
+   "pptmstr.sessionfile": 9,
+   "pptmstr.theme": 9,
+   "pptmstr.ui.digest_pane": 9,
+   "pptmstr.driver": 9,
+   "pptmstr.requests": 9,
+   "pptmstr.ui.typeset.roles": 9,
+   "pptmstr.ui.settings_dialog": 8,
+   "pptmstr.ui.tool_block": 8,
+   "pptmstr.boardsync": 7,
+   "pptmstr.ui.tabs": 7,
+   "pptmstr.ui.compose": 7,
+   "pptmstr.ui.session_menu": 7,
+   "pptmstr.ui.decision_view": 7,
+   "pptmstr.ui.splash_view": 7,
+   "pptmstr.ui.main_menu": 7,
+   "pptmstr.ui.typeset.syntax": 7,
+   "pptmstr.cli_version": 6,
+   "pptmstr.figures.fences": 6,
+   "pptmstr.ui.health": 5,
+   "pptmstr.fleetsync": 4,
+   "pptmstr.ui.resume_form": 4,
+   "pptmstr.ui.brief_pane": 4,
+   "pptmstr.boardfacts": 2,
+   "pptmstr.approval": 2,
+   "pptmstr.figures.render": 2,
+   "pptmstr.channels": 1,
+   "pptmstr.model_catalog": 1,
+   "pptmstr.templates": 1,
+   "pptmstr.commandtext": 1,
+   "pptmstr.ui.splash": 1,
+   "pptmstr.ui.typeset.themes": 1
+  }
+ },
+ "dynamic": {
+  "match on class (static: seen)": {
+   "app": 13,
+   "ui.launcher": 10,
+   "boardlog": 7,
+   "ui.resume_form": 6,
+   "requests": 5,
+   "store": 5,
+   "ui.detail": 4,
+   "bus": 3,
+   "channels": 3,
+   "ui.inbox": 3,
+   "approval": 2,
+   "boardfacts": 2,
+   "command": 2,
+   "commandbus": 2,
+   "fake_driver": 2,
+   "ui.command_view": 2,
+   "ui.main_menu": 2,
+   "ui.settings_dialog": 2,
+   "commandfile": 1,
+   "driver": 1,
+   "fleetsync": 1,
+   "model_catalog": 1,
+   "ui.digest_pane": 1,
+   "ui.session_details": 1,
+   "ui.session_menu": 1
+  },
+  "match on string literal": {
+   "app": 1
+  },
+  "getattr(computed name)": {
+   "ui.settings_dialog": 5,
+   "theme": 4,
+   "ui.transcript_pane": 4,
+   "ui.typeset.views": 4,
+   "app": 3,
+   "ui.board_pane": 3,
+   "drawable": 2,
+   "ui.rich_pane": 2,
+   "boardlog": 1,
+   "channels": 1,
+   "figures.displaylist": 1,
+   "fleetsync": 1,
+   "settings": 1,
+   "ui.detail": 1,
+   "ui.tabs": 1,
+   "ui.tool_block": 1,
+   "ui.typeset.syntax": 1
+  },
+  "@tool (MCP, dispatched by name string)": {
+   "bus": 20
+  },
+  "getattr(literal name)": {
+   "ui.typeset.views": 9,
+   "figures.host": 3,
+   "bus": 1,
+   "driver": 1,
+   "figures.mermaid": 1,
+   "pairing": 1,
+   "ui.typeset.gate": 1
+  },
+  "hasattr(literal name)": {
+   "drawable": 1,
+   "figures.host": 1
+  },
+  "importlib.import_module": {
+   "version": 3
+  }
+ }
+}

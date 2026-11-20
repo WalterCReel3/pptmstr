@@ -19,7 +19,8 @@ import pytest
 from pptmstr import boardlog
 from pptmstr.boardfacts import outcomes
 from pptmstr.boardlog import Clock
-from pptmstr.effects import DecisionSettled, PeerIdentity, SessionWoken, WakeReason
+from pptmstr.channels.records import Channel, PeerIdentity
+from pptmstr.effects import DecisionSettled, SessionWoken, WakeReason
 from pptmstr.intents import (
     AgentSpawned,
     BoardRestored,
@@ -32,15 +33,8 @@ from pptmstr.intents import (
     DecisionWithdrawn,
     Intent,
 )
-from pptmstr.model import (
-    Channel,
-    Decision,
-    DecisionRefusal,
-    NodeId,
-    Snapshot,
-    Standing,
-    Unplaced,
-)
+from pptmstr.journal import codec
+from pptmstr.model import Decision, DecisionRefusal, NodeId, Snapshot, Standing, Unplaced
 from pptmstr.store import Store, _apply
 from tests.test_bus import _live_bus
 
@@ -231,7 +225,8 @@ def test_a_read_describes_the_lead_that_raised_another_sessions_decision() -> No
 
 
 def test_a_decision_refused_for_its_links_age_names_the_lead_on_it_now() -> None:
-    from pptmstr.bus import _PEER_LEGEND, _decision_refusal_text
+    from pptmstr.channels.text import _PEER_LEGEND
+    from pptmstr.decisiontext import _decision_refusal_text
 
     text = _decision_refusal_text(DecisionRefusal.LINKED_AFTER, "d-1", True, now_on=lead_of(C))
 
@@ -296,7 +291,7 @@ def _logged_board() -> boardlog.Board:
     after, _ = _apply(before, intent, 5.0)
     facts = list(outcomes(before, intent, after, 5.0))
     assert [f.session_id for f in facts] == [S]
-    records = [boardlog.decode(boardlog.encode(f.record)) for f in facts]
+    records = [codec.decode(codec.encode(f.record), boardlog.KINDS) for f in facts]
     assert all(isinstance(r, boardlog.Raised) for r in records)
     return boardlog.restore(r for r in records if isinstance(r, boardlog.Raised))
 
@@ -408,7 +403,7 @@ def test_a_channel_decision_refused_for_its_links_age_says_that_and_no_more() ->
     RV5b 2: the link may be the first of its name, so the text says the link
     went live after the call and asserts no earlier link was closed.
     """
-    from pptmstr.bus import _decision_refusal_text
+    from pptmstr.decisiontext import _decision_refusal_text
 
     text = _decision_refusal_text(DecisionRefusal.LINKED_AFTER, "d-1", True)
 
@@ -421,7 +416,7 @@ def test_the_peer_lead_lists_its_own_sessions_work_before_the_other_leads() -> N
     RV6 5: in the peer lead's list, its own unread answer is kept ahead of the
     other lead's open decisions, so a list cut to fit drops the other lead's.
     """
-    from pptmstr import bus as bus_mod
+    from pptmstr import decisiontext
     from pptmstr.model import Answered
 
     theirs = [
@@ -436,7 +431,7 @@ def test_the_peer_lead_lists_its_own_sessions_work_before_the_other_leads() -> N
         raised_at=999.0,
     )
 
-    listed = bus_mod._decisions_text([*theirs, mine], None, 1_000.0, Z_LEAD, lambda n: "lead")
+    listed = decisiontext._decisions_text([*theirs, mine], None, 1_000.0, Z_LEAD, lambda n: "lead")
 
     assert "did not fit" in listed
     assert "MINE ANSWERED" in listed

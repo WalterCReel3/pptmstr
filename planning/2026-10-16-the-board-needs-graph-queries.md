@@ -441,3 +441,14 @@ Known limits and defects the round left:
 Every instance above comes from the session's own board replies and the lead's transcript. No
 probe was written, and no board timing or size was measured beyond the overflow messages the
 tools printed.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._REVIEW` | `gate.tools.REVIEW` |

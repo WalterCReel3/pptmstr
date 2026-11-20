@@ -4,9 +4,9 @@ The digest: one session's round as four slots, projected and never stored.
 The property the module may not break is an inequality over a whole board -- a
 digest never shows fewer unverified items or incidents than the board holds -- so
 it is pinned as an invariant over generated boards, against an oracle that reads
-the records directly and shares no code with ``digest.py`` or ``board.py``. The
-examples below it pin what an invariant cannot: the order, the boundary, and what
-each slot is made of.
+the records directly and shares no code with ``board/digest.py``,
+``board/rows.py`` or ``board/words.py``. The examples below it pin what an
+invariant cannot: the order, the boundary, and what each slot is made of.
 
 ``generated_round`` is imported by the bus and pane tests, which hold the same
 invariant on their own rendering.
@@ -20,7 +20,7 @@ import random
 import pytest
 
 from pptmstr import boardlog
-from pptmstr.digest import (
+from pptmstr.board.digest import (
     ChangeKind,
     Digest,
     Doubt,
@@ -507,7 +507,7 @@ def test_taken_decisions_are_the_sessions_taken_ones_open_first_each_part_oldest
     Every decision filed as already taken, however it ended, and none the
     operator was asked to take; another session's is not this one's.
     """
-    from pptmstr.digest import taken_decisions
+    from pptmstr.board.digest import taken_decisions
 
     snap = taken_round().snapshot()
     assert len(snap.decisions) == 7
@@ -846,7 +846,7 @@ def test_an_incident_is_listed_with_what_became_of_it() -> None:
     text is kept from agents is ``on_board``, pinned below and over generated
     boards, and at the tool in ``tests/test_bus.py``.
     """
-    from pptmstr.digest import incident_attribution, incident_label
+    from pptmstr.board.digest import incident_attribution, incident_label
     from pptmstr.intents import ConcernEdited
 
     store = Store()

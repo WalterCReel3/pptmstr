@@ -29,7 +29,9 @@ import imscribe
 import pytest
 from imscribe import BlockKind, Diff, Face, RowKind, registered_fonts, unregister_font
 
-from pptmstr import approval, theme
+from pptmstr import theme
+from pptmstr.gate import park as gate_park
+from pptmstr.gate.diff import render_texts
 from pptmstr.model import NodeId, PendingApproval
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import Kind, Part, Role, RoleStyle, Slot, gate, roles, themes, views
@@ -94,7 +96,7 @@ def pending(tool_name: str, raw_args: dict[str, Any], ident: str = "a1") -> Pend
     """
     A parked call as the driver builds one: the texts read once, the string from them.
     """
-    texts = approval.diff_texts(tool_name, raw_args)
+    texts = gate_park.diff_texts(tool_name, raw_args)
     return PendingApproval(
         id=ident,
         node=NodeId("n1"),
@@ -103,7 +105,7 @@ def pending(tool_name: str, raw_args: dict[str, Any], ident: str = "a1") -> Pend
         raw_args=raw_args,
         summary="",
         requested_at=0.0,
-        diff=approval.render_texts(tool_name, texts),
+        diff=render_texts(tool_name, texts),
         texts=texts,
     )
 
@@ -785,12 +787,13 @@ def test_a_code_line_arriving_in_a_stream_can_be_scrolled_to(seam: Any) -> None:
 
 
 def _fleet_bodies() -> dict[str, str]:
-    from pptmstr import board, fake_driver
+    from pptmstr import fake_driver
+    from pptmstr.board.rows import board_concerns
     from tests.test_fake_fixtures import _seeded
 
     driver, store = _seeded()
     snap = store.snapshot()
-    bodies = {c.id: c.body for c in board.board_concerns(snap, driver.cast["lead"][0])}
+    bodies = {c.id: c.body for c in board_concerns(snap, driver.cast["lead"][0])}
     bodies["concern"] = fake_driver._POST_CONCERN[1]["body"]
     bodies["declare"] = fake_driver._DECLARE_TASK[1]["detail"]
     bodies["report"] = fake_driver._REPORT_OPENING + fake_driver._REPORT_BODY
@@ -2799,10 +2802,16 @@ def test_a_library_that_is_found_and_cannot_draw_fails_the_tests_that_draw_and_d
     from tests.conftest import child_environment, refused_library, without_the_library
 
     one = "tests/test_typeset_views.py::test_the_bold_monospace_is_registered_and_used"
+    runs = iter(("found", "none"))
 
     def run(environ: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        # A basetemp of its own: the default is under the directory every pytest
+        # of this user shares, whose old entries each run removes, so a child
+        # beside a parallel run can lose that race and fail.
+        basetemp = tmp_path / f"basetemp-{next(runs)}"
         return subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", one],
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+            + ["--basetemp", str(basetemp), one],
             capture_output=True,
             text=True,
             timeout=120,

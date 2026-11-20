@@ -2,7 +2,7 @@
 A diff of what a parked call would do: the model, and which fences are honest diffs.
 
 **A diff is built from the texts a parked call carries, and nothing here reads
-a file.** ``approval.diff_texts`` is the one place that decides what a call does
+a file.** ``gate.park.diff_texts`` is the one place that decides what a call does
 to a file; the driver runs it at park time and ``PendingApproval.texts`` holds
 the answer. ``diff_model`` turns texts into the library's model, which is
 immutable, so one model may be drawn by two panes.
@@ -142,7 +142,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from ... import theme as ui_theme
-from ...approval import DiffText
+from ...gate.diff import DiffText
 from ...model import PendingApproval
 from . import gate, roles, themes, views
 from .roles import Role
@@ -960,7 +960,7 @@ def diff(
 
     ``source`` is a parked call as its panes hold it (``Parked``: one model,
     made here on first asking, for both of them), a parked call itself, the
-    texts of one (``approval.diff_texts``' answer, for arguments the operator
+    texts of one (``gate.park.diff_texts``' answer, for arguments the operator
     is editing), or a ``Diff`` already made. Anything but a ``Parked`` or a
     ``Diff`` is made into a model when the source is another object than the
     one held, in this call: the module docstring says what that costs.

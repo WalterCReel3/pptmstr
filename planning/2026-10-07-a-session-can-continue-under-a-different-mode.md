@@ -541,3 +541,19 @@ None is edited by this record.
   above.
 - `planning/2026-10-07-a-session-can-run-in-its-own-worktree.md` — the recorded-cwd part of its
   step 1 is shared; O7 defers to it; its missing-paths notice is named in lead's proposal above.
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py` and `sandbox.py`. B5's last
+step (`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what
+was left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`,
+`park`) and deleted it, and moved `sandbox.py` to `pptmstr/gate/sandbox.py`
+unchanged. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `ALLOWED_DOMAIN` (in `sandbox.py`) | `gate.sandbox.ALLOWED_DOMAIN` |
+| `approval.classify` | `gate.classify.classify` |
+| `sandbox.containment_settings` | `gate.sandbox.containment_settings` |
+| `sandbox.py` | `gate/sandbox.py` |

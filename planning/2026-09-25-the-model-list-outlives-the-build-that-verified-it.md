@@ -132,3 +132,14 @@ reaching the network to learn what was already on disk.
 `scripts/mock_cards.py` carried its own copy of the model list and **had already drifted**
 (no `claude-fable-5`, an undated haiku). It now imports `FALLBACK_MODELS`. This is the
 smell STYLE.md §3 names — unpinned duplication — caught in the wild rather than in theory.
+
+## Names moved by B5's last step
+
+The text above cites these names in `sandbox.py`. B5's last step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) moved
+`sandbox.py` to `pptmstr/gate/sandbox.py` unchanged. A line number cited above
+is the old file's, when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `sandbox.DENIED_CREDENTIAL_FILES` | `gate.sandbox.DENIED_CREDENTIAL_FILES` |

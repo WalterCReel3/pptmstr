@@ -1,0 +1,49 @@
+scratch: $TMPDIR/b1-readback-z1ty1_pq
+python 3.11.2
+build: /home/wreel/.pptmstr/worktrees/pptmstr/chore-refactor-work; before B1: 3d57bb4
+2. a board log this build wrote: every kind, awkward values
+  ok   what this build wrote is byte-for-byte golden[board] (66af79e's) -- 133 files
+  ok   this build reads back what it appended (133 records)
+  ok   each record read back re-encodes to its file's bytes
+  ok   a log appended from what was read is byte-for-byte the first (names and bytes) -- 133 files, 23538 bytes
+  ok   every Known kind and RecordingStopped and Unrecognised appear -- 23
+5. a channel log this build wrote, through FileChannels.append
+  ok   what this build wrote is byte-for-byte golden[channel] (66af79e's) -- 19 files
+  ok   this build reads back the facts appended (19)
+  ok   each file is the fact's encoding, byte for byte
+2-7. every fixture, read by both trees
+ 2.
+  ok   2. every kind
+ 3.
+  ok   3. hand-written files no current append produces
+ 4.
+  ok   4. torn
+  ok   4. missing ordinal
+  ok   4. not json
+  ok   4. not an object
+  ok   4. no kind
+  ok   4. time not a number
+  ok   4. time too large
+  ok   4. field of the wrong shape
+  ok   4. required field missing
+  ok   4. not utf-8
+  ok   4. nested too deep
+  ok   4. over the size limit
+  ok   4. a symlink under a record's name
+  ok   4. a directory under a record's name
+  ok   4. a fifo under a record's name
+  ok   4. temp files and foreign names beside
+  ok   4. unlistable
+ 5.
+  ok   5. every link fact
+  ok   5. damaged channel log: members not a list
+  ok   5. damaged channel log: charter missing
+  ok   5. damaged channel log: time not a number
+  ok   5. damaged channel log: torn
+ 6.
+  ok   6. board records in a channel's directory
+ 6b. 73 variants: read, judge, owes_close, and what the sweep appends
+  ok   no 6b variant differs between the trees (0 of 73)
+  ok   reading changed no board fixture
+
+0 failed

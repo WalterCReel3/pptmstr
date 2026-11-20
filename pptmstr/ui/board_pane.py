@@ -133,22 +133,19 @@ from typing import TypeVar, assert_never
 from imgui_bundle import icons_fontawesome_6 as fa
 from imgui_bundle import imgui
 
-from ..board import (
+from ..board.rows import (
     UNDELIVERABLE,
     BoardConcern,
     BoardTask,
-    basis_label,
     board_concerns,
     board_tasks,
     ended_label,
     foreign_wait_label,
     has_board,
-    incident_marker,
-    not_run_label,
-    property_label,
     stale_label,
     version_label,
 )
+from ..board.words import basis_label, incident_marker, not_run_label, property_label
 from ..bridge import Bridge
 from ..intents import TaskAmended, TaskClosed
 from ..model import (
@@ -168,6 +165,7 @@ from ..model import (
 )
 from ..theme import Color, P
 from . import typeset, widgets
+from .clip import clip
 from .focus import FocusState
 from .typeset import Kind, Part, Weight
 from .widgets import CTRL_ENTER_SUBMITS, closed_line, ellipsis, multiline_input, section
@@ -1867,7 +1865,7 @@ def result_heading(row: BoardTask) -> str:
 
     Attributed rather than bare because a result is the claimer's own report of its
     own work, and it reached the board without the review a specification and a
-    note both had (``approval._BUS_AUTO``). The operator reading it here is the
+    note both had (``gate.tools.BUS_AUTO``). The operator reading it here is the
     first person to see it.
 
     On a row the operator closed it is the operator's and reports no work, and
@@ -1999,7 +1997,7 @@ def blocked_label(row: BoardTask, limit: int = _MAX_BLOCKED_IDS) -> str:
     An id another session's task has is neither: it was declared, on a board
     this one cannot see, and "never declared" would send the lead to declare an
     id that is refused. It is marked as what it is, and the row's own line says
-    what ends the wait (``board.foreign_wait_label``).
+    what ends the wait (``board.rows.foreign_wait_label``).
 
     Bounded like everything else here, and says so when it bites.
     """
@@ -2054,7 +2052,7 @@ def concern_label(row: BoardConcern) -> str:
     keep, and the one nothing else in the UI records after the approval is gone.
 
     A concern waiting for a party that is not running says that in place of
-    "waiting" (``board.UNDELIVERABLE``): nothing will deliver it.
+    "waiting" (``board.rows.UNDELIVERABLE``): nothing will deliver it.
     """
     return f"{participants_label(row)}  ({concern_state_label(row)}; {basis_label(row.basis)})"
 
@@ -2066,7 +2064,7 @@ def participants_label(row: BoardConcern) -> str:
 def concern_state_label(row: BoardConcern) -> str:
     """
     Where a concern got to, as its line says it: a wait for a party that is not
-    running is ``board.UNDELIVERABLE`` and not "waiting".
+    running is ``board.rows.UNDELIVERABLE`` and not "waiting".
     """
     state = UNDELIVERABLE if row.undeliverable else _CONCERN_STATE_LABEL[row.state]
     return state + ", edited by you" if row.edited else state
@@ -2106,7 +2104,7 @@ def concern_mark(row: BoardConcern) -> str:
     Nothing for the ordinary case, delivered as written, so that the rows that say
     something are the ones where something happened: still waiting to be read,
     withdrawn, or rewritten by the operator on its way through -- and first, one
-    its sender marked an incident (``board.incident_marker``).
+    its sender marked an incident (``board.words.incident_marker``).
     """
     parts = [incident_marker(True).strip().lower()] if row.incident else []
     if row.state is not ConcernState.DELIVERED:
@@ -2189,19 +2187,6 @@ def clipped_parts(text: str, limit: int) -> tuple[Part, ...]:
         note = f"... {dropped} more character(s) not shown"
         parts += (Part(note, Kind.WRAPPED, "text_dim"),)
     return parts
-
-
-def clip(text: str, limit: int) -> tuple[str, int]:
-    """
-    Bound a string, reporting how much was dropped.
-
-    Returns the count rather than appending an ellipsis, so the caller can render
-    the omission as its own coloured line. A silent cap in a pane whose premise is
-    "the board is readable" is worse than no pane.
-    """
-    if len(text) <= limit:
-        return text, 0
-    return text[:limit], len(text) - limit
 
 
 def bound_rows(rows: Sequence[_T], limit: int, *, tail: bool = False) -> tuple[tuple[_T, ...], int]:

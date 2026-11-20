@@ -1302,6 +1302,11 @@ _FONT_SIZE = 16.0
 # so a root-level assets folder would be absent from an installed copy and the bold
 # face would silently degrade for everyone who did not clone the repo.
 _ASSETS = Path(__file__).resolve().parent / "assets"
+BOLD_FILE = _ASSETS / "fonts" / "Inconsolata-Bold.ttf"
+"""
+The vendored bold monospace: the chrome's bold face, and the text library's too
+(``typeset.load_fonts``).
+"""
 _FACES: dict[Face, imgui.ImFont | None] = {}
 
 
@@ -1329,6 +1334,12 @@ def load_fonts() -> None:
     the backend exists but before the first frame, and the runner owns that window.
     hello_imgui applies the DPI factor, which is why nothing here hard-codes 2x.
 
+    These are the atlas's first two fonts and nothing may load before them (the
+    Fonts[0] rule below). The text library's faces go after them, in the same
+    callback, and only behind a body face that loaded:
+    ``typeset.load_application_fonts``, since this module is beneath ``ui`` and
+    does not import it.
+
     A missing asset must not be fatal -- ImGui's built-in font is ugly but renders.
     It has no FontAwesome glyphs, though, so STATE_GLYPH degrades to tofu while
     STATE_LABEL keeps carrying the meaning. That is the redundancy earning itself.
@@ -1354,36 +1365,6 @@ def load_fonts() -> None:
     # No icons merged into bold: FontAwesome codepoints only ever reach the UI
     # through STATE_GLYPH, which draws in the body face.
     _FACES[Face.BOLD] = _load_face("fonts/Inconsolata-Bold.ttf", icons=False)
-    # Only behind a UI font that loaded. With none, the first of these would be
-    # Fonts[0] and every widget in the application would be set in Roboto.
-    if _FACES[Face.BODY] is not None:
-        _load_typeset_faces()
-
-
-def _load_typeset_faces() -> None:
-    """
-    Give the text library its faces, after the two above.
-
-    After, and last in hello_imgui's ``load_additional_fonts``, because of the
-    rule in ``load_fonts``: the library puts a proportional face and a second copy
-    of Inconsolata without the icons on the atlas, and either one as Fonts[0]
-    would become the font of every widget. Whatever ``Settings.typeset`` says:
-    ``ui.typeset.gate`` has the measurement.
-
-    Imported here rather than at the top: ``ui.typeset`` imports this module for
-    its colours. ``typeset.load_fonts`` answers false for a library that is
-    absent, refused or failing and keeps the sentence for
-    ``typeset.unavailable_reason()``; it is not meant to raise. This is
-    hello_imgui's callback all the same, where an exception that escapes takes
-    the application down, so one that does is handed to the gate as the reason:
-    the same non-fatal degradation as a missing face above, and said.
-    """
-    from .ui import typeset
-
-    try:
-        typeset.load_fonts(_ASSETS / "fonts" / "Inconsolata-Bold.ttf")
-    except Exception as failure:
-        typeset.gate.failed(failure)
 
 
 def _load_face(asset: str, *, icons: bool) -> imgui.ImFont | None:

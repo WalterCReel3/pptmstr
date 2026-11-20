@@ -10,11 +10,13 @@ something a reader trips over.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from pptmstr import brief
+from pptmstr import brief, ondisk
 
 
 def entries(directory: Path) -> tuple[brief.BriefEntry, ...]:
@@ -159,6 +161,54 @@ def test_an_entry_never_overwrites_one_that_is_already_there(tmp_path: Path) -> 
     assert (tmp_path / "002-amendment.md").exists()
 
 
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root reads a mode-0 file, so the entry cannot be made unreadable",
+)
+def test_an_entry_that_cannot_be_read_still_holds_its_ordinal(tmp_path: Path) -> None:
+    """
+    A reader skips an entry it cannot open, so a writer that numbered from what it
+    read would offer that ordinal again. With a different kind the name differs, the
+    link succeeds, and two entries share a number.
+
+    Made unreadable by its mode rather than a patched read, so the hazard is the one
+    a real directory presents whatever call the reader opens it with.
+    """
+    brief.write_entry(tmp_path, "first")
+    blocked = brief.write_entry(tmp_path, "second", kind="correction")
+    os.chmod(blocked, 0)
+    try:
+        assert [e.ordinal for e in entries(tmp_path)] == [0]
+
+        written = brief.write_entry(tmp_path, "third")
+        again = brief.write_entry(tmp_path, "fourth", kind="correction")
+    finally:
+        os.chmod(blocked, 0o600)
+
+    assert (written.name, again.name) == ("002-amendment.md", "003-correction.md")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "000-premises.md",
+        "001-correction.md",
+        "002-amendment.md",
+        "003-correction.md",
+    ]
+
+
+def test_an_entry_that_is_not_utf8_does_not_block_a_later_write(tmp_path: Path) -> None:
+    """
+    The entry is still on disk and still an entry by name, so it keeps its ordinal
+    and the next write lands above it.
+    """
+    brief.write_entry(tmp_path, "first")
+    (tmp_path / "001-amendment.md").write_bytes(b"\xff\xfe not utf-8\n")
+
+    written = brief.write_entry(tmp_path, "second")
+
+    assert written.name == "002-amendment.md"
+    assert written.read_text(encoding="utf-8") == "second\n"
+    assert (tmp_path / "001-amendment.md").read_bytes() == b"\xff\xfe not utf-8\n"
+
+
 def test_an_entry_reads_back_as_it_was_written(tmp_path: Path) -> None:
     brief.write_entry(tmp_path, "the parser is fixed-width\n\nevery field is positional")
 
@@ -210,7 +260,7 @@ def test_a_temp_file_mid_write_is_not_something_a_reader_trips_over(tmp_path: Pa
     in flight, so a reader that failed on the temp file would fail then.
     """
     brief.write_entry(tmp_path, "real")
-    (tmp_path / ".entry-abc123.md").write_text("half a rec", encoding="utf-8")
+    (tmp_path / f"{ondisk.TEMP_PREFIX}abc123.tmp").write_text("half a rec", encoding="utf-8")
 
     assert [e.ordinal for e in entries(tmp_path)] == [0]
 
@@ -336,21 +386,126 @@ def test_a_racing_writer_does_not_destroy_the_entry_that_beat_it(
     computed name is a file that listing already saw.
 
     The race is injected instead of waited for. A stale listing is exactly what a
-    writer holds when another one lands between its `read_entries` and its
-    `os.replace` -- and `os.replace` onto an existing name destroys it silently,
-    with no error to notice afterwards.
+    writer holds when another one lands between its listing and the link that names
+    its file; the link refuses an existing name, so the late writer takes the next
+    ordinal instead of replacing the entry that beat it.
     """
     brief.write_entry(tmp_path, "first")
     winner = brief.write_entry(tmp_path, "the entry that got there first")
 
-    stale = brief.read_entries(tmp_path)[:1]
-    monkeypatch.setattr(brief, "read_entries", lambda _d: stale)
+    monkeypatch.setattr(brief, "_next_ordinal", lambda _d: 1)
 
     brief.write_entry(tmp_path, "the racer")
 
     monkeypatch.undo()
     assert winner.read_text(encoding="utf-8").strip() == "the entry that got there first"
     assert [e.ordinal for e in brief.read_entries(tmp_path)] == [0, 1, 2]
+
+
+def test_two_writers_that_chose_the_same_name_both_keep_their_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The race a check-then-place cannot close: both writers have looked, both found
+    ``001`` free, and only then does either put its file there.
+
+    Forced rather than waited for. Whichever call places the racer's file -- a
+    rename or a link -- first lets a second writer run to completion, so the second
+    writer's listing is taken while the racer already holds its chosen name and has
+    not yet placed it. A placement that overwrites loses the second writer's entry;
+    one that refuses a taken name sends the racer to the next ordinal.
+    """
+    brief.write_entry(tmp_path, "first")
+
+    interleaved: list[Path] = []
+    entered: list[bool] = []
+
+    def _interleaving(real: Callable[..., None]) -> Callable[..., None]:
+        def place(src: object, dst: object, *args: Any, **kwargs: Any) -> None:
+            if not entered:
+                entered.append(True)
+                interleaved.append(brief.write_entry(tmp_path, "the writer that slipped in"))
+            return real(src, dst, *args, **kwargs)
+
+        return place
+
+    monkeypatch.setattr(os, "replace", _interleaving(os.replace))
+    monkeypatch.setattr(os, "link", _interleaving(os.link))
+
+    racer = brief.write_entry(tmp_path, "the racer")
+
+    monkeypatch.undo()
+    (slipped_in,) = interleaved
+    assert slipped_in.name == "001-amendment.md"
+    assert slipped_in.read_text(encoding="utf-8") == "the writer that slipped in\n"
+    assert racer.name == "002-amendment.md"
+    assert racer.read_text(encoding="utf-8") == "the racer\n"
+    assert [e.body for e in entries(tmp_path)] == [
+        "first",
+        "the writer that slipped in",
+        "the racer",
+    ]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "000-premises.md",
+        "001-amendment.md",
+        "002-amendment.md",
+    ]
+
+
+def test_a_writer_that_loses_the_premises_writes_an_amendment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The kind is part of the name, so it is chosen again for each ordinal tried. A
+    writer that kept the name it picked for ``000`` would land a second
+    ``premises`` at ``001``, and a reader would be told the brief has two.
+    """
+    entered: list[bool] = []
+    real_link = os.link
+
+    def link(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if not entered:
+            entered.append(True)
+            brief.write_entry(tmp_path, "the writer that slipped in")
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", link)
+
+    racer = brief.write_entry(tmp_path, "the racer")
+
+    monkeypatch.undo()
+    assert racer.name == "001-amendment.md"
+    assert [(e.ordinal, e.kind, e.body) for e in entries(tmp_path)] == [
+        (0, "premises", "the writer that slipped in"),
+        (1, "amendment", "the racer"),
+    ]
+
+
+def test_an_entry_is_on_the_device_before_it_has_a_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Without the flush a power loss can leave an entry's name over a short or empty
+    file, which a reader takes for the premise as written. Asserted as an order of
+    calls because "durable" is not observable from inside the process that wrote it.
+    """
+    calls: list[str] = []
+    real_fsync, real_link = os.fsync, os.link
+
+    def fsync(fd: int) -> None:
+        calls.append("fsync")
+        real_fsync(fd)
+
+    def link(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(f"link {Path(dst).name}")
+        real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "link", link)
+
+    brief.write_entry(tmp_path, "first")
+
+    assert calls == ["fsync", "link 000-premises.md"]
 
 
 # -- counting, for the claim reply ------------------------------------------------
@@ -405,7 +560,7 @@ def test_counting_an_empty_or_missing_directory_is_zero(tmp_path: Path) -> None:
 
 def test_counting_ignores_files_that_are_not_entries(tmp_path: Path) -> None:
     brief.write_entry(tmp_path, "real")
-    (tmp_path / ".entry-abc.md").write_text("mid-write", encoding="utf-8")
+    (tmp_path / f"{ondisk.TEMP_PREFIX}abc.tmp").write_text("mid-write", encoding="utf-8")
     (tmp_path / "notes.md").write_text("not an entry", encoding="utf-8")
 
     assert brief.count_entries(tmp_path) == 1

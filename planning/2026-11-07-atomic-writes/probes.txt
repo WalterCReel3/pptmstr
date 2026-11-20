@@ -1,0 +1,6 @@
+q1 unreadable 001-correction.md: wrote 001-amendment.md; names now ['000-premises.md', '001-amendment.md', '001-correction.md']
+q1 explicit kind after it: wrote 002-correction.md
+q2 raised UnicodeDecodeError; directory holds ['000-premises.md', '001-amendment.md']
+q3 settings.json mode 644 -> 600
+q4 layout_ini: 'DIGEST added beside BOARD in 1 saved layout(s) of /tmp/claude-1000/atomic-writes-e6ypha8o/imgui.ini'; entry added: True; a bare LF in the file: False; bytes == text.encode: True
+q4 settings: json.dump + newline == dumps+newline encoded: True

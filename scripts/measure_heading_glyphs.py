@@ -11,7 +11,7 @@ nothing about how anything looks.
 
 ## The window
 
-The real runner with ``pptmstr.theme.load_fonts`` as its font callback and
+The real runner with ``typeset.load_application_fonts`` as its font callback and
 ``typeset.pre_frame`` before every frame, as ``pptmstr/app.py`` wires them. The
 text is drawn in a child window with the flags of the context log's
 (``transcript_pane._draw_typeset``).
@@ -669,7 +669,7 @@ def run_window(title: str, gui: Any, pre_frame: Any) -> None:
     )
     params.ini_disable = True
     params.fps_idling.enable_idling = False
-    params.callbacks.load_additional_fonts = theme.load_fonts
+    params.callbacks.load_additional_fonts = typeset.load_application_fonts
     params.callbacks.pre_new_frame = pre_frame
     params.callbacks.show_gui = gui
     # imtypeset's context goes before the Dear ImGui context does.

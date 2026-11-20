@@ -15,7 +15,7 @@ from typing import Any, NamedTuple
 import pytest
 from imgui_bundle import imgui as _real_imgui
 
-from pptmstr.approval import summarize
+from pptmstr.gate.park import summarize
 from pptmstr.model import (
     AgentRecord,
     AgentState,
@@ -119,7 +119,7 @@ def test_a_sub_agents_call_is_titled_by_its_session_and_qualified_by_itself() ->
 #
 # Every spawn parks, so the operator answers each one individually. Without a
 # running total twelve individually reasonable yesses add up to a fleet nobody
-# chose -- and `approval.summarize` cannot supply the number, because it is pure and
+# chose -- and `gate.park.summarize` cannot supply the number, because it is pure and
 # is handed a tool name and its arguments and nothing else.
 
 
@@ -271,7 +271,7 @@ def test_a_non_spawn_obligation_does_not_move_a_spawns_ordinal() -> None:
 
 def test_both_spellings_of_a_spawn_are_counted() -> None:
     """
-    ``Agent`` and ``Task`` are one tool with two names and ``approval._REVIEW``
+    ``Agent`` and ``Task`` are one tool with two names and ``gate.tools.REVIEW``
     holds both. A marker that knew only one would be absent for half the spawns and
     would mis-ordinal the other half.
     """
@@ -286,22 +286,22 @@ def test_both_spellings_of_a_spawn_are_counted() -> None:
 def test_every_tool_the_marker_counts_is_one_that_parks() -> None:
     """
     ``_SPAWN_TOOLS`` spells the two names rather than importing them, because
-    ``approval.py`` has no spawn set to import -- it has a *review* set, and these
+    ``gate/tools.py`` has no spawn set to import -- it has a *review* set, and these
     are two of its members. The duplication is deliberate and the comment on it says
     so, which by STYLE.md §3 is exactly the kind that has to be pinned or the two
     copies drift silently.
 
-    Both directions of drift are quiet. A name here that is not in ``_REVIEW`` is a
+    Both directions of drift are quiet. A name here that is not in ``REVIEW`` is a
     spawn the marker counts and the gate never parks, so the operator is charged for
-    an agent they were never asked about; ``_REVIEW`` losing a spelling leaves
+    an agent they were never asked about; ``REVIEW`` losing a spelling leaves
     ``classify`` still requiring approval by its unknown-tool fallback, so nothing
     downstream notices either. It is pinned in this file rather than in
-    ``test_approval.py`` because the copy is the thing that can be wrong: ``_REVIEW``
+    ``test_approval.py`` because the copy is the thing that can be wrong: ``REVIEW``
     is the original, and it is this module's premise that depends on it.
     """
-    from pptmstr.approval import _REVIEW
+    from pptmstr.gate.tools import REVIEW
 
-    assert inbox._SPAWN_TOOLS <= _REVIEW
+    assert inbox._SPAWN_TOOLS <= REVIEW
 
 
 def test_the_ordinal_reads_as_english_past_ten() -> None:

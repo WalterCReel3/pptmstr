@@ -568,7 +568,7 @@ def _containment(state: Any, fixtures: Path) -> Steps:
     modal that was opened on the ordinary rung first -- which is the order an
     operator meets it in, since a launch puts the dial back.
     """
-    from pptmstr.approval import Policy
+    from pptmstr.gate.policy import Policy
 
     layouts = _layouts(fixtures)
     draft = state.launcher

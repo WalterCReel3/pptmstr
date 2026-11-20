@@ -15,9 +15,9 @@ import pathlib
 
 import pytest
 
-from pptmstr.approval import Policy, requires_containment
 from pptmstr.bridge import Bridge
 from pptmstr.driver import AgentSession, UncontainedAutonomy
+from pptmstr.gate.policy import Policy, requires_containment
 from pptmstr.ui import gate_menu
 from pptmstr.ui.gate_menu import Kind, Row, rows
 from pptmstr.ui.widgets import gate_adds

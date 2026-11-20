@@ -6,9 +6,11 @@ deciding about, and nothing here looks at the filesystem the command names.
 
 This is the allowlist behind the `PERMISSIVE` policy
 (``planning/2026-08-11-research-phase-auto-approval.md`` §2, scopes (b) and
-(c)). It sits beside ``approval.py`` rather than inside it because the table
-plus the reason attached to each row is larger than the whole of that module,
-and ``approval.py``'s docstring commits it to being a small policy file.
+(c)). It is a module of its own, not part of ``gate.classify``, because it is
+pure where the gate's classification is not -- ``gate.reach`` resolves paths on
+the disk -- and because its splitter has readers besides the gate: ``command``
+and ``commandtext`` import ``_split_segments`` from here, and neither imports
+``pptmstr.gate``.
 
 08-11 recommended (b) without (c) and deferred pipelines on the grounds that
 "the quoting edge cases are where it will be wrong". That deferral was reversed
@@ -334,7 +336,7 @@ class _Rule:
 #
 # The 09-17 shrink was argued from danger alone, before any of these rows had
 # been measured against what a session actually runs. `Read`, `Glob` and
-# `Grep` auto-approve natively at every policy (`approval._AUTO`), so the
+# `Grep` auto-approve natively at every policy (`gate.tools.AUTO`), so the
 # reasoning was that the Bash table only has to cover what those three cannot
 # do -- which is `git`, plus trivial inspection -- and that search and
 # traversal binaries buy a session almost nothing on top of that. Measured

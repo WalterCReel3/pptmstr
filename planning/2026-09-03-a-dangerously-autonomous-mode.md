@@ -1348,3 +1348,45 @@ make and this record will not make for it.
 
 *(Distinct from the size of `read_board`'s output, which is a separate and measured problem boarded
 on its own.)*
+
+**Spend has no stop either.** *Carried from
+[`2026-08-10-layout-proposals.md`](archive/2026-08-10-layout-proposals.md),
+[`2026-08-10-launcher-as-a-modal.md`](archive/2026-08-10-launcher-as-a-modal.md) and
+[`2026-08-10-research-sessions-under-the-inbox.md`](archive/2026-08-10-research-sessions-under-the-inbox.md),
+2026-11-06.* `max_budget_usd` is still unwired: nothing in `pptmstr/` names it, so
+`driver._options()` never passes it and HEALTH reports spend it cannot cap. Those records left it
+as driver semantics (thread it through the launch, `AgentSession.__init__` and `_options()`) and put
+the control in FOCUS/HEALTH beside the spend figure it constrains. With an operator watching, visible
+spend was an acceptable downgrade from invisible spend. Unattended, it is the same gap as the
+declaration volume above: nothing bounds it.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._AUTO` | `gate.tools.AUTO` |
+| `approval._REVIEW` | `gate.tools.REVIEW` |
+| `approval._BUS_AUTO` | `gate.tools.BUS_AUTO` |
+| `approval._BUS_DECLARE` | `gate.tools._BUS_DECLARE` |
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py` and `sandbox.py`. B5's last
+step (`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what
+was left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`,
+`park`) and deleted it, and moved `sandbox.py` to `pptmstr/gate/sandbox.py`
+unchanged. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.classify` | `gate.classify.classify` |
+| `approval.py` | deleted; its parts are `pptmstr/gate/rows.py`, `reach.py`, `classify.py` and `park.py`, beside the leaves |
+| `containment_settings` (in `sandbox.py`) | `gate.sandbox.containment_settings` |
+| `sandbox.DENIED_CREDENTIAL_FILES` | `gate.sandbox.DENIED_CREDENTIAL_FILES` |
+| `sandbox.py` | `gate/sandbox.py` |

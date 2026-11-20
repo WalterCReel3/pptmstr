@@ -17,9 +17,11 @@ reason: a reader renders a consistent prefix while the writer keeps appending.
 atomic, so appending to a single document lets a reader catch a partial record, and
 rewriting a whole document per turn is what the 08-14 record calls *"not a slow path,
 it is a corruption path"*. Each entry is written to a temp file in the same directory
-and renamed over its target -- ``settings.save``'s primitive, named there as the right
-one. No locking, no partial reads, no O(n^2). Directory listing gives the
-consistent-prefix property ``Transcript`` gets from ``published_length``.
+and linked to a name that does not yet exist -- ``ondisk.create_once`` -- so an
+entry appears whole or not at all and is never written over. Its number comes from
+the names in a listing, not from the entries read. No locking, no partial reads, no
+O(n^2). Directory listing gives the consistent-prefix property ``Transcript`` gets
+from ``published_length``.
 
 **There is no file called ``brief.md``, deliberately.** Append-only plus permitted
 contradiction means a superseded premise is still on disk and still readable, so a
@@ -37,13 +39,15 @@ whole record is organised around, one layer up.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import os
 import re
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import boardlog, settings
+from . import settings
+from .journal import files
+from .ondisk import create_once
 
 # The first entry, and the only one that is not an amendment. Named rather than
 # numbered at the call site so "is this the premises" is one comparison.
@@ -116,9 +120,9 @@ def default_root() -> Path:
     CLI's transcript slug cannot be reproduced past 200 characters, where it carries
     a hash the CLI and the SDK compute differently.
 
-    **A root of its own, not ``sessions/<id>/brief``.** ``sandbox`` denies the whole
+    **A root of its own, not ``sessions/<id>/brief``.** ``gate.sandbox`` denies the whole
     ``sessions`` tree to a contained ``Bash`` command, the session's own directory
-    included, and ``approval.records_read`` denies one session another's directory
+    included, and ``gate.reach.records_read`` denies one session another's directory
     there. A worker lists and reads its premises, and a fork reads its parent's,
     so either denial would cut a team off from its brief.
 
@@ -135,13 +139,13 @@ def default_root() -> Path:
 def session_dir(session_id: str, root: Path | None = None) -> Path | None:
     """
     Where a session's brief is written: ``<root>/<session id>/``, or None for an id
-    that is not one directory name (``boardlog.session_dir`` has the rule).
+    that is not one directory name (``files.session_dir`` has the rule).
 
     Only a default -- ``LaunchSpec.brief`` carries whatever path the operator gave,
     which is what lets a fork inherit its parent's brief instead of deriving an
     empty one.
     """
-    return boardlog.session_dir(default_root() if root is None else root, session_id)
+    return files.session_dir(default_root() if root is None else root, session_id)
 
 
 def legacy_root() -> Path:
@@ -197,47 +201,60 @@ def write_entry(
     directory: Path, body: str, *, kind: str | None = None, supersedes: tuple[int, ...] = ()
 ) -> Path:
     """
-    Append one entry. Returns the path written.
+    Append one entry. Never overwrites one, whoever else is writing. Returns the
+    path written.
 
-    The ordinal is taken from what is already on disk, so two writers racing produce
-    two entries rather than one overwriting the other -- ``os.replace`` onto a name
-    that already exists would silently destroy an entry, and a name derived from a
-    count is exactly how that happens. The loop retries on collision rather than
-    trusting the listing it just took.
+    The text is staged in the same directory, flushed to the device, and then
+    *linked* to its name by ``ondisk.create_once``, so a name appears complete or
+    not at all and a name that exists is refused atomically, in the kernel. The
+    writer that lost the name takes the next ordinal, so two writers racing
+    produce two entries.
+
+    The first ordinal tried is one past the highest in a listing taken here, and a
+    collision only moves up, so an entry never lands below one that was there when
+    its write began.
 
     ``kind`` defaults to ``PREMISES`` for the first entry and ``AMENDMENT`` after,
     because that is what the ordinal already implies and a caller that had to state
-    it is a caller that can state it wrongly.
+    it is a caller that can state it wrongly. The name is chosen again for each
+    ordinal tried, so a writer that loses ``000`` writes ``001-amendment``. The
+    link refuses only the exact name, so the kind is part of what collides: writers
+    on defaults always agree on the name for an ordinal and cannot share one, but
+    two that name different kinds can land on the same ordinal.
+
+    The directory entry is not flushed: losing the newest names to a power loss
+    leaves a consistent prefix. A process killed inside this leaves its staged
+    ``ondisk.TEMP_PREFIX`` file, which no reader takes for an entry; it is not
+    removed from here, because another writer's write in flight is a file of that
+    shape.
 
     Raises ``OSError`` rather than swallowing it, unlike ``settings.save``. A theme
     that fails to persist costs a preference; premises that fail to persist are
     invisible until a worker acts on their absence, and the operator has to be told.
     """
     directory.mkdir(parents=True, exist_ok=True)
-    existing = read_entries(directory)
-    ordinal = (existing[-1].ordinal + 1) if existing else 0
+    names = (
+        f"{ordinal:0{_ORDINAL_WIDTH}d}-{kind or (PREMISES if ordinal == 0 else AMENDMENT)}.md"
+        for ordinal in itertools.count(_next_ordinal(directory))
+    )
+    header = ""
+    if supersedes:
+        header = f"supersedes: {', '.join(f'{o:0{_ORDINAL_WIDTH}d}' for o in supersedes)}\n\n"
+    data = (header + body.rstrip("\n") + "\n").encode("utf-8")
+    return create_once(directory, names, data).path
 
-    while True:
-        name = kind or (PREMISES if ordinal == 0 else AMENDMENT)
-        target = directory / f"{ordinal:0{_ORDINAL_WIDTH}d}-{name}.md"
-        if not target.exists():
-            break
-        ordinal += 1
 
-    fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=".entry-", suffix=".md")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            if supersedes:
-                handle.write(
-                    f"supersedes: {', '.join(f'{o:0{_ORDINAL_WIDTH}d}' for o in supersedes)}\n\n"
-                )
-            handle.write(body.rstrip("\n") + "\n")
-        os.replace(tmp, target)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
-    return target
+def _next_ordinal(directory: Path) -> int:
+    """
+    One past the highest ordinal named in the directory, or 0 for none.
+
+    From the names alone, not from ``read_entries``: an entry that cannot be opened
+    or decoded is skipped by a reader but still holds its name, and numbering from
+    what was read would offer that ordinal again or fail on the bytes. Raises
+    ``OSError`` if the directory cannot be listed, as ``write_entry`` does.
+    """
+    ordinals = [int(m.group(1)) for m in map(_ENTRY.match, os.listdir(directory)) if m]
+    return max(ordinals) + 1 if ordinals else 0
 
 
 def count_entries(directory: Path) -> int:
@@ -270,9 +287,9 @@ def read_entries(directory: Path) -> tuple[BriefEntry, ...]:
     directory yet" would be distinguishing two spellings of the same fact.
 
     Files that do not match the naming are skipped rather than reported. The
-    directory holds temp files mid-write (``.entry-*``), and a reader that tripped
-    over one would fail exactly while a write was in flight -- which is the moment
-    the consistent-prefix property exists to protect.
+    directory holds staged files mid-write (``ondisk.TEMP_PREFIX``), and a reader
+    that tripped over one would fail exactly while a write was in flight -- which
+    is the moment the consistent-prefix property exists to protect.
     """
     try:
         names = sorted(p.name for p in directory.iterdir())

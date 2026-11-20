@@ -3,21 +3,21 @@ The three bus tools of the break-glass command, as handlers and the words of
 their replies: ``request_command``, ``read_commands``, ``withdraw_command``.
 
 **Nothing here registers a tool or decides who is offered one.**
-``bus.build_server`` wraps each of ``TOOLS`` for a session whose CLI process was
-started with containment and for no other, and ``bus.COMMAND_TOOLS`` is the
-names the gate stamps for it. A session with no containment never reaches a
-handler in this module.
+``bus.build_server`` is handed ``TOOLS`` by its caller (``driver``) and wraps
+each for a session whose CLI process was started with containment and for no
+other, and ``bus.COMMAND_TOOLS`` is the names the gate stamps for it. A session
+with no containment never reaches a handler in this module.
 
 Three authors' texts can stand in one reply, and each has a mark of its own
 that starts every line of it and no line of anybody else's:
 
-==========  ====================================================  ==============
-``| ``      what an agent wrote: the command asked, the reason,   ``bus._QUOTE``
+==========  ====================================================  ===================
+``| ``      what an agent wrote: the command asked, the reason,   ``replies._QUOTE``
             what it expects
-``> ``      what the operator typed: the string they ran          ``bus._ANSWER``
+``> ``      what the operator typed: the string they ran          ``replies._ANSWER``
             instead, the reason they refused
 ``= ``      what a program wrote: the end of the output           ``_OUTPUT``
-==========  ====================================================  ==============
+==========  ====================================================  ===================
 
 The third is the one this module adds. Output is the one text here that nobody
 read before it was stored: the operator approved a command, not what it would
@@ -38,39 +38,12 @@ The decisions this builds are in
 from __future__ import annotations
 
 import time
-import uuid
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
 from typing import Any, Protocol, assert_never
 
-from . import commandfile, drawable
+from . import commandfile, drawable, ids
 from .bridge import Bridge
-
-# The marks, the helpers that lay a text out behind one, and the bound every
-# reply is held to are the bus's. They are imported and not spelled again: a
-# second spelling of a mark is two marks the day one of them changes.
-from .bus import (
-    _ANSWER,
-    _LIST_NOTICE_ROOM,
-    _MAX_BOARD_CHARS,
-    _MAX_ROLE_CHARS,
-    _QUOTE,
-    _QUOTE_LEGEND,
-    MAX_ID_CHARS,
-    MAX_PATH_CHARS,
-    WAKE_SAID,
-    WAKE_SAID_SUBAGENT,
-    _age,
-    _argument,
-    _cost,
-    _named,
-    _one_line,
-    _quoted,
-    _schema,
-)
 from .command import (
-    ID_HEX_CHARS,
-    ID_TIME_FORMAT,
     MAX_COMMAND_CHARS,
     MAX_COMMAND_LINES,
     MAX_COMMAND_SEGMENTS,
@@ -100,7 +73,26 @@ from .command import (
 from .commandtext import visible
 from .effects import CommandsDelivered, CommandSettled
 from .intents import CommandRequested, CommandsRead, CommandWithdrawn
-from .model import MAX_COMMAND_REFUSAL_CHARS, CommandRefusal, NodeId
+from .model import MAX_COMMAND_REFUSAL_CHARS, MAX_ID_CHARS, CommandRefusal, NodeId
+from .replies import (
+    _ANSWER,
+    _LIST_NOTICE_ROOM,
+    _MAX_BOARD_CHARS,
+    _MAX_ROLE_CHARS,
+    _QUOTE,
+    _QUOTE_LEGEND,
+    MAX_PATH_CHARS,
+    WAKE_SAID,
+    WAKE_SAID_SUBAGENT,
+    Tool,
+    _age,
+    _argument,
+    _cost,
+    _named,
+    _one_line,
+    _quoted,
+    _schema,
+)
 
 # -- the marks ---------------------------------------------------------------------
 
@@ -108,7 +100,7 @@ from .model import MAX_COMMAND_REFUSAL_CHARS, CommandRefusal, NodeId
 _OUTPUT = "= "
 
 # One legend for each mark, said once ahead of the first line that carries it.
-# ``bus._QUOTE_LEGEND`` is the one for ``| ``. The bus's two legends for ``> ``
+# ``replies._QUOTE_LEGEND`` is the one for ``| ``. The bus's two legends for ``> ``
 # each name the one thing the operator typed in the reply they stand in -- an
 # answer, a closing reason -- and neither is what the operator types here.
 OPERATOR_LEGEND = (
@@ -153,9 +145,9 @@ MAX_OUTPUT_REPLY_CHARS = 4_600
 # sentences of this module's own -- what the record of an end adds
 # (``_remarks``) among them -- and the path of the log.
 #
-# The last term of the sum that makes that reply fit ``bus._MAX_BOARD_CHARS``
+# The last term of the sum that makes that reply fit ``replies._MAX_BOARD_CHARS``
 # by construction. Laid out behind a mark, a text of n characters costs at most
-# 3n + 2, as in ``bus._DECISION_FRAME_CHARS``. Each text is cut to its bound
+# 3n + 2, as in ``decisiontext._DECISION_FRAME_CHARS``. Each text is cut to its bound
 # where it is laid out (``_block``), so the sum holds for a record that came
 # out of a file as well as for one the store accepted:
 #
@@ -744,7 +736,7 @@ def commands_text(
     Nothing here widens that. An id that is not among them gets
     ``_unreadable_text`` whether or not some other agent holds it.
 
-    Both forms fit ``bus._MAX_BOARD_CHARS``: the read by id by what it may hold
+    Both forms fit ``replies._MAX_BOARD_CHARS``: the read by id by what it may hold
     (``_COMMAND_FRAME_CHARS``), and the list by being filled against the bound
     and saying what it left out.
 
@@ -897,9 +889,8 @@ async def request_command(
     # The wall clock: a command's stamps are written to files beside the
     # runner's own, and the frame's clock is monotonic.
     at = time.time()
-    stamp = time.strftime(ID_TIME_FORMAT, time.gmtime(at))
-    command_id = f"cmd-{stamp}-{uuid.uuid4().hex[:ID_HEX_CHARS]}"
-    request_id = f"k-{uuid.uuid4().hex[:12]}"
+    command_id = ids.command(at)
+    request_id = ids.request()
     future = bridge.ask(
         request_id,
         CommandSettled(
@@ -968,7 +959,7 @@ async def read_commands(
     """
     wanted = str(args.get("command_id") or "").strip() or None
     now = time.time()
-    request_id = f"j-{uuid.uuid4().hex[:12]}"
+    request_id = ids.request()
     # The fallback is no answer at all: an empty tuple would say this agent may
     # read none, which nobody established.
     future = bridge.ask(request_id, CommandsDelivered(request_id=request_id, commands=None))
@@ -997,7 +988,7 @@ async def withdraw_command(
     """
     command_id = str(args.get("command_id") or "").strip()
     named = _named(command_id[:MAX_ID_CHARS])
-    request_id = f"x-{uuid.uuid4().hex[:12]}"
+    request_id = ids.request()
     future = bridge.ask(
         request_id,
         CommandSettled(
@@ -1020,18 +1011,6 @@ async def withdraw_command(
 
 
 # -- what the registration wires -----------------------------------------------------
-
-Handler = Callable[[Roles, Bridge, NodeId, dict[str, Any]], Awaitable[str]]
-
-
-@dataclass(frozen=True, slots=True)
-class Tool:
-    """One tool as ``bus.build_server`` announces it, and the handler behind it."""
-
-    name: str
-    description: str
-    schema: dict[str, Any]
-    handler: Handler
 
 
 REQUEST_COMMAND = Tool(
@@ -1119,7 +1098,7 @@ WITHDRAW_COMMAND = Tool(
     withdraw_command,
 )
 
-TOOLS: tuple[Tool, ...] = (REQUEST_COMMAND, READ_COMMANDS, WITHDRAW_COMMAND)
+TOOLS: tuple[Tool[Roles], ...] = (REQUEST_COMMAND, READ_COMMANDS, WITHDRAW_COMMAND)
 
 
 def _woken(command: Command) -> str:

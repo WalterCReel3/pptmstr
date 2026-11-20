@@ -94,8 +94,8 @@ def source_tree_of(package: str) -> str:
 
     **An installed package has no checkout and the package directory is the honest
     answer for it.** Its parent is ``site-packages``, a directory of other projects
-    rather than a tree of this one; what is being protected is the ``approval.py``
-    inside the package, and that is covered either way.
+    rather than a tree of this one; what is being protected is the gate
+    (``pptmstr/gate/``) inside the package, and that is covered either way.
 
     ``package`` is a directory, not a file, and the answer is resolved absolute so it
     can be passed straight to ``lies_inside_checkout`` as the checkout side.
@@ -121,7 +121,7 @@ def lies_inside_checkout(candidate: str, checkout: str) -> bool:
     worktree of ``checkout`` answers no here and the answer is about source files
     alone. ``LaunchSpec.cwd`` defaults to ``"."``, so the default
     launch would make pptmstr's own source the region an unattended agent may write,
-    and ``approval.py`` for the next launch is inside it. This is the question that
+    and the gate (``pptmstr/gate/``) for the next launch is inside it. This is the question that
     notices. What is done about a yes -- refuse the mode, or clone first -- is the
     caller's and is not decided here.
 

@@ -28,7 +28,8 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 
-from ..model import Channel, ChannelId, CommandOwed, NodeId, Obligation, Snapshot
+from ..channels.records import Channel, ChannelId
+from ..model import CommandOwed, NodeId, Obligation, Snapshot
 
 
 class Scope(enum.Enum):

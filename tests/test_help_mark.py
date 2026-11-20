@@ -25,7 +25,7 @@ import pytest
 from imgui_bundle import imgui
 
 from pptmstr import cli_version, sessionfile, templates, theme
-from pptmstr.approval import Policy
+from pptmstr.gate.policy import Policy
 from pptmstr.sessions import SessionRow
 from pptmstr.ui import launcher, resume_form, widgets
 from pptmstr.ui.launcher import LauncherState, SessionPicker

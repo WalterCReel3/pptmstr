@@ -180,7 +180,7 @@ Both found while grounding this, both by reading rather than by running:
    gate is built on it. Trust promotion is therefore entirely local state and
    needs no SDK call. That row should read "—". `_options()` sets
    `permission_mode="dontAsk"` once (`driver.py:652`) and
-   `planning/2026-08-10-launcher-as-a-modal.md:51` records that the parking
+   `planning/archive/2026-08-10-launcher-as-a-modal.md:51` records that the parking
    design assumes it; nothing should be changing it per node.
 
 2. **§5.4's "per-node trust this tool class for this session" is this feature.**
@@ -276,3 +276,27 @@ thing being gated cannot be the thing that decides whether it needs gating.
   operator ask for it. Leaning off, weakly.
 - **Has batch approval actually been used for a full session?** If Shift+A is
   adequate in practice this is not worth building, and that has not been tested.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._AUTO` | `gate.tools.AUTO` |
+| `approval._REVIEW` | `gate.tools.REVIEW` |
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py`. B5's last step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what was
+left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`, `park`)
+and deleted it. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.py` | deleted; its parts are `pptmstr/gate/rows.py`, `reach.py`, `classify.py` and `park.py`, beside the leaves |

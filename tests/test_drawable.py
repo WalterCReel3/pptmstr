@@ -29,9 +29,9 @@ import pytest
 from claude_agent_sdk import SDKSessionInfo
 
 from pptmstr import drawable, sessions, store
-from pptmstr.approval import DiffText
 from pptmstr.command import Command, End, Exited, Refused, Run
 from pptmstr.effects import CommandSettled, CommandToRun, TaskWriteSettled
+from pptmstr.gate.diff import DiffText
 from pptmstr.intents import (
     AgentFinished,
     AgentSpawned,

@@ -222,3 +222,17 @@ investigation. Anything in this document that leans on those findings inherits t
 limits.
 
 Nothing in this document was built. No code was changed to produce it.
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py`. B5's last step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what was
+left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`, `park`)
+and deleted it. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.classify` | `gate.classify.classify` |
+| `approval.py` | deleted; its parts are `pptmstr/gate/rows.py`, `reach.py`, `classify.py` and `park.py`, beside the leaves |
+| `approval.render_diff` | `gate.park.render_diff` |

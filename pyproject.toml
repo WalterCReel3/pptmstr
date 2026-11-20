@@ -99,8 +99,11 @@ dev = [
     "black>=24.1",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    # scripts/screenshot.py and scripts/mock_cards.py import this, for the
-    # glReadPixels grab.
+    # `make test` runs the suite across workers with --dist worksteal. The floor
+    # is the version the parallel run was measured on.
+    "pytest-xdist>=3.8.0",
+    # scripts/screenshot.py imports this for the glReadPixels grab, as do the
+    # probe and measure scripts that read pixels back.
     "pyopengl>=3.1",
 ]
 # Lays out ```mermaid fences, in pptmstr/figures/render.py's child process only
@@ -214,4 +217,12 @@ warn_unused_ignores = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# pytest-asyncio warns when this is unset, and filterwarnings turns that warning
+# into a configure error on a freshly resolved environment.
+asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error"]
+# `make test` runs everything not marked serial across workers, then the serial
+# tests on their own in one process.
+markers = [
+    "serial: depends on wall-clock time or on having the machine to itself, so it runs outside the parallel pass",
+]

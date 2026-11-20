@@ -137,9 +137,9 @@ from claude_agent_sdk.types import SystemPromptPreset  # noqa: E402
 from pptmstr.bridge import Bridge, Decision  # noqa: E402
 from pptmstr.cli_version import read_cli_version, resolve_cli_path  # noqa: E402
 from pptmstr.driver import AgentSession  # noqa: E402
+from pptmstr.gate.sandbox import containment_settings  # noqa: E402
 from pptmstr.intents import AgentFinished, StateChanged, UsageAccrued  # noqa: E402
 from pptmstr.model import AgentState, ApprovalNeeded  # noqa: E402
-from pptmstr.sandbox import containment_settings  # noqa: E402
 from pptmstr.store import Store  # noqa: E402
 from pptmstr.templates import SOLO, WorkTemplate  # noqa: E402
 from pptmstr.transcript import SegmentKind  # noqa: E402

@@ -21,9 +21,10 @@ from typing import Any, get_args
 import pytest
 
 from pptmstr import boardfacts, boardlog
-from pptmstr.board import FOREIGN, UNKNOWN, role_name
+from pptmstr.addresses import FOREIGN, UNKNOWN, role_name
 from pptmstr.boardfacts import Fact, outcomes
 from pptmstr.boardlog import Clock, RestoredConcern, RestoredDecision, RestoredTask
+from pptmstr.channels.records import EVERY_CHANNEL
 from pptmstr.command import Command, End, Exited, Lapsed
 from pptmstr.intents import (
     AgentFinished,
@@ -88,7 +89,6 @@ from pptmstr.intents import (
 from pptmstr.model import (
     ALL_WRITERS,
     EARLIER_RUN,
-    EVERY_CHANNEL,
     AgentState,
     Answered,
     ApprovedWrites,
@@ -1483,7 +1483,8 @@ def test_the_operators_notice_is_the_operators_on_the_board_before_and_after_a_r
     names it, of an agent of an earlier run. The board calls it the operator
     in both processes, and the party the log restores is the same stand-in.
     """
-    from pptmstr.board import OPERATOR, board_concerns, restored_table
+    from pptmstr.addresses import OPERATOR, restored_table
+    from pptmstr.board.rows import board_concerns
     from pptmstr.model import is_operator, operator_party
 
     snap, facts = apply(started(), declare(), claim(B1))
@@ -1622,7 +1623,7 @@ def test_the_leads_withdrawal_in_a_stopped_declarers_place_survives_the_round_tr
     still saying whose words the reason is. The holder's notice keeps the edit.
 
     The lead holds it: a holder of this run that can still be woken is one
-    whose claim the lead may not end (``store._withdrawer_refusal``), and the
+    whose claim the lead may not end (``store.tasks._withdrawer_refusal``), and the
     lead's own claim is the one this run can give it.
     """
     from pptmstr.model import withdrawal_label
@@ -1869,7 +1870,7 @@ def test_the_driver_and_the_board_are_handed_one_table_of_a_logs_addresses(seed:
     address in one and not the other is a name the driver steps over and the
     board hands out, or the reverse.
     """
-    from pptmstr import app, board
+    from pptmstr import addresses, app
 
     _, facts = run(seed)
     seen = 0
@@ -1877,7 +1878,7 @@ def test_the_driver_and_the_board_are_handed_one_table_of_a_logs_addresses(seed:
         log = on_disk(facts, session_id)
         snap = restoring(Snapshot.empty(), session_id, log)
         table = app._addresses_of(log, session_id)
-        assert board.restored_table(snap, session_id) == table
+        assert addresses.restored_table(snap, session_id) == table
         # Every sub-agent this session's log names by id is in it once.
         ids = [node[1] for node, _ in log.addresses if node[0] == session_id and node[1]]
         assert sorted(i for i in table.values() if i is not None) == sorted(ids)

@@ -313,9 +313,9 @@ Both are one run and neither is answerable by reading.
 
 ## Records this one corrects
 
-- `planning/2026-08-10-launcher-as-a-modal.md` — surface list is stale: it says the modal
+- `planning/archive/2026-08-10-launcher-as-a-modal.md` — surface list is stale: it says the modal
   exposes task, working directory and model, and that Enter launches. There are five fields
-  and the binding was reversed by `planning/2026-08-11-prompt-boxes-send-on-ctrl-enter.md`.
+  and the binding was reversed by `planning/archive/2026-08-11-prompt-boxes-send-on-ctrl-enter.md`.
   Its refusal of a launcher `permission_mode` field still stands and this record agrees with
   it, on different grounds — a toggle would not disable the gate, it would look like it does,
   which is the worse failure.
@@ -327,3 +327,16 @@ Both are one run and neither is answerable by reading.
   nothing calls it.
 - `AgentRecord.brief`'s comment says "nothing reads it yet". Two readers now exist. Per
   CLAUDE.md's rule on tense, that comment is history rather than a live constraint.
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py`. B5's last step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what was
+left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`, `park`)
+and deleted it. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.classify` | `gate.classify.classify` |
+| `approval.py` | deleted; its parts are `pptmstr/gate/rows.py`, `reach.py`, `classify.py` and `park.py`, beside the leaves |

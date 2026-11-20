@@ -1125,8 +1125,8 @@ def test_a_link_line_counts_the_peer_messages_waiting_on_it() -> None:
 def test_mail_waiting_on_a_closed_link_is_not_counted_on_the_live_one_of_its_name() -> None:
     import dataclasses
 
+    from pptmstr.channels.records import EVERY_CHANNEL
     from pptmstr.intents import ChannelClosed
-    from pptmstr.model import EVERY_CHANNEL
 
     store = _leads()
     _link(store, "k1", "brand", P1)

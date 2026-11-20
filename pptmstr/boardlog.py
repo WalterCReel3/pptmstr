@@ -1,5 +1,10 @@
 """
-A board's facts on disk: one record per file, appended, restored by a fold.
+A board's facts as journal records, and the fold that restores a board from them.
+
+The board log is a journal (``pptmstr.journal``): ``files.append`` writes each
+record here, and ``files.read`` reads a log back under ``KINDS``. This module holds
+what only the board gives meaning to -- its record kinds, its kind table, and
+``restore`` -- and reads no disk.
 
 **The log holds applied outcomes, not requests.** The 08-14 record says *persist the
 intent stream, derive board state from it on load*, and the live intents are not
@@ -12,18 +17,9 @@ later snapshot holds. Every timestamp is a dead process's ``time.monotonic()``. 
 a record here is a fact as the reducer settled it -- *this task was claimed by this
 agent* -- and restoring is a fold over facts that cannot be refused.
 
-**One file per record, no index.** ``brief.py`` makes the argument and it transfers
-whole: a write above ``PIPE_BUF`` is not atomic, a document rewritten per event is a
-corruption path, and the directory listing is the consistent prefix. What does not
-transfer is ``brief.write_entry``. It reads every entry to find the next ordinal,
-it has three digits, and it guards with ``exists()`` before ``os.replace`` -- a
-check-then-act that a second writer wins by destroying a record with nothing
-raised. Two windows resuming one session id are two writers, so a record here is
-*linked* into place: ``os.link`` refuses an existing name atomically, and the
-writer that lost takes the next ordinal. Every append lists the directory first
-and starts past the highest name there, because a writer told where to start can be
-sent into the place of a missing record, and a record read back ahead of ones
-written before it is a fact restored out of order.
+**One file per record, no index**, for the reasons ``journal.files`` gives. Two
+windows resuming one session id are two writers, and the linked append loses
+neither's records.
 
 **Two writers lose no record, and their records are not one history.** Each window
 has its own store, so each reducer grants what the other would refuse, and a record
@@ -98,29 +94,20 @@ separates it from an inbox delivery mark: an unmarked concern is handed over a
 second time as though it were new, while an unmarked reader is given a digest that
 counts from the session's start and says so.
 
-**Nothing here is in the snapshot, and nothing here reads a clock.** Appending and
-reading are IO for the shell; ``restore`` is pure and returns a value. How that
-value enters the store belongs to whoever wires this.
+**Pure: no IO, no clock, and nothing here is in the snapshot.** Appending and
+reading are ``journal.files``'s, for the shell; ``restore`` returns a value. How
+that value enters the store belongs to whoever wires this.
 """
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
-import json
-import math
-import os
-import re
-import stat
-import tempfile
-import types
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, ClassVar, assert_never, get_args, get_type_hints
+from typing import ClassVar, assert_never, get_args
 
 from . import model
-from .board import ROOT_NAMES
+from .journal import codec
 from .model import (
     ApprovedWrites,
     ConcernState,
@@ -129,30 +116,7 @@ from .model import (
     closing_result,
     withdrawal_result,
 )
-
-# `00000042.json`. The name is the ordinal and nothing else: a kind in the name
-# would let two writers link two different names for one ordinal, and exclusivity
-# is a property of the name. Eight digits because a long session passes a thousand
-# records -- three per task, two per concern -- and zero-padding keeps `ls` in the
-# order the reader uses. A log that outgrows the width still orders correctly,
-# since the reader sorts by value.
-_ORDINAL_WIDTH = 8
-# Exactly how ``_name`` spells an ordinal, and ASCII digits only: `\d` would take
-# digits of other scripts, which ``int`` reads and no append writes.
-_RECORD = re.compile(r"^([0-9]{8}|[1-9][0-9]{8,})\.json$")
-
-# The most one record's file may hold. ``append`` refuses a record whose text is
-# longer and ``read`` takes no more than this from a file, so what was appended can
-# always be read back and a file of any size under a record's name costs a reader
-# this much memory and no more. ``requests.MAX_RECORD_BYTES`` is the same figure
-# for the same reason.
-MAX_RECORD_BYTES = 1 << 20
-
-# Text at the boundary: an address, a basis, an id. Every field of every record is
-# one of these shapes, which is what lets one codec serve all of them. ``bool |
-# None`` is a three-valued statement -- yes, no, not said -- which is a different
-# thing from a flag whose False claims nothing (``Raised.reversible``).
-_FIELD_TYPES: tuple[Any, ...] = (str, str | None, float, int, bool, bool | None, tuple[str, ...])
+from .naming import ROOT_NAMES
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +154,7 @@ class Declared:
     # ``model.Task.provenance``, flattened: the channel the request arrived on, or
     # None for a declaration with no provenance -- which is also what a record
     # with no such key reads as -- and beside it the message it answers and the
-    # declarer's charter mark, a ``model.Charter`` value. The mark is text and not
+    # declarer's charter mark, a ``channels.records.Charter`` value. The mark is text and not
     # a bool, for the reason ``basis`` is: a word this build does not know reads
     # as unstated, where a value of another type would make the record unreadable
     # and end the log at it. ``re`` and ``inside_charter`` say nothing without a
@@ -624,54 +588,6 @@ class AnswerDelivered:
     decision_id: str
 
 
-@dataclass(frozen=True, slots=True)
-class RecordingStopped:
-    """
-    The writer of this log stopped appending to it here: a record after the ones
-    before this did not land, and nothing was appended behind the hole.
-
-    Not a fact about a task, a concern or a decision. It is what makes the records
-    before it read as a prefix rather than as the board: without it a log that
-    ends because a completion could not be written is indistinguishable from one
-    where the task was never finished. ``restore`` lists it in ``Board.stopped``, which
-    makes the board ``short``, and applies whatever follows it as it would
-    anywhere -- a later process that restored the prefix and carried on is one
-    history from that prefix, and the board it leaves is still short one fact or
-    more, for good.
-
-    A build older than this kind reads it as ``Unrecognised``, which is also
-    ``short``.
-
-    ``reason`` is the writer's words for why the record did not land, cut by the
-    writer to a length that leaves this record far under ``MAX_RECORD_BYTES``:
-    the record that says a record was too long must not be.
-    """
-
-    KIND: ClassVar[str] = "recording-stopped"
-
-    at: float
-    reason: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class Unrecognised:
-    """
-    A well-formed record of a kind this build does not define.
-
-    Carried rather than refused. A log is read strictly in order, so treating a
-    newer build's record as damage would discard every record after it, and
-    skipping it silently would restore a board short one fact with nothing saying
-    so. ``Board.unrecognised`` is where it surfaces.
-
-    Built only by ``decode``. ``text`` is the record's JSON as it was read, and
-    encoding writes it back unchanged.
-    """
-
-    at: float
-    kind: str
-    text: str
-
-
 # The closed vocabulary of board facts: what a reducer step can yield. A reference
 # to an inter-session request joins here when the task that defines it lands.
 Known = (
@@ -697,430 +613,12 @@ Known = (
     | Retracted
     | AnswerDelivered
 )
-Record = Known | RecordingStopped | Unrecognised
-
-_KINDS: dict[str, type[Any]] = {cls.KIND: cls for cls in (*get_args(Known), RecordingStopped)}
-assert len(_KINDS) == len(get_args(Known)) + 1, "two record kinds share a name"
-_HINTS: dict[type[Any], dict[str, Any]] = {cls: get_type_hints(cls) for cls in _KINDS.values()}
-for _cls, _hints in _HINTS.items():
-    for _field in dataclasses.fields(_cls):
-        # A field of a shape the codec does not know would encode and then fail
-        # every read, so it stops the import instead.
-        assert _hints[_field.name] in _FIELD_TYPES, (_cls.__name__, _field.name)
-
-
-# -- one record as text -----------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class Malformed:
-    """Why a file's text is not a record."""
-
-    reason: str
-
-
-def encode(record: Record) -> str:
-    """
-    One record as the text of its file: a JSON object and a newline.
-
-    The newline is the terminator, not decoration. Without it the text one byte
-    short of a whole record would itself parse, and with it no proper prefix of an
-    encoded record decodes -- which is what lets a reader tell a torn file from a
-    whole one without a length or a checksum.
-
-    Escaped to ASCII. Agent prose can carry a lone surrogate, which UTF-8 refuses
-    to encode and JSON's escapes carry unchanged.
-
-    Raises ``ValueError`` for a time that is not finite; ``append`` turns that into
-    a value.
-    """
-    if isinstance(record, Unrecognised):
-        return record.text + "\n"
-    payload: dict[str, Any] = {"kind": record.KIND}
-    for field in dataclasses.fields(record):
-        value = getattr(record, field.name)
-        payload[field.name] = list(value) if isinstance(value, tuple) else value
-    return json.dumps(payload, allow_nan=False) + "\n"
-
-
-def decode(text: str) -> Record | Malformed:
-    """
-    The record a file holds, or why it holds none.
-
-    A field the record has and the text lacks takes the record's default when it
-    has one, so a log written before a field existed still reads. A key the record
-    does not have is ignored, so a log written after one was added still reads in
-    the build before it. Neither applies to ``kind`` and ``at``, which every record
-    has.
-    """
-    if not text.endswith("\n"):
-        return Malformed("no terminator: the write did not finish")
-    try:
-        payload = json.loads(text)
-    except ValueError as exc:
-        return Malformed(f"not JSON: {exc}")
-    except RecursionError:
-        # Not a ValueError: brackets nested past the interpreter's own depth.
-        return Malformed("not JSON: nested too deeply to parse")
-    if not isinstance(payload, dict):
-        return Malformed("not a JSON object")
-    kind = payload.get("kind")
-    if not isinstance(kind, str):
-        return Malformed("no kind")
-    at = _as(payload.get("at"), float)
-    if isinstance(at, Malformed):
-        return Malformed(f"at: {at.reason}")
-
-    cls = _KINDS.get(kind)
-    if cls is None:
-        return Unrecognised(at=at, kind=kind, text=text[:-1])
-
-    values: dict[str, Any] = {}
-    for field in dataclasses.fields(cls):
-        if field.name not in payload:
-            if field.default is dataclasses.MISSING:
-                return Malformed(f"{kind}: no {field.name}")
-            continue
-        value = _as(payload[field.name], _HINTS[cls][field.name])
-        if isinstance(value, Malformed):
-            return Malformed(f"{kind}.{field.name}: {value.reason}")
-        values[field.name] = value
-    record: Record = cls(**values)
-    return record
-
-
-def _as(value: Any, hint: Any) -> Any:
-    """
-    ``value`` as the field type ``hint``, or ``Malformed``.
-
-    Strict where JSON is loose: ``true`` is an ``int`` to Python and is not a line
-    count, ``1`` is not a mark somebody set, and a time that is not finite orders
-    against nothing.
-    """
-    if hint is bool:
-        return value if isinstance(value, bool) else Malformed("not true or false")
-    if hint is float:
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            return Malformed("not a number")
-        try:
-            number = float(value)
-        except OverflowError:
-            # JSON has no width for an integer and a float does.
-            return Malformed("too large to be a time")
-        return number if math.isfinite(number) else Malformed("not finite")
-    if hint is int:
-        if isinstance(value, bool) or not isinstance(value, int):
-            return Malformed("not an integer")
-        return value
-    if hint is str:
-        return value if isinstance(value, str) else Malformed("not text")
-    if hint == bool | None:
-        if value is None or isinstance(value, bool):
-            return value
-        return Malformed("not true, false or null")
-    if isinstance(hint, types.UnionType):
-        return value if value is None or isinstance(value, str) else Malformed("not text or null")
-    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        return Malformed("not a list of text")
-    return tuple(value)
-
-
-# -- the directory ----------------------------------------------------------------
-
-
-# The longest name most filesystems take for one directory entry, in bytes.
-_MAX_COMPONENT = 255
-
-
-def session_dir(root: Path, session_id: str) -> Path | None:
-    """
-    Where one session's board log lives under ``root``, or None for an id that is
-    not one directory name.
-
-    The session id is the whole key. Nothing about the working directory or the
-    brief enters it, because a resume from another directory and a fork that
-    inherited a brief are both the cases where those would name the wrong board.
-
-    **None rather than a path that leaves** ``root``. ``root / "../x"`` is beside
-    it and ``root / "/etc"`` is ``/etc``, and ``append`` makes the directory it is
-    given. An id with a separator or a NUL, an empty one, one that starts with a
-    dot -- ``.`` and ``..`` among them -- one with no encoding as a file name, or
-    one longer than a name may be, has no directory. A value and not a raise, for
-    the reason ``Unwritten`` is one.
-    """
-    if (
-        not session_id
-        or session_id.startswith(".")
-        or any(c in session_id for c in ("/", "\\", "\0"))
-        or (os.altsep is not None and os.altsep in session_id)
-    ):
-        return None
-    try:
-        encoded = os.fsencode(session_id)
-    except UnicodeEncodeError:
-        return None
-    if len(encoded) > _MAX_COMPONENT:
-        return None
-    return root / session_id
-
-
-def _name(ordinal: int) -> str:
-    return f"{ordinal:0{_ORDINAL_WIDTH}d}.json"
-
-
-def _ordinals(names: Iterable[str]) -> list[int]:
-    """
-    The ordinals among ``names``, ascending: each name that is exactly how its own
-    ordinal is spelled. ``000000099.json`` is nine digits for 99 and is not one.
-
-    The one definition of which names are records, for the writer and the reader
-    both. A name only the writer counted would put every later record past a gap,
-    and one only the reader took would be a record no append could have made.
-    """
-    return sorted(
-        int(match.group(1)) for name in names if (match := _RECORD.match(name)) is not None
-    )
-
-
-def _first_gap(ordinals: list[int]) -> int | None:
-    """The lowest ordinal missing below the highest of ``ordinals``, or None."""
-    return next((want for want, have in enumerate(ordinals) if have != want), None)
-
-
-@dataclass(frozen=True, slots=True)
-class Unlisted:
-    """
-    A directory exists, or may, and could not be listed, and why.
-
-    Not zero. "No record is here" and "nobody could look" are different answers,
-    and a writer that took the second for the first would start a log on top of
-    one it could not see.
-    """
-
-    reason: str
-
-
-def next_ordinal(directory: Path) -> int | Unlisted:
-    """
-    The ordinal after the highest one present, from the listing alone.
-
-    Zero for a directory that is not there or holds no record. ``Unlisted`` for
-    one that could not be listed for any other reason -- no permission, a file
-    where the directory would be, an IO error for one moment -- as ``read``
-    keeps the same two apart.
-
-    This is also what a reader keys a memo on. A directory's mtime does not move
-    between two appends made close together, so "has anything been added" is
-    answered by the names and not by the timestamp.
-    """
-    try:
-        present = _ordinals(os.listdir(directory))
-    except FileNotFoundError:
-        return 0
-    except OSError as exc:
-        return Unlisted(f"{type(exc).__name__}: {exc}")
-    return present[-1] + 1 if present else 0
-
-
-@dataclass(frozen=True, slots=True)
-class Written:
-    """
-    A record is on disk.
-
-    ``gap`` **is not None when this record will not be read back.** It is the
-    lowest ordinal below this record's with no file, which is where ``read``
-    stops, so the record is on disk behind a break and a restore will not reach
-    it. The writer is told because nothing else will tell it: no append fills a
-    missing ordinal, so the break is permanent and every later append lands
-    behind it too.
-
-    It is what the append's own listing shows, without reading a record. It does
-    not see a record that is present and does not decode -- a torn write, a
-    corrupted file. ``read`` finds those, and None here is not a statement that
-    the log is whole.
-    """
-
-    ordinal: int
-    path: Path
-    gap: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class Unwritten:
-    """
-    A record is not on disk, and why.
-
-    A value rather than an exception because the caller is on the frame path, and
-    because the operator has to be shown it: a board that silently stopped
-    persisting is discovered at the next resume, by its absence.
-    """
-
-    reason: str
-
-
-def append(directory: Path, record: Record, *, durable: bool = True) -> Written | Unwritten:
-    """
-    Append one record. Never overwrites one, whoever else is writing.
-
-    The text goes to a temp file in the same directory and is then *linked* to its
-    ordinal's name. A name therefore appears complete or not at all, and ``os.link``
-    fails on a name that exists -- atomically, in the kernel, which is the guarantee
-    a check before a rename cannot give. The writer that lost the name takes the
-    next one, so two writers interleave and neither loses a record.
-
-    **Never fills a missing ordinal.** The first name tried is one past the highest
-    in a listing taken here, and a collision only moves up, so a record never lands
-    below one that was there when its append began. That is why there is no way to
-    tell this where to start: a caller's idea of the end is below the truth as soon
-    as a second writer exists, and the first free name above a stale floor may be
-    the place of a record that was lost. Filling it would turn a break ``read``
-    reports into a whole-looking log with a newer fact ahead of older ones. The
-    price is the listing, which is linear in the session's length on the thread
-    that calls this.
-
-    A record whose text is over ``MAX_RECORD_BYTES`` is refused, since ``read``
-    would take it for damage and withhold everything after it.
-
-    ``durable`` flushes the record to the device before it is named, which is the
-    difference between surviving this process and surviving the machine, and costs
-    milliseconds per record on the thread that calls it. Without it a power loss
-    can leave a name over a short file; ``read`` reports that as damage and never
-    as a record, but it withholds whatever was written after. The directory entry
-    is not flushed either way: losing the newest names shortens the log to a
-    consistent prefix and tears nothing.
-
-    **A process killed inside this leaves its temp file, and nothing removes it.**
-    A ``.record-*.tmp`` name is never a record to ``read`` or to the next
-    ordinal, so one left behind costs its bytes and nothing else. Removing them
-    is not safe from here: another writer's append in flight is a file of exactly
-    that name, and unlinking it before its link would lose that record.
-    """
-    try:
-        data = encode(record).encode("utf-8")
-        if len(data) > MAX_RECORD_BYTES:
-            return Unwritten(
-                reason=f"{len(data)} bytes, over the {MAX_RECORD_BYTES} a record may be"
-            )
-        directory.mkdir(parents=True, exist_ok=True)
-        present = _ordinals(os.listdir(directory))
-        ordinal = present[-1] + 1 if present else 0
-        gap = _first_gap(present)
-        fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=".record-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                if durable:
-                    handle.flush()
-                    os.fsync(handle.fileno())
-            while True:
-                target = directory / _name(ordinal)
-                try:
-                    os.link(tmp, target)
-                    break
-                except FileExistsError:
-                    ordinal += 1
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-    except (OSError, ValueError) as exc:
-        return Unwritten(reason=f"{type(exc).__name__}: {exc}")
-    return Written(ordinal=ordinal, path=target, gap=gap)
-
-
-@dataclass(frozen=True, slots=True)
-class Damage:
-    """
-    Where a log stops being readable.
-
-    ``unread`` is how many record files sit after the break. Zero is the ordinary
-    case -- a write the process did not survive -- and anything else means records
-    that were once whole are being withheld, which the operator is owed in those
-    words rather than as a shorter board.
-    """
-
-    ordinal: int
-    reason: str
-    unread: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class Log:
-    """What a directory yielded: the readable prefix, and where it ended if early."""
-
-    records: tuple[Record, ...] = ()
-    damage: Damage | None = None
-
-
-def _file_bytes(path: Path) -> bytes:
-    """
-    The bytes of a regular file no longer than a record may be. ``OSError`` for
-    anything else.
-
-    Opened without blocking and checked before it is read: a FIFO under a record's
-    name would hold an ordinary open until somebody wrote to it, and a reader that
-    waits on a file is one any writer to the directory can stop.
-
-    Read to one byte past ``MAX_RECORD_BYTES`` and no further, so the size of the
-    file is never the size of the allocation.
-    """
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"{path.name} is not a regular file")
-        with os.fdopen(fd, "rb") as handle:
-            fd = -1
-            held = handle.read(MAX_RECORD_BYTES + 1)
-        if len(held) > MAX_RECORD_BYTES:
-            raise OSError(f"{path.name} is over the {MAX_RECORD_BYTES} bytes a record may be")
-        return held
-    finally:
-        if fd != -1:
-            os.close(fd)
-
-
-def read(directory: Path) -> Log:
-    """
-    Every record up to the first one that cannot be read, oldest first.
-
-    **Strict about order.** Records are facts about each other -- a claim means
-    nothing without its declaration -- so the first ordinal that is absent or does
-    not decode ends the log, and nothing after it is applied. What is returned is
-    always a prefix of what was written.
-
-    A missing directory is an empty log: a session that has put nothing on its
-    board is the common case. A directory that exists and cannot be listed is
-    damage, because those two must not read alike.
-
-    Names that are not records are skipped. The directory holds temp files
-    mid-write, and a reader that tripped on one would fail exactly while a write
-    was in flight.
-
-    **Never raises and never waits**, whatever the files hold: text built to break
-    the parser is a record that does not decode, and a name that is not a regular
-    file, or is a longer one than ``append`` writes, is one that cannot be read.
-    """
-    try:
-        names = os.listdir(directory)
-    except FileNotFoundError:
-        return Log()
-    except OSError as exc:
-        return Log(damage=Damage(ordinal=0, reason=f"{type(exc).__name__}: {exc}"))
-
-    found = _ordinals(names)
-    records: list[Record] = []
-    for position, ordinal in enumerate(found):
-        unread = len(found) - position
-        if ordinal != position:
-            return Log(tuple(records), Damage(position, "missing", unread))
-        try:
-            text = _file_bytes(directory / _name(ordinal)).decode("utf-8")
-        except (OSError, ValueError) as exc:
-            return Log(tuple(records), Damage(ordinal, f"{type(exc).__name__}: {exc}", unread - 1))
-        record = decode(text)
-        if isinstance(record, Malformed):
-            return Log(tuple(records), Damage(ordinal, record.reason, unread - 1))
-        records.append(record)
-    return Log(tuple(records))
+Record = Known | codec.RecordingStopped | codec.Unrecognised
+
+# The board's table: what ``files.read`` decodes a board log under. ``codec.kinds``
+# adds ``RecordingStopped`` and refuses a field of a shape the codec does not know,
+# so a kind that would encode and then fail every read stops this import.
+KINDS: codec.Kinds[Record] = codec.kinds(*get_args(Known))
 
 
 # -- the board the records describe ------------------------------------------------
@@ -1171,8 +669,8 @@ def _named(record: Record) -> tuple[tuple[str | None, tuple[str, ...]], ...]:
             | Dismissed()
             | Retracted()
             | AnswerDelivered()
-            | RecordingStopped()
-            | Unrecognised()
+            | codec.RecordingStopped()
+            | codec.Unrecognised()
         ):
             # A close, an answer and a dismissal are the operator's, who is no
             # party of a board; a withdrawal and a delivery are the asker's,
@@ -1419,11 +917,11 @@ class Board:
     concerns: tuple[RestoredConcern, ...] = ()
     decisions: tuple[RestoredDecision, ...] = ()
     stray: tuple[Record, ...] = ()
-    unrecognised: tuple[Unrecognised, ...] = ()
+    unrecognised: tuple[codec.Unrecognised, ...] = ()
     contested: tuple[Record, ...] = ()
-    damage: Damage | None = None
+    damage: codec.Damage | None = None
     addresses: tuple[tuple[NodeId, str], ...] = ()
-    stopped: tuple[RecordingStopped, ...] = ()
+    stopped: tuple[codec.RecordingStopped, ...] = ()
 
     @property
     def short(self) -> bool:
@@ -1446,7 +944,7 @@ class Board:
         )
 
 
-def restore_log(log: Log) -> Board:
+def restore_log(log: codec.Log[Record]) -> Board:
     """
     The board a read log describes, carrying where the read stopped.
 
@@ -1497,9 +995,9 @@ def restore(records: Iterable[Record]) -> Board:
     concerns: dict[str, RestoredConcern] = {}
     decisions: dict[str, RestoredDecision] = {}
     stray: list[Record] = []
-    unrecognised: list[Unrecognised] = []
+    unrecognised: list[codec.Unrecognised] = []
     contested: list[Record] = []
-    stopped: list[RecordingStopped] = []
+    stopped: list[codec.RecordingStopped] = []
     addresses: dict[NodeId, str] = {}
 
     for record in records:
@@ -1647,9 +1145,9 @@ def restore(records: Iterable[Record]) -> Board:
                     decisions[record.decision_id] = dataclasses.replace(decision, contested=True)
                     continue
                 decisions[record.decision_id] = _decision_after(decision, record)
-            case RecordingStopped():
+            case codec.RecordingStopped():
                 stopped.append(record)
-            case Unrecognised():
+            case codec.Unrecognised():
                 unrecognised.append(record)
             case _:
                 assert_never(record)
@@ -1830,13 +1328,13 @@ def _decision_after(decision: RestoredDecision, record: _DecisionRecord) -> Rest
 
 def _withdrawer(task: RestoredTask, record: WithdrawnByDeclarer) -> bool | None:
     """
-    Who a withdrawal is by, as ``store._withdrawer_refusal`` admits it: False
+    Who a withdrawal is by, as ``store.tasks._withdrawer_refusal`` admits it: False
     for the task's declarer, True for the root of the declarer's session
     standing in for it, and None for anybody else.
 
     **Half of the store's rule, and the half a log can ask.** The store also
     asks that a root withdrawing in the declarer's place found the declarer
-    stopped (``store._has_stopped``), which is about agent records this log does
+    stopped (``store.tasks._has_stopped``), which is about agent records this log does
     not hold -- as a reclaim's record cannot say its holder was of an earlier
     run (``Reclaimed``). What it can say is who the withdrawer was, and that no
     sub-agent withdrew another's task.
@@ -1849,7 +1347,7 @@ def _withdrawer(task: RestoredTask, record: WithdrawnByDeclarer) -> bool | None:
         return None
     if isinstance(declarer, str):
         # Named by address alone, a declarer carries no session to compare and
-        # is this log's: one log is one session's board (``session_dir``). A
+        # is this log's: one log is one session's board (``files.session_dir``). A
         # root's address is the root, as the store places it (``ROOT_NAMES``).
         return declarer not in ROOT_NAMES
     return True if declarer[0] == by[0] else None

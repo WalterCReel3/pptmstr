@@ -1,8 +1,8 @@
 """
 The texts a parked approval's diff is made from.
 
-``approval.diff_texts`` decides what a file-mutating call does to a file, and
-``approval.render_diff`` is its unified rendering. These pin three things: the bytes
+``gate.park.diff_texts`` decides what a file-mutating call does to a file, and
+``gate.park.render_diff`` is its unified rendering. These pin three things: the bytes
 of the unified diff, which other consumers split and count; the texts and what they
 say about themselves; and that both construction sites of ``PendingApproval`` take
 the two from a single read of the file.
@@ -21,11 +21,12 @@ from typing import Any
 
 import pytest
 
-from pptmstr import approval
-from pptmstr.approval import DiffText, diff_texts, render_diff, render_texts
+import pptmstr
 from pptmstr.bridge import Bridge
 from pptmstr.driver import AgentSession
 from pptmstr.fake_driver import FakeDriver
+from pptmstr.gate.diff import DiffText, render_texts
+from pptmstr.gate.park import diff_texts, render_diff
 from pptmstr.intents import ApprovalRequested
 from pptmstr.model import PendingApproval
 
@@ -562,12 +563,12 @@ def test_every_approval_the_demo_fleet_parks_agrees_with_its_own_texts() -> None
         assert (pending.texts is None) == (diff_texts(pending.tool_name, pending.raw_args) is None)
 
 
-def test_only_the_approval_module_decides_what_a_call_does_to_a_file() -> None:
+def test_only_the_gate_decides_what_a_call_does_to_a_file() -> None:
     """
     Neither driver calls ``render_diff``: that would be a second read beside the one
     ``diff_texts`` made for the texts.
     """
     for module in ("driver.py", "fake_driver.py"):
-        source = (Path(approval.__file__).parent / module).read_text(encoding="utf-8")
+        source = (Path(pptmstr.__file__).parent / module).read_text(encoding="utf-8")
         assert "render_diff(" not in source, module
         assert source.count("diff_texts(") == 1, module

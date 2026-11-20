@@ -21,9 +21,10 @@ from typing import Any
 import pytest
 
 from pptmstr import theme
-from pptmstr.figures import displaylist, host, mermaid, render
+from pptmstr.figures import displaylist, mermaid, render
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import Kind, Part, views
+from pptmstr.ui.typeset import figure_host as host
 
 WINDOW = (700.0, 600.0)
 FIG = (

@@ -54,19 +54,16 @@ from typing import assert_never
 from imgui_bundle import imgui
 
 from .. import drawable
-from ..approval import Policy
+from ..channels.records import Channel, ChannelId, MoveOwner, WhoseMove
+from ..gate.policy import Policy
 from ..model import (
     AgentRecord,
     AgentState,
-    Channel,
-    ChannelId,
     DetachRefusal,
     LaunchSpec,
-    MoveOwner,
     NodeId,
     Snapshot,
     TranscriptPresence,
-    WhoseMove,
 )
 from ..theme import STATE_LABEL, P
 from . import gate_menu, session_details

@@ -16,7 +16,8 @@ import tempfile
 
 import pytest
 
-from pptmstr import board, brief, bus, fake_driver
+from pptmstr import brief, bus, fake_driver
+from pptmstr.board.rows import board_concerns, board_tasks
 from pptmstr.bridge import Bridge
 from pptmstr.fake_driver import FakeDriver
 from pptmstr.model import (
@@ -391,7 +392,7 @@ def test_a_parked_declaration_has_a_multi_paragraph_spec(
 
 def test_the_board_has_a_row_in_every_state(fleet: tuple[FakeDriver, Snapshot]) -> None:
     driver, snap = fleet
-    rows = {t.id: t for t in board.board_tasks(snap, driver.cast["lead"][0])}
+    rows = {t.id: t for t in board_tasks(snap, driver.cast["lead"][0])}
     assert len(rows) == 8
 
     assert rows["t1"].state is TaskState.COMPLETED and rows["t1"].owner == "explore"
@@ -414,7 +415,7 @@ def test_most_task_details_are_multi_paragraph_markdown(
     fleet: tuple[FakeDriver, Snapshot],
 ) -> None:
     driver, snap = fleet
-    rows = board.board_tasks(snap, driver.cast["lead"][0])
+    rows = board_tasks(snap, driver.cast["lead"][0])
     long = [t for t in rows if len(t.detail.split("\n\n")) >= 2 and "`" in t.detail]
     assert len(long) >= 6
     assert any("\n- " in t.detail for t in long) and any("\n1. " in t.detail for t in long)
@@ -427,7 +428,7 @@ def test_the_concern_log_has_every_state_and_direction(
     fleet: tuple[FakeDriver, Snapshot],
 ) -> None:
     driver, snap = fleet
-    log = board.board_concerns(snap, driver.cast["lead"][0])
+    log = board_concerns(snap, driver.cast["lead"][0])
     delivered = [c for c in log if c.state is ConcernState.DELIVERED]
     assert len(delivered) >= 5
     assert all(len(c.body.split("\n\n")) >= 2 for c in delivered)
@@ -448,7 +449,7 @@ def test_one_delivered_concern_is_plain_text_with_one_fact_per_line(
     fleet: tuple[FakeDriver, Snapshot],
 ) -> None:
     driver, snap = fleet
-    (plain,) = [c for c in board.board_concerns(snap, driver.cast["lead"][0]) if c.id == "fake-c6"]
+    (plain,) = [c for c in board_concerns(snap, driver.cast["lead"][0]) if c.id == "fake-c6"]
     assert plain.state is ConcernState.DELIVERED
     head, trace = plain.body.split("\n\n")
     # Consecutive lines with no blank between them and no markdown to separate
@@ -511,8 +512,8 @@ def test_two_fleets_carry_the_same_text() -> None:
         return (
             {role: driver.transcripts[node].text() for role, node in driver.cast.items()},
             [(p.tool_name, p.summary, p.diff) for p in snap.approvals],
-            [(t.id, t.state, t.detail, t.blocked_on) for t in board.board_tasks(snap, session)],
-            [(c.id, c.state, c.body) for c in board.board_concerns(snap, session)],
+            [(t.id, t.state, t.detail, t.blocked_on) for t in board_tasks(snap, session)],
+            [(c.id, c.state, c.body) for c in board_concerns(snap, session)],
         )
 
     (first, first_store), (second, second_store) = _seeded(), _seeded()

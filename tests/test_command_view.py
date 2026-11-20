@@ -46,7 +46,7 @@ from pptmstr.command import (
     TimedOut,
     Withdrawn,
 )
-from pptmstr.ui import board_pane, command_view, widgets
+from pptmstr.ui import board_pane, command_view, panes, widgets
 from pptmstr.ui.command_view import (
     Actions,
     Among,
@@ -2456,17 +2456,22 @@ def test_the_warnings_first_line_is_set_where_a_line_of_text_would_be(faced: Non
 
 # -- the panes' modules ---------------------------------------------------------------
 
-# The modules that draw one of the application's docks (``app._panels``).
-PANE_MODULES = (
-    "rail",
-    "inbox",
-    "transcript_pane",
-    "detail",
-    "board_pane",
-    "digest_pane",
-    "brief_pane",
-    "health",
-)
+# The modules that draw one of the application's docks, read off the docks' table.
+PANE_MODULES = panes.modules()
+
+
+def test_the_panes_modules_are_the_ones_that_draw_a_dock() -> None:
+    assert PANE_MODULES == (
+        "rail",
+        "inbox",
+        "transcript_pane",
+        "detail",
+        "board_pane",
+        "digest_pane",
+        "brief_pane",
+        "health",
+    )
+
 
 # The imports from one pane's module of another's that are argued for: DETAIL acts
 # through the queue row's own functions in FOCUS (``inbox.approval_controls``,

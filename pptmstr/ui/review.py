@@ -22,8 +22,8 @@ from dataclasses import dataclass, field
 
 from imgui_bundle import imgui
 
-from ..approval import command_shown
 from ..bridge import Bridge, Decision
+from ..gate.rows import command_shown
 from ..model import ApprovalNeeded, NodeId, PendingApproval, Snapshot
 from .focus import FocusState
 
@@ -603,7 +603,7 @@ def pretty_args(pending: PendingApproval) -> str:
 def shown_command(pending: PendingApproval) -> str | None:
     """
     A Bash call's command as every approval surface draws it, or ``None`` for a
-    call that has none: ``approval.command_shown`` of the command as the agent
+    call that has none: ``gate.rows.command_shown`` of the command as the agent
     sent it, which is what the queue row's summary is made from.
 
     Of ``raw_args`` and not of the drawable twin, and the one reader of it that

@@ -74,7 +74,6 @@ from .. import commandfile, commandtext
 from ..command import (
     COMMAND_TAG,
     DEFAULT_TIMEOUT_S,
-    ID_HEX_CHARS,
     MAX_REASON_CHARS,
     MAX_TAIL_CHARS,
     TIMEOUT_CHOICES_S,
@@ -97,8 +96,10 @@ from ..command import (
     ran,
 )
 from ..commandrun import PROFILE_WARNING
+from ..ids import ID_HEX_CHARS
 from ..theme import Color, P, hint_colour
 from . import board_pane, decision_view, widgets
+from .clip import clip
 from .widgets import author_text, format_elapsed, help_mark, multiline_input, one_line
 
 # Seconds, on Dear ImGui's own clock, before an armed act answers its second
@@ -1192,7 +1193,7 @@ def _authored(text: str) -> None:
     if not text.strip():
         imgui.text_disabled(NOTHING_WRITTEN)
         return
-    shown, dropped = board_pane.clip(text, _ASKER_CHARS)
+    shown, dropped = clip(text, _ASKER_CHARS)
     board_pane.author(shown)
     if dropped:
         imgui.text_colored(P.warn.vec4, f"... {dropped:,} more characters not shown")
@@ -1214,7 +1215,7 @@ def asker_value(text: str) -> str:
     """
     if not text.strip():
         return repr(text)
-    shown, dropped = board_pane.clip(text, _ASKER_CHARS)
+    shown, dropped = clip(text, _ASKER_CHARS)
     more = f" ... {dropped:,} more characters not shown" if dropped else ""
     return author_text(shown) + more
 
@@ -1534,9 +1535,9 @@ def log_path(command: Command) -> str | None:
 
 
 # What each author's lines are behind on the clipboard, which has no bar, box or
-# colour to tell them apart. The bus's three marks (``bus._QUOTE``,
-# ``bus._ANSWER``, ``commandbus._OUTPUT``) spelled again for the reason
-# ``decision_view`` spells two of them; a test holds each to the bus's.
+# colour to tell them apart. The bus's three marks (``replies._QUOTE``,
+# ``replies._ANSWER``, ``commandbus._OUTPUT``) spelled again, as ``decision_view``
+# spells two of them; a test holds each to the bus's.
 ASKER_MARK = decision_view.ASKER_MARK
 OPERATOR_MARK = decision_view.ANSWER_MARK
 OUTPUT_MARK = "= "

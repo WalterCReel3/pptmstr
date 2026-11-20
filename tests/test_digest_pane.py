@@ -20,8 +20,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pptmstr.board.digest import digest, digest_mark, taken_decisions
 from pptmstr.bridge import Bridge
-from pptmstr.digest import digest, digest_mark, taken_decisions
 from pptmstr.intents import (
     AgentSpawned,
     ConcernPosted,

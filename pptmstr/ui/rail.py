@@ -45,10 +45,10 @@ from typing import assert_never
 from imgui_bundle import imgui
 
 from .. import drawable
+from ..channels.records import Channel
 from ..model import (
     AgentRecord,
     AgentState,
-    Channel,
     EndedHow,
     NodeId,
     Obligation,
@@ -987,8 +987,9 @@ def _card(
     selects, from the one value its group handed down -- see ``focus.Scope``.
 
     Which kind of agent it is comes from ``node_id[1]``, not from ``parent``. The two
-    come apart on the recovered-placeholder path (``store.py``), which mints a record
-    for a sub-agent whose spawn hook never fired and leaves ``parent`` None when the
+    come apart on the recovered-placeholder path (``store._apply``'s
+    ``ApprovalRequested`` arm), which mints a record for a sub-agent whose spawn
+    hook never fired and leaves ``parent`` None when the
     root is not in the table -- so ``parent`` answers "is it attached", and the
     question here is "is it a sub-agent". It buys two differences and no others: a
     sub-agent gets no context ring, and the width that frees goes to its model.

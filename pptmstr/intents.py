@@ -29,15 +29,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .approval import Policy
 from .boardlog import Board, Clock
+from .channels.records import Channel, ChannelId, ChannelScope
 from .command import Command, CommandId, End
+from .gate.policy import Policy
 from .model import (
     AgentState,
     Basis,
-    Channel,
-    ChannelId,
-    ChannelScope,
     Concern,
     ConcernId,
     ContextSnapshot,
@@ -176,7 +174,7 @@ class ApprovalResolved:
     # nobody answered: one the CLI aborted at its hook timeout, one cancelled
     # by its session's teardown, and one the host failed at shutdown. Those
     # arrive as a refusal with a reason, like an operator's, and only this
-    # tells them apart (``store._moved`` counts only the operator's).
+    # tells them apart (``store.waking._moved`` counts only the operator's).
     from_operator: bool = True
 
 
@@ -262,7 +260,7 @@ class AgentRemoved:
     "named by its session's restore and without a record in this process"
     (``Snapshot.left_behind``), which means "never had one here" only while no
     record is taken away. Removing a restored party that has since been woken
-    and has finished its turn makes it gone again, and ``store._may_reclaim``
+    and has finished its turn makes it gone again, and ``store.tasks._may_reclaim``
     then hands its claim to the session's root -- reclaim from an agent that
     merely finished, which that function rules out. An emitter has to settle
     that first.
@@ -296,10 +294,10 @@ class FailureAcknowledged:
 # -- the message bus and the task board (§2.7) ------------------------------------
 #
 # Every intent below carries ``node_id`` because the store stamps ``state_since``
-# by looking it up (store.py:318), and an intent that named no node would have to
-# be special-cased there. Operator actions have no node to name, so the field is
-# optional -- and the store's stamp is guarded on it rather than each new arm being
-# trusted to remember.
+# by looking it up (``store._apply``, after its match), and an intent that named
+# no node would have to be special-cased there. Operator actions have no node to
+# name, so the field is optional -- and the store's stamp is guarded on it rather
+# than each new arm being trusted to remember.
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,7 +349,7 @@ class PeerSent:
 
     ``node_id`` is the gate's, as on ``ConcernPosted``, and is the sender:
     nothing the sender wrote names who is speaking. ``concern_id`` is minted by
-    the bus in the shape ``model.is_concern_id`` reads, so a declaration's
+    the bus in the shape ``ids.is_concern_id`` reads, so a declaration's
     ``re`` can name it. ``edited`` is the gate's stamp.
 
     **It reaches only the link it was written for.** ``called_at`` is the
@@ -429,7 +427,7 @@ class ConcernWithdrawn:
 
     ``node_id`` None is the operator's, which stops a concern still waiting
     and does nothing to one already delivered. With a node it is that agent's,
-    and only the concern's sender may (``store._message_withdrawal_refusal``): a
+    and only the concern's sender may (``store.mail._message_withdrawal_refusal``): a
     concern inside a team while it waits, and a peer message while it waits
     and after its lead read it, until it is answered -- the case
     ``withdraw_peer_message`` exists for. ``reason`` is the withdrawer's
@@ -440,7 +438,7 @@ class ConcernWithdrawn:
 
     ``peer_only`` is set by ``withdraw_peer_message``, which withdraws a
     message between teams and nothing else: the store then refuses a concern
-    inside a team (``model.PeerWithdrawRefusal.TEAM_MAIL``) after the sender
+    inside a team (``records.PeerWithdrawRefusal.TEAM_MAIL``) after the sender
     check, and the agent form without it may still withdraw its own team
     concern while it waits. Run-only, like the reason: no log record carries
     it (``boardfacts`` reads only the concern's state).
@@ -469,7 +467,7 @@ class TaskAmended:
 
     **Who may.** ``node_id`` None marks it as the operator's, the way
     ``ConcernEdited`` does, and the operator may always. An agent may only when it
-    declared the task and has never held it -- ``store._amender_refusal`` is the
+    declared the task and has never held it -- ``store.tasks._amender_refusal`` is the
     whole rule. The point of a specification is that one participant sets it and
     another is bound by it, and an agent that could rewrite the one it is working
     to could rewrite the thing it is being held to. The declarer that keeps its
@@ -479,14 +477,14 @@ class TaskAmended:
     a check of one instant that a release immediately before the amendment and a
     claim immediately after it walk straight through. The same rule is kept from
     the other side by the claim: an agent that amended a task may not then take
-    it (``store._claim_refusal``). So for the life of a task an agent sets its
+    it (``store.tasks._claim_refusal``). So for the life of a task an agent sets its
     specification or works to it, and the only agent that does both is one that
     declared a task and claimed it as declared.
 
     The operator has not ruled on the agent half of that: it is question 2 of
     `planning/2026-10-12-session-control-and-the-inter-team-record-in-one-sequence.md`,
     built as the lead recommended there. Answering it "no" is one line of
-    ``store._amender_refusal``.
+    ``store.tasks._amender_refusal``.
 
     **An amendment is a version.** The text it replaces moves to
     ``Task.superseded`` with who replaced it and when; nothing is overwritten. An
@@ -578,7 +576,7 @@ class TaskDeclared:
     A unit of work was put on the board.
 
     Rejected by the store if its dependencies would close a cycle -- see
-    ``store._would_cycle``. A cycle is not a wedged task, it is a wedged *team*:
+    ``store.tasks._would_cycle``. A cycle is not a wedged task, it is a wedged *team*:
     every member of the cycle is permanently unclaimable, and the symptom is
     workers that idle while the board says there is work.
 
@@ -678,7 +676,7 @@ class TaskReleased:
 
     One release is taken from a node that is not the claimer: a session's root
     may give back a task whose holder is an agent of an earlier run of the
-    session (``store._may_reclaim``). That is a release only --
+    session (``store.tasks._may_reclaim``). That is a release only --
     the same root's ``TaskCompleted`` for that task is refused like anybody's.
     """
 
@@ -699,7 +697,7 @@ class TaskClosed:
     **Not a claim that the work was done.** The task becomes COMPLETED so that
     what it was holding up is let go -- every task that depends on it becomes
     claimable, and the files it declared stop queueing later tasks behind it
-    (``store._auto_depends`` sequences only against unfinished tasks). That is
+    (``store.tasks._auto_depends`` sequences only against unfinished tasks). That is
     the whole purpose: it is the way out of a task nothing else can move -- one
     whose only willing agent amended it, one waiting on an id another session's
     board holds, one whose holder will not finish. What it reports is written
@@ -754,7 +752,7 @@ class TaskWithdrawn:
     **Modelled on the operator's close (``TaskClosed``), not as a fourth
     state.** The task becomes COMPLETED, so every task that depends on it stops
     waiting by that fact alone and the files it declared stop queueing later
-    work (``store._auto_depends``) -- there is no unblocking step. What it reports
+    work (``store.tasks._auto_depends``) -- there is no unblocking step. What it reports
     is written by the store: ``model.withdrawal_result``, the words "withdrawn by
     its declarer" and then ``reason`` as sent, with ``Task.withdrawn`` set so no
     surface reads the label out of text a claimer could have typed.
@@ -767,7 +765,7 @@ class TaskWithdrawn:
     root of the task's session may also withdraw it once the declarer has
     stopped -- its record is terminal, or it is of an earlier run -- so a builder
     that declared follow-up work and returned does not leave rows only a person
-    can retire (``store._withdrawer_refusal``; ``Task.withdrawn_by_lead`` then
+    can retire (``store.tasks._withdrawer_refusal``; ``Task.withdrawn_by_lead`` then
     says so). A running declarer keeps the sole right. Any other agent is
     refused with ``TaskRefusal.NOT_THE_WITHDRAWER``, and a task on another
     session's board with ``NO_SUCH_TASK``, as an amendment of one is. The
@@ -1289,7 +1287,7 @@ class ChannelLinked:
     same way, or link a session whose board nobody writes.
 
     The fact goes to the channel's own log from the shell, never from here
-    (``channels.outcomes``).
+    (``channels.facts.outcomes``).
     """
 
     channel_id: ChannelId
@@ -1320,7 +1318,7 @@ class ChannelClosed:
 class ChannelsRestored:
     """
     The links the channel logs held that restore as they were, read once at
-    startup before any session can start (``channels.restore_all``). A link
+    startup before any session can start (``channels.log.restore_all``). A link
     withheld there -- its log short or stopped, or several live under one name
     -- is not here, and so never enters the store. A channel the store already holds
     under an id is left as the store has it. The shell's, with no node; every

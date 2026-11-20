@@ -1,0 +1,320 @@
+# Copies at 66af79e
+
+## boardlog.append
+  kind            create-once
+  mkstemp_prefix  '.record-'
+  mkstemp_suffix  '.tmp'
+  fdopen          'wb' enc=- nl=-
+  file_fsync      if durable
+  dir_fsync       no
+  place           os.link
+  loop            while:True
+  on_exists       ordinal += 1
+  cleanup         finally
+  raises_out      catches (OSError, ValueError); suppress OSError
+
+## brief.write_entry
+  kind            create-once
+  mkstemp_prefix  '.entry-'
+  mkstemp_suffix  '.md'
+  fdopen          'w' enc='utf-8' nl=-
+  file_fsync      yes
+  dir_fsync       no
+  place           os.link
+  loop            while:True
+  on_exists       ordinal += 1
+  cleanup         finally
+  raises_out      raises; suppress OSError
+
+## commandfile._create
+  kind            create-once
+  mkstemp_prefix  f'.{name}-'
+  mkstemp_suffix  '.tmp'
+  fdopen          'wb' enc=- nl=-
+  file_fsync      yes
+  dir_fsync       yes (_sync_dir, best effort)
+  place           os.link
+  loop            -
+  on_exists       return Unwritten(ALREADY_RECORDED)
+  cleanup         finally
+  raises_out      raises; suppress OSError
+
+## requests._append
+  kind            create-once
+  mkstemp_prefix  '.writing-'
+  mkstemp_suffix  '.json'
+  fdopen          'w' enc='ascii' nl=-
+  file_fsync      yes
+  dir_fsync       no
+  place           os.link
+  loop            while:True
+  on_exists       serial += 1 ; continue
+  cleanup         finally
+  raises_out      catches FileNotFoundError; suppress OSError
+
+## sessionfile._update
+  kind            create-once|replace
+  mkstemp_prefix  '.session-'
+  mkstemp_suffix  '.tmp'
+  fdopen          'wb' enc=- nl=-
+  file_fsync      yes
+  dir_fsync       no
+  place           os.link+os.replace
+  loop            for:range(_ATTEMPTS),for:checked.items()
+  on_exists       continue
+  cleanup         finally
+  raises_out      raises; suppress OSError
+
+## sessions.save_overlay
+  kind            replace
+  mkstemp_prefix  '.sessions-'
+  mkstemp_suffix  '.json'
+  fdopen          'w' enc='utf-8' nl=-
+  file_fsync      no
+  dir_fsync       no
+  place           os.replace
+  loop            -
+  on_exists       -
+  cleanup         except BaseException
+  raises_out      catches OSError, BaseException; suppress OSError
+
+## settings.save
+  kind            replace
+  mkstemp_prefix  '.settings-'
+  mkstemp_suffix  '.json'
+  fdopen          'w' enc='utf-8' nl=-
+  file_fsync      no
+  dir_fsync       no
+  place           os.replace
+  loop            -
+  on_exists       -
+  cleanup         except BaseException
+  raises_out      catches OSError, BaseException; suppress OSError
+
+## layout_ini.keep_layout_for
+  kind            replace
+  mkstemp_prefix  path.name + '.'
+  mkstemp_suffix  '.tmp'
+  fdopen          'w' enc='utf-8' nl=''
+  file_fsync      no
+  dir_fsync       no
+  place           os.replace
+  loop            -
+  on_exists       -
+  cleanup         except BaseException
+  raises_out      catches FileNotFoundError, BaseException, OSError
+
+# Similarity of each core to boardlog.append's (difflib ratio over unparsed lines)
+
+  boardlog.append              1.00
+  brief.write_entry            0.56
+  commandfile._create          0.40
+  requests._append             0.31
+  sessionfile._update          0.55
+  sessions.save_overlay        0.22
+  settings.save                0.22
+  layout_ini.keep_layout_for   0.21
+
+# Core diff: boardlog.append -> brief.write_entry
+
+--- boardlog.append
++++ brief.write_entry
+@@ -1,10 +1,12 @@
+-fd, tmp = tempfile.mkstemp(dir=str(directory), prefix='.record-', suffix='.tmp')
++fd, tmp = tempfile.mkstemp(dir=str(directory), prefix='.entry-', suffix='.md')
+ try:
+-    with os.fdopen(fd, 'wb') as handle:
+-        handle.write(data)
+-        if durable:
+-            handle.flush()
+-            os.fsync(handle.fileno())
++    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
++        if supersedes:
++            handle.write(f"supersedes: {', '.join((f'{o:0{_ORDINAL_WIDTH}d}' for o in supersedes))}\n\n")
++        handle.write(body.rstrip('\n') + '\n')
++        handle.flush()
++        os.fsync(handle.fileno())
+     while True:
+-        target = directory / _name(n)
++        name = kind or (PREMISES if n == 0 else AMENDMENT)
++        target = directory / f'{n:0{_ORDINAL_WIDTH}d}-{name}.md'
+         try:
+
+# Core diff: boardlog.append -> commandfile._create
+
+--- boardlog.append
++++ commandfile._create
+@@ -1,2 +1,2 @@
+-fd, tmp = tempfile.mkstemp(dir=str(directory), prefix='.record-', suffix='.tmp')
++fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=f'.{name}-', suffix='.tmp')
+ try:
+@@ -4,12 +4,8 @@
+         handle.write(data)
+-        if durable:
+-            handle.flush()
+-            os.fsync(handle.fileno())
+-    while True:
+-        target = directory / _name(n)
+-        try:
+-            os.link(tmp, target)
+-            break
+-        except FileExistsError:
+-            n += 1
++        handle.flush()
++        os.fsync(handle.fileno())
++    try:
++        os.link(tmp, target)
++    except FileExistsError:
++        return Unwritten(ALREADY_RECORDED)
+ finally:
+
+# Core diff: boardlog.append -> requests._append
+
+--- boardlog.append
++++ requests._append
+@@ -1,15 +1,13 @@
+-fd, tmp = tempfile.mkstemp(dir=str(directory), prefix='.record-', suffix='.tmp')
++fd, tmp = tempfile.mkstemp(dir=str(directory), prefix='.writing-', suffix='.json')
+ try:
+-    with os.fdopen(fd, 'wb') as handle:
++    with os.fdopen(fd, 'w', encoding='ascii') as handle:
+         handle.write(data)
+-        if durable:
+-            handle.flush()
+-            os.fsync(handle.fileno())
+-    while True:
+-        target = directory / _name(n)
+-        try:
+-            os.link(tmp, target)
+-            break
+-        except FileExistsError:
+-            n += 1
++        handle.flush()
++        os.fsync(handle.fileno())
++    try:
++        os.link(tmp, directory / f'{_stem(series, n)}.json')
++    except FileExistsError:
++        n += 1
++        continue
++    return record
+ finally:
+
+# Core diff: boardlog.append -> sessionfile._update
+
+--- boardlog.append
++++ sessionfile._update
+@@ -1,2 +1,2 @@
+-fd, tmp = tempfile.mkstemp(dir=str(directory), prefix='.record-', suffix='.tmp')
++fd, tmp = tempfile.mkstemp(dir=str(directory), prefix='.session-', suffix='.tmp')
+ try:
+@@ -4,12 +4,11 @@
+         handle.write(data)
+-        if durable:
+-            handle.flush()
+-            os.fsync(handle.fileno())
+-    while True:
+-        target = directory / _name(n)
++        handle.flush()
++        os.fsync(handle.fileno())
++    if isinstance(found, Absent):
+         try:
+             os.link(tmp, target)
+-            break
+         except FileExistsError:
+-            n += 1
++            continue
++    else:
++        os.replace(tmp, target)
+ finally:
+
+# Core diff: boardlog.append -> sessions.save_overlay
+
+--- boardlog.append
++++ sessions.save_overlay
+@@ -1,17 +1,10 @@
+-fd, tmp = tempfile.mkstemp(dir=str(directory), prefix='.record-', suffix='.tmp')
++fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix='.sessions-', suffix='.json')
+ try:
+-    with os.fdopen(fd, 'wb') as handle:
+-        handle.write(data)
+-        if durable:
+-            handle.flush()
+-            os.fsync(handle.fileno())
+-    while True:
+-        target = directory / _name(n)
+-        try:
+-            os.link(tmp, target)
+-            break
+-        except FileExistsError:
+-            n += 1
+-finally:
++    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
++        json.dump(payload, handle, indent=2, sort_keys=True)
++        handle.write('\n')
++    os.replace(tmp, target)
++except BaseException:
+     with contextlib.suppress(OSError):
+         os.unlink(tmp)
++    raise
+
+# Core diff: boardlog.append -> settings.save
+
+--- boardlog.append
++++ settings.save
+@@ -1,17 +1,10 @@
+-fd, tmp = tempfile.mkstemp(dir=str(directory), prefix='.record-', suffix='.tmp')
++fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix='.settings-', suffix='.json')
+ try:
+-    with os.fdopen(fd, 'wb') as handle:
+-        handle.write(data)
+-        if durable:
+-            handle.flush()
+-            os.fsync(handle.fileno())
+-    while True:
+-        target = directory / _name(n)
+-        try:
+-            os.link(tmp, target)
+-            break
+-        except FileExistsError:
+-            n += 1
+-finally:
++    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
++        json.dump(encoded(settings), handle, indent=2, sort_keys=True)
++        handle.write('\n')
++    os.replace(tmp, target)
++except BaseException:
+     with contextlib.suppress(OSError):
+         os.unlink(tmp)
++    raise
+
+# Core diff: boardlog.append -> layout_ini.keep_layout_for
+
+--- boardlog.append
++++ layout_ini.keep_layout_for
+@@ -1,17 +1,11 @@
+-fd, tmp = tempfile.mkstemp(dir=str(directory), prefix='.record-', suffix='.tmp')
++fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=target.name + '.', suffix='.tmp')
+ try:
+-    with os.fdopen(fd, 'wb') as handle:
++    with os.fdopen(fd, 'w', encoding='utf-8', newline='') as handle:
+         handle.write(data)
+-        if durable:
+-            handle.flush()
+-            os.fsync(handle.fileno())
+-    while True:
+-        target = directory / _name(n)
+-        try:
+-            os.link(tmp, target)
+-            break
+-        except FileExistsError:
+-            n += 1
+-finally:
+-    with contextlib.suppress(OSError):
++    os.replace(tmp, target)
++except BaseException:
++    try:
+         os.unlink(tmp)
++    except OSError:
++        pass
++    raise
+

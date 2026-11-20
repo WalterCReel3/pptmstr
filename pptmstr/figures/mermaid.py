@@ -6,7 +6,7 @@ sanitiser (``sanitise``).
 thread: its cost per diagram was measured only on one flowchart (7.6-10 ms), and a
 hostile source could cost much more. ``layout`` refuses to run anywhere else. The child
 parses the sanitised SVG into a bounded display list (``displaylist.from_mermaid``) and
-hands back that, which the pane draws natively (``host.FigureWidget``).
+hands back that, which the pane draws natively (``figure_host.FigureWidget``).
 
 **merman is an optional extra** (``pip install 'pptmstr[mermaid]'``). Its Linux wheel is
 ``manylinux_2_35`` and pptmstr's floor is glibc 2.28, so a required dependency would

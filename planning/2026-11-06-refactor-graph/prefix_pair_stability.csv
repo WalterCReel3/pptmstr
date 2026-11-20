@@ -1,0 +1,82 @@
+cluster,a,b,co_assigned_fraction
+board*+digest,board,boardfacts,0.2
+board*+digest,board,boardgraph,0.77
+board*+digest,board,boardlog,0.0
+board*+digest,board,boardsync,0.0
+board*+digest,board,digest,1.0
+board*+digest,boardfacts,boardgraph,0.4
+board*+digest,boardfacts,boardlog,0.6
+board*+digest,boardfacts,boardsync,0.6
+board*+digest,boardfacts,digest,0.2
+board*+digest,boardgraph,boardlog,0.0
+board*+digest,boardgraph,boardsync,0.0
+board*+digest,boardgraph,digest,0.77
+board*+digest,boardlog,boardsync,1.0
+board*+digest,boardlog,digest,0.0
+board*+digest,boardsync,digest,0.0
+command*+req/appr/shellscan/sandbox,approval,command,0.0
+command*+req/appr/shellscan/sandbox,approval,commandbus,0.0
+command*+req/appr/shellscan/sandbox,approval,commandfile,0.0
+command*+req/appr/shellscan/sandbox,approval,commandrun,0.0
+command*+req/appr/shellscan/sandbox,approval,commandtext,0.0
+command*+req/appr/shellscan/sandbox,approval,requests,0.0
+command*+req/appr/shellscan/sandbox,approval,sandbox,1.0
+command*+req/appr/shellscan/sandbox,approval,shellscan,0.03
+command*+req/appr/shellscan/sandbox,command,commandbus,1.0
+command*+req/appr/shellscan/sandbox,command,commandfile,1.0
+command*+req/appr/shellscan/sandbox,command,commandrun,1.0
+command*+req/appr/shellscan/sandbox,command,commandtext,1.0
+command*+req/appr/shellscan/sandbox,command,requests,0.0
+command*+req/appr/shellscan/sandbox,command,sandbox,0.0
+command*+req/appr/shellscan/sandbox,command,shellscan,0.97
+command*+req/appr/shellscan/sandbox,commandbus,commandfile,1.0
+command*+req/appr/shellscan/sandbox,commandbus,commandrun,1.0
+command*+req/appr/shellscan/sandbox,commandbus,commandtext,1.0
+command*+req/appr/shellscan/sandbox,commandbus,requests,0.0
+command*+req/appr/shellscan/sandbox,commandbus,sandbox,0.0
+command*+req/appr/shellscan/sandbox,commandbus,shellscan,0.97
+command*+req/appr/shellscan/sandbox,commandfile,commandrun,1.0
+command*+req/appr/shellscan/sandbox,commandfile,commandtext,1.0
+command*+req/appr/shellscan/sandbox,commandfile,requests,0.0
+command*+req/appr/shellscan/sandbox,commandfile,sandbox,0.0
+command*+req/appr/shellscan/sandbox,commandfile,shellscan,0.97
+command*+req/appr/shellscan/sandbox,commandrun,commandtext,1.0
+command*+req/appr/shellscan/sandbox,commandrun,requests,0.0
+command*+req/appr/shellscan/sandbox,commandrun,sandbox,0.0
+command*+req/appr/shellscan/sandbox,commandrun,shellscan,0.97
+command*+req/appr/shellscan/sandbox,commandtext,requests,0.0
+command*+req/appr/shellscan/sandbox,commandtext,sandbox,0.0
+command*+req/appr/shellscan/sandbox,commandtext,shellscan,0.97
+command*+req/appr/shellscan/sandbox,requests,sandbox,0.0
+command*+req/appr/shellscan/sandbox,requests,shellscan,0.0
+command*+req/appr/shellscan/sandbox,sandbox,shellscan,0.03
+session*/fleet*/links/channels,channels,fleetsync,0.6
+session*/fleet*/links/channels,channels,links,0.6
+session*/fleet*/links/channels,channels,sessionfile,0.6
+session*/fleet*/links/channels,channels,sessions,0.0
+session*/fleet*/links/channels,fleetsync,links,0.93
+session*/fleet*/links/channels,fleetsync,sessionfile,1.0
+session*/fleet*/links/channels,fleetsync,sessions,0.0
+session*/fleet*/links/channels,links,sessionfile,0.93
+session*/fleet*/links/channels,links,sessions,0.0
+session*/fleet*/links/channels,sessionfile,sessions,0.0
+ui *_pane,ui.board_pane,ui.brief_pane,0.57
+ui *_pane,ui.board_pane,ui.digest_pane,1.0
+ui *_pane,ui.board_pane,ui.rich_pane,0.4
+ui *_pane,ui.board_pane,ui.transcript_pane,0.1
+ui *_pane,ui.brief_pane,ui.digest_pane,0.57
+ui *_pane,ui.brief_pane,ui.rich_pane,0.07
+ui *_pane,ui.brief_pane,ui.transcript_pane,0.27
+ui *_pane,ui.digest_pane,ui.rich_pane,0.4
+ui *_pane,ui.digest_pane,ui.transcript_pane,0.1
+ui *_pane,ui.rich_pane,ui.transcript_pane,0.7
+ui *_view,ui.command_view,ui.decision_view,0.0
+ui *_view,ui.command_view,ui.fleet_view,0.0
+ui *_view,ui.command_view,ui.splash_view,0.0
+ui *_view,ui.decision_view,ui.fleet_view,1.0
+ui *_view,ui.decision_view,ui.splash_view,0.0
+ui *_view,ui.fleet_view,ui.splash_view,0.0
+ui *_form,ui.link_form,ui.resume_form,0.03
+ui *_menu,ui.gate_menu,ui.main_menu,0.03
+ui *_menu,ui.gate_menu,ui.session_menu,0.03
+ui *_menu,ui.main_menu,ui.session_menu,1.0

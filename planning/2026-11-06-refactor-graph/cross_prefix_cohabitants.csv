@@ -1,0 +1,37 @@
+a,a_prefix,b,b_prefix,co_assigned_fraction,edge_weight
+approval,command*+req/appr/shellscan/sandbox,templates,,1.0,12.0
+approval,command*+req/appr/shellscan/sandbox,ui.gate_menu,ui *_menu,1.0,9.0
+approval,command*+req/appr/shellscan/sandbox,ui.health,,0.97,6.0
+approval,command*+req/appr/shellscan/sandbox,ui.launcher,,1.0,27.0
+approval,command*+req/appr/shellscan/sandbox,ui.resume_form,ui *_form,1.0,11.0
+approval,command*+req/appr/shellscan/sandbox,ui.session_details,,1.0,1.0
+approval,command*+req/appr/shellscan/sandbox,ui.widgets,,1.0,9.0
+boardfacts,board*+digest,intents,,1.0,58.0
+boardgraph,board*+digest,bus,,1.0,21.0
+boardgraph,board*+digest,effects,,1.0,1.0
+boardgraph,board*+digest,model,,1.0,53.0
+boardgraph,board*+digest,store,,1.0,1.0
+boardlog,board*+digest,channels,session*/fleet*/links/channels,1.0,39.0
+command,command*+req/appr/shellscan/sandbox,ui.command_view,ui *_view,1.0,87.0
+commandfile,command*+req/appr/shellscan/sandbox,ui.command_view,ui *_view,1.0,2.0
+commandrun,command*+req/appr/shellscan/sandbox,ui.command_view,ui *_view,1.0,1.0
+commandtext,command*+req/appr/shellscan/sandbox,ui.command_view,ui *_view,1.0,19.0
+fleetsync,session*/fleet*/links/channels,intents,,1.0,63.0
+links,session*/fleet*/links/channels,log,,1.0,5.0
+sandbox,command*+req/appr/shellscan/sandbox,ui.launcher,,1.0,3.0
+sessions,session*/fleet*/links/channels,ui.launcher,,1.0,23.0
+sessions,session*/fleet*/links/channels,ui.resume_form,ui *_form,1.0,2.0
+ui.board_pane,ui *_pane,ui.detail,,0.97,2.0
+ui.brief_pane,ui *_pane,ui.typeset,,1.0,1.0
+ui.brief_pane,ui *_pane,ui.typeset.parts,,1.0,5.0
+ui.brief_pane,ui *_pane,ui.typeset.roles,,1.0,4.0
+ui.brief_pane,ui *_pane,ui.typeset.views,,1.0,3.0
+ui.decision_view,ui *_view,ui.rail,,1.0,2.0
+ui.digest_pane,ui *_pane,ui.inbox,,0.97,7.0
+ui.fleet_view,ui *_view,ui.rail,,1.0,1.0
+ui.gate_menu,ui *_menu,ui.health,,0.97,1.0
+ui.link_form,ui *_form,ui.session_menu,ui *_menu,1.0,4.0
+ui.main_menu,ui *_menu,ui.rail,,0.97,1.0
+ui.resume_form,ui *_form,ui.widgets,,1.0,54.0
+ui.rich_pane,ui *_pane,ui.span_layout,,1.0,5.0
+ui.transcript_pane,ui *_pane,ui.typeset.find,,1.0,2.0

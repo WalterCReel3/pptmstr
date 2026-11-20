@@ -23,7 +23,7 @@ left open one level up.
          lights on a task that did exactly what it declared. Wrong, visible, and it
          discredits the one line the operator is meant to trust.
 
-  SILENT ``touches`` is also the input to ``store._auto_depends``, which its own
+  SILENT ``touches`` is also the input to ``store.tasks._auto_depends``, which its own
          docstring calls *"the entire mechanism keeping two agents out of one file,
          mechanical and unbypassable."* It compares normalised strings. Two tasks
          naming the same physical file in different units do not collide, no
@@ -47,7 +47,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from pptmstr import model  # noqa: E402
-from pptmstr.store import _auto_depends  # noqa: E402
+from pptmstr.store.tasks import _auto_depends  # noqa: E402
 
 REPO = "/home/w/repo"
 SUBDIR = "/home/w/repo/pptmstr"

@@ -19,7 +19,7 @@ reach, and `subagent_cap` is bounding the wrong quantity.
 `scripts/verify_sandbox_gate.py`'s structure is the thing to copy: a denial under the
 sandbox means nothing unless the same command demonstrably succeeds without it, so arm
 A runs unsandboxed and establishes that the discriminators discriminate. This probe
-needs a second control on the other axis. Arm B applies `sandbox.containment_settings()`
+needs a second control on the other axis. Arm B applies `gate.sandbox.containment_settings()`
 rather than §8c's hand-written block, so it measures the configuration that ships --
 and that configuration sets `autoAllowBashIfSandboxed: false` where §8c left it at its
 default `true`. A nested write that lands in arm B would then have two explanations:
@@ -76,7 +76,7 @@ from claude_agent_sdk import (  # noqa: E402
 )
 
 from pptmstr.cli_version import read_cli_version, resolve_cli_path  # noqa: E402
-from pptmstr.sandbox import ALLOWED_DOMAIN, containment_settings  # noqa: E402
+from pptmstr.gate.sandbox import ALLOWED_DOMAIN, containment_settings  # noqa: E402
 
 ROOT_ESCAPE = Path.home() / "probe-nested-sandbox-root.txt"
 NESTED_ESCAPE = Path.home() / "probe-nested-sandbox-nested.txt"

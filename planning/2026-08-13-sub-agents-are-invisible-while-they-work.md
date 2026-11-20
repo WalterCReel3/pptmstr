@@ -42,6 +42,9 @@ table at `:531`, and it carries the same defect (active returns `:628-630`, pip 
 `blocked` — an existing checked-in view that renders the bug, captured by someone who
 did not notice the pips had gone.
 
+*2026-11-06:* `scripts/mock_cards.py` has been deleted; see the note under step 4 of
+the plan below.
+
 ## 2. Nothing terminates a sub-agent whose parent stopped listening
 
 `_await_subagents` (`driver.py:945-961`) returns after `SUBAGENT_GRACE_S = 120` with
@@ -197,6 +200,12 @@ border.
    importing the real one. A fixture that reproduces the defect it exists to catch is
    worse than no fixture.
 
+   *2026-11-06:* `scripts/mock_cards.py` is deleted (refactor round 2). Before that its
+   card path had already been replaced by a call to `pptmstr.ui.rail.draw`, so the
+   "lands twice" condition in §1 no longer held; what remained was a hand-drawn inbox and
+   side panes with the same drift risk, and nothing ran it. §1's fix now lands once, in
+   `rail.py`.
+
 ### What this does not give, stated plainly
 
 A sub-agent still gets no topic, spend or context of its own on the rail. If the
@@ -237,3 +246,26 @@ this note is from reading**, by agents with no shell: no test was written to rep
 `driver.py`, `bridge.py`, `app.py`, `approval.py`, `rail.py`, `projects.py`, `focus.py`,
 `health.py` and `mock_cards.py` are unmodified and those citations are against committed
 code.
+
+## Names moved out of approval.py
+
+The text above cites these names in `approval.py`. B5's leaves step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 3) moved them to
+`pptmstr/gate/`; the tool tables went public as they moved. A line number cited
+above is `approval.py`'s when the text was written.
+
+| Cited as | Now |
+|---|---|
+| `approval._REVIEW` | `gate.tools.REVIEW` |
+
+## Names moved by B5's last step
+
+The text above cites these names in `approval.py`. B5's last step
+(`planning/2026-11-07-board-and-gate-packages.md`, Order step 4) split what was
+left of `approval.py` into `pptmstr/gate/` (`rows`, `reach`, `classify`, `park`)
+and deleted it. A line number cited above is the old file's, when the text was
+written.
+
+| Cited as | Now |
+|---|---|
+| `approval.py` | deleted; its parts are `pptmstr/gate/rows.py`, `reach.py`, `classify.py` and `park.py`, beside the leaves |

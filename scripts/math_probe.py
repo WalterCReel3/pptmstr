@@ -11,7 +11,7 @@ each measurement. The write-up is notes/vector-rendering/probe-math.md.
 **Nothing in ``pptmstr/`` is changed.** Each route is put into pptmstr's real
 seam for the run only, by replacing names on its modules from here:
 
-- ``figures.host.is_figure_fence`` also answers for ``math``, so that
+- ``figure_host.is_figure_fence`` also answers for ``math``, so that
   ``views._Captioned`` computes "settled" for a math fence exactly as it does
   for an svg one (committed, or the stream closed);
 - ``views._captioned`` turns a settled math fence into the route's block;
@@ -281,7 +281,7 @@ def _replace(owner: Any, name: str, value: Any) -> None:
 
 def install() -> None:
     """Put the routes into pptmstr's seam for this process."""
-    from pptmstr.figures import host as figures_host
+    from pptmstr.ui.typeset import figure_host as figures_host
     from pptmstr.ui.typeset import themes, views
 
     original_is_figure = figures_host.is_figure_fence
@@ -530,9 +530,9 @@ def main() -> int:
     from imgui_bundle import hello_imgui, imgui, immapp
 
     from pptmstr import theme
-    from pptmstr.figures import host as figure_host
+    from pptmstr.figures import render
     from pptmstr.ui import typeset
-    from pptmstr.ui.typeset import views
+    from pptmstr.ui.typeset import figure_host, views
 
     OUT.mkdir(parents=True, exist_ok=True)
     install()
@@ -879,12 +879,13 @@ def main() -> int:
     )
     params.ini_disable = True
     params.fps_idling.enable_idling = False
-    params.callbacks.load_additional_fonts = theme.load_fonts
+    params.callbacks.load_additional_fonts = typeset.load_application_fonts
     params.callbacks.pre_new_frame = pre_frame
     params.callbacks.show_gui = gui
     params.callbacks.before_swap = before_swap
     theme.set_theme("dark")
     typeset.configure(typeset=True, mono=False)
+    render.install(typeset.figure_fonts)
     immapp.run(params)
     _ = views
     return 0 if ui["done"] else 1

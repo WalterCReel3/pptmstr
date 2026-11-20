@@ -19,19 +19,12 @@ import pytest
 from pptmstr import boardlog, drawable
 from pptmstr.boardfacts import Fact, outcomes
 from pptmstr.boardlog import Clock, RestoredTask
+from pptmstr.channels.records import MAX_CHANNEL_CHARS, Charter
+from pptmstr.ids import is_concern_id
 from pptmstr.intents import AgentSpawned, BoardRestored, Intent, TaskAmended, TaskDeclared
-from pptmstr.model import (
-    MAX_CHANNEL_CHARS,
-    Charter,
-    NodeId,
-    NotPlaced,
-    Provenance,
-    Snapshot,
-    Task,
-    Unplaced,
-    is_concern_id,
-    stated_provenance,
-)
+from pptmstr.journal import codec
+from pptmstr.journal import files as journal_files
+from pptmstr.model import NodeId, NotPlaced, Provenance, Snapshot, Task, Unplaced, stated_provenance
 from pptmstr.store import _apply
 
 S = "s"
@@ -65,9 +58,9 @@ def through_the_disk(tmp_path: Path, facts: list[Fact]) -> boardlog.Board:
     """
     for fact in facts:
         assert fact.session_id == S
-        written = boardlog.append(tmp_path, fact.on_the_wall(_CLOCK), durable=False)
-        assert isinstance(written, boardlog.Written), written
-    log = boardlog.read(tmp_path)
+        written = journal_files.append(tmp_path, fact.on_the_wall(_CLOCK))
+        assert isinstance(written, journal_files.Written), written
+    log = journal_files.read(tmp_path, boardlog.KINDS)
     assert log.damage is None
     return boardlog.restore_log(log)
 
@@ -239,7 +232,7 @@ def test_the_channel_rule_matches_the_whole_name() -> None:
     ``stated_provenance`` trims before the rule runs, so this asks the rule
     itself: a pattern anchored with ``$`` would pass a name ending in a newline.
     """
-    from pptmstr.model import _channel_refusal
+    from pptmstr.channels.records import _channel_refusal
 
     assert _channel_refusal("brand") is None
     assert _channel_refusal("brand\n") is not None
@@ -281,15 +274,15 @@ _NAMES = (
 @pytest.mark.parametrize("name", _NAMES)
 def test_every_channel_name_is_a_name_a_directory_can_have(name: str) -> None:
     """
-    ``model._channel_refusal`` does not import ``requests.address_refusal``
-    (``requests`` imports ``model``), and is narrower than it by construction.
+    ``records._channel_refusal`` does not import ``requests.address_refusal``
+    (``records`` imports nothing from pptmstr), and is narrower than it by construction.
     This keeps the narrowing true: whatever the directory rule refuses, the
     channel rule refuses, and every name the channel rule takes is its own
     drawable form, so the name checked is the name stored and logged. The empty
     name is refused before either runs: a blank channel is no channel.
     """
     from pptmstr import requests
-    from pptmstr.model import _channel_refusal
+    from pptmstr.channels.records import _channel_refusal
 
     if not name:
         assert stated_provenance(name, None, None) is None
@@ -384,7 +377,7 @@ def test_the_store_that_wrote_a_provenance_takes_its_log_back_as_the_same_board(
 def test_a_declaration_with_no_provenance_logs_none(tmp_path: Path) -> None:
     _, facts = apply(started(), declared())
 
-    (record,) = [boardlog.decode(boardlog.encode(f.on_the_wall(_CLOCK))) for f in facts]
+    (record,) = [codec.decode(codec.encode(f.on_the_wall(_CLOCK)), boardlog.KINDS) for f in facts]
 
     assert isinstance(record, boardlog.Declared)
     assert (record.channel, record.re, record.inside_charter) == (None, None, None)
@@ -491,5 +484,5 @@ def test_a_mark_is_written_to_the_log_as_its_word(tmp_path: Path) -> None:
     """
     for mark in Charter:
         _, facts = apply(started(), declared(provenance=Provenance("brand", None, mark)))
-        (text,) = [boardlog.encode(f.on_the_wall(_CLOCK)) for f in facts]
+        (text,) = [codec.encode(f.on_the_wall(_CLOCK)) for f in facts]
         assert f'"inside_charter": "{mark.value}"' in text

@@ -8,6 +8,8 @@ and is not established here: ``scripts/verify_new_pane_keeps_layout.py`` runs it
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -205,6 +207,55 @@ def test_the_file_is_replaced_once_and_then_left(tmp_path: Path) -> None:
     assert ini.stat().st_mtime_ns == before
 
 
+def test_a_crlf_file_is_written_back_with_its_own_line_ends(tmp_path: Path) -> None:
+    saved = SAVED.replace("\n", "\r\n")
+    ini = tmp_path / "pptmstr.ini"
+    ini.write_bytes(saved.encode())
+
+    assert layout_ini.keep_layout_for(ini, "DIGEST", "BOARD") is not None
+    assert ini.read_bytes() == with_window_beside(saved, "DIGEST", "BOARD").encode("utf-8")
+
+
+def test_a_replaced_file_keeps_its_permission_bits(tmp_path: Path) -> None:
+    ini = tmp_path / "pptmstr.ini"
+    ini.write_bytes(SAVED.encode())
+    ini.chmod(0o644)
+
+    assert layout_ini.keep_layout_for(ini, "DIGEST", "BOARD") is not None
+    assert stat.S_IMODE(ini.stat().st_mode) == 0o644
+
+
+def test_a_replaced_file_is_flushed_to_the_device_before_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    So a power loss as well as a process crash leaves the old layout or the new
+    one, never a short file hello_imgui would read as no layout. Patched on the
+    ``os`` module itself: ``ondisk`` calls ``os.fsync`` and ``os.replace`` through
+    it, and it is the same object as ``ondisk.os``.
+    """
+    ini = tmp_path / "pptmstr.ini"
+    ini.write_bytes(SAVED.encode())
+    steps: list[tuple[object, ...]] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd: int) -> None:
+        held = os.fstat(fd)
+        steps.append(("fsync", held.st_ino, os.pread(fd, held.st_size + 1, 0)))
+        real_fsync(fd)
+
+    def rename(src: str, dst: str | os.PathLike[str]) -> None:
+        steps.append(("replace", dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", rename)
+
+    assert layout_ini.keep_layout_for(ini, "DIGEST", "BOARD") is not None
+
+    assert steps == [("fsync", ini.stat().st_ino, ini.read_bytes()), ("replace", ini)]
+
+
 def test_no_file_is_nothing_to_do_and_none_is_made(tmp_path: Path) -> None:
     """A first run: hello_imgui builds both layouts from code, DIGEST included."""
     assert layout_ini.keep_layout_for(tmp_path / "pptmstr.ini", "DIGEST", "BOARD") is None
@@ -220,7 +271,7 @@ def test_a_file_that_cannot_be_replaced_is_left_whole_and_the_failure_is_raised(
     def refuse(*args: object) -> None:
         raise PermissionError("read-only")
 
-    monkeypatch.setattr(layout_ini.os, "replace", refuse)
+    monkeypatch.setattr(os, "replace", refuse)
     with pytest.raises(PermissionError):
         layout_ini.keep_layout_for(ini, "DIGEST", "BOARD")
 

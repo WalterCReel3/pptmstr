@@ -3,11 +3,11 @@ The Gate menu's rows: for each rung, what choosing it would do to this session.
 
 A function of three facts -- the rung the session answers with now, whether its CLI
 process was started with containment, and whether it is running -- and of the ladder
-in ``approval.py``. It draws nothing and calls nothing, so the table can be tested
+in ``gate/policy.py``. It draws nothing and calls nothing, so the table can be tested
 whole, and against the driver's own guard, without a window.
 
 **A rung the running process cannot take is offered as a resume, never as a live
-act.** ``AgentSession.set_policy`` refuses a rung that ``approval.requires_containment``
+act.** ``AgentSession.set_policy`` refuses a rung that ``gate.policy.requires_containment``
 on a session started without containment, because containment is ``--settings`` on the
 CLI's argv and cannot be added to a process that is already running. The same question
 is asked of the same function here, so the row that would be refused is the row that
@@ -49,7 +49,7 @@ import enum
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..approval import Policy, requires_containment
+from ..gate.policy import Policy, requires_containment
 
 __all__ = ["ASKS", "LAST_RUN", "NOW", "RESTARTS", "Kind", "Row", "rows"]
 
